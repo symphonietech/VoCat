@@ -20,6 +20,10 @@ ARG VERSION=0.1.0-dev
 ARG BUILD_TIME=""
 ARG TARGETOS
 ARG TARGETARCH
+# Override on networks that cannot reach the GCS-backed default proxy, e.g.:
+#   docker compose build --build-arg GOPROXY=https://goproxy.cn,direct
+ARG GOPROXY=https://proxy.golang.org,direct
+ENV GOPROXY=${GOPROXY}
 
 COPY go.mod go.sum ./
 RUN go mod download

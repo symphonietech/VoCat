@@ -25,6 +25,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # Set GOPROXY in the shell/.env before building on networks that
+        # cannot reach the default GCS-backed proxy.golang.org, e.g.:
+        #   GOPROXY=https://goproxy.cn,direct docker compose up -d --build
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
     container_name: vocat
     restart: unless-stopped
 
