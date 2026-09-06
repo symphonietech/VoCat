@@ -48,6 +48,12 @@ const (
 	stableModemWaitTimeout      = 45 * time.Second
 	ec20RegistrationGrace       = 2 * time.Minute
 	ec20RegistrationEscalation  = 3 * time.Minute
+
+	// defaultAdminUsername and defaultAdminPassword auto-provision the web
+	// login when no administrator exists yet. Change the password immediately
+	// on any deployment reachable beyond a private lab machine.
+	defaultAdminUsername = "admin"
+	defaultAdminPassword = "admin123"
 )
 
 type registrationRecoveryAction uint8
@@ -481,10 +487,20 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 		return err
 	}
 	if _, adminErr := database.CurrentAdmin(startupContext); adminErr != nil {
-		if errors.Is(adminErr, store.ErrNotFound) {
-			return errors.New("administrator is not initialized; run vocat bootstrap-admin before starting the service")
+		if !errors.Is(adminErr, store.ErrNotFound) {
+			return fmt.Errorf("read administrator: %w", adminErr)
 		}
-		return fmt.Errorf("read administrator: %w", adminErr)
+		// Auto-provision a default administrator on first run so the service is
+		// usable without a separate `vocat bootstrap-admin` step. This is a
+		// known, well-advertised default: change the password immediately on
+		// any deployment reachable beyond a private lab machine.
+		if _, err := authService.EnsureAdminIfMissing(startupContext, defaultAdminUsername, defaultAdminPassword); err != nil {
+			return fmt.Errorf("create default administrator: %w", err)
+		}
+		logger.Warn(
+			"administrator was not initialized; created default credentials, change the password immediately",
+			"username", defaultAdminUsername,
+		)
 	}
 
 	cardReaders := pcsc.New()
