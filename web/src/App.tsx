@@ -22,6 +22,8 @@ import ExtensionPage from "./pages/ExtensionPage";
 const THEME_KEY = "theme";
 const DISCLAIMER_KEY = "vocat_disclaimer_agreed_at";
 const SEVEN_DAYS = 7 * 24 * 60 * 60 * 1000;
+// Flip to true to restore the post-login EULA/disclaimer overlay.
+const DISCLAIMER_ENABLED = false;
 
 function useTheme() {
   const [isDark, setIsDark] = useState<boolean>(() => {
@@ -66,7 +68,7 @@ function AppRoot() {
   const [firstTime, setFirstTime] = useState(true);
 
   useEffect(() => {
-    if (!isAuthenticated) {
+    if (!DISCLAIMER_ENABLED || !isAuthenticated) {
       setShowDisclaimer(false);
       return;
     }
