@@ -70,7 +70,7 @@ export default function SettingsPage() {
   const [loadingHTTPS, setLoadingHTTPS] = useState(false);
   const [savingHTTPS, setSavingHTTPS] = useState(false);
   const [developerSettings, setDeveloperSettings] = useState<DeveloperSettings | null>(null);
-  const [deviceLimit, setDeviceLimit] = useState(5);
+  const [deviceLimit, setDeviceLimit] = useState(1000);
   const [smsHourlyLimit, setSMSHourlyLimit] = useState(10);
   const [loadingDeveloper, setLoadingDeveloper] = useState(false);
   const [savingDeveloper, setSavingDeveloper] = useState(false);
@@ -160,7 +160,7 @@ export default function SettingsPage() {
     } else {
       setHTTPSSettings(null);
       setDeveloperSettings(null);
-      setDeviceLimit(5);
+      setDeviceLimit(1000);
       setSMSHourlyLimit(10);
     }
   }, [systemInfo.developer, fetchHTTPS, fetchDeveloperSettings]);
@@ -180,7 +180,7 @@ export default function SettingsPage() {
   }, [lang]);
 
   const onSaveDeviceLimit = useCallback(async () => {
-    const maximum = developerSettings?.maxDeviceLimit ?? 10;
+    const maximum = developerSettings?.maxDeviceLimit ?? 1000;
     if (!Number.isInteger(deviceLimit) || deviceLimit < 1 || deviceLimit > maximum) {
       message.error(lang === "zh" ? `设备配额必须是 1 到 ${maximum} 的整数` : `Device quota must be an integer between 1 and ${maximum}`);
       return;

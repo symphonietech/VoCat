@@ -38,7 +38,7 @@ export function DeviceQuotaCard({
         <Input
           type="number"
           min={1}
-          max={value?.maxDeviceLimit ?? 10}
+          max={value?.maxDeviceLimit ?? 1000}
           value={Number.isFinite(limit) ? limit : ""}
           disabled={loading || saving}
           onChange={(event) => onLimitChange(Number(event.target.value))}
@@ -46,8 +46,8 @@ export function DeviceQuotaCard({
         />
         <p className="text-xs text-gray-500 dark:text-gray-400">
           {zh
-            ? `恢复默认配置后会自动恢复为 ${value?.defaultDeviceLimit ?? 5} 台，不会删除已经添加的设备。`
-            : `Restoring the default configuration resets the quota to ${value?.defaultDeviceLimit ?? 5}; existing devices are not deleted.`}
+            ? `恢复默认配置后会自动恢复为 ${value?.defaultDeviceLimit ?? 1000} 台，不会删除已经添加的设备。`
+            : `Restoring the default configuration resets the quota to ${value?.defaultDeviceLimit ?? 1000}; existing devices are not deleted.`}
         </p>
         <Button variant="primary" loading={saving} disabled={loading} onClick={onSave} className="w-full !border-0">
           {zh ? "保存设备配额" : "Save device quota"}

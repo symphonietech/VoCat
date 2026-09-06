@@ -108,8 +108,8 @@ func TestStoredLimitsAboveHardMaximumAreClamped(t *testing.T) {
 	}
 	defer database.Close()
 	for key, limit := range map[string]int{
-		DeviceLimitSettingKey: 99,
-		SMSHourlyLimitKey:     99,
+		DeviceLimitSettingKey: MaxDeviceLimit + 1,
+		SMSHourlyLimitKey:     MaxSMSHourlyLimit + 1,
 	} {
 		value, _ := json.Marshal(map[string]int{"limit": limit})
 		if err := database.UpsertAppSetting(ctx, store.AppSetting{Key: key, Value: value}); err != nil {
