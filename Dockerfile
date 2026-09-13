@@ -59,8 +59,8 @@ RUN ln -s /opt/vocat/bin/vocat /usr/local/bin/vocat && \
 # access for modem, QMI, IPsec, and hot-plug support.
 USER root
 VOLUME ["/opt/vocat/data"]
-EXPOSE 7575
-ENV VOCAT_ADDR=0.0.0.0:7575 \
+EXPOSE 7676
+ENV VOCAT_ADDR=0.0.0.0:7676 \
     VOCAT_DATABASE_PATH=/opt/vocat/data/vocat.db
 
 ENTRYPOINT ["/usr/local/bin/vocat-entrypoint"]
