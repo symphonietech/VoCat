@@ -11,6 +11,14 @@
 # Build locally from this repo instead of using the GHCR image:
 #   docker compose up -d --build
 #
+# Version each local build distinctly (embeds the version into the binary
+# itself — vocat version, Settings > System Info, GET /api/system/info — and
+# gives the image its own tag so a later `docker compose pull` cannot
+# silently replace your custom build under the shared ":latest" tag):
+#   VOCAT_TAG=$(git rev-parse --short HEAD) docker compose up -d --build
+# Or just run scripts/docker-build.sh, which computes VOCAT_TAG/VOCAT_BUILD_TIME
+# from the current git state automatically.
+#
 # In-container binary self-update is intentionally disabled (VOCAT_CONTAINER=docker
 # makes the server return 409 on the apply endpoint). Update by pulling a new
 # image and recreating the container:
@@ -18,9 +26,12 @@
 
 services:
   vocat:
-    # Use the prebuilt multi-arch image from GHCR. Override with
-    # --build to compile from the local Dockerfile instead.
-    image: ghcr.io/mengmengcode/vocat:latest
+    # Use the prebuilt multi-arch image from GHCR by default. Override with
+    # --build to compile from the local Dockerfile instead. VOCAT_TAG (see
+    # top-of-file comment) both tags the built image and becomes the binary's
+    # own reported version; it defaults to "latest" so plain `docker compose
+    # pull`/`up` behavior is unchanged when you never set it.
+    image: ghcr.io/mengmengcode/vocat:${VOCAT_TAG:-latest}
     pull_policy: missing
     build:
       context: .
@@ -30,6 +41,8 @@ services:
         # cannot reach the default GCS-backed proxy.golang.org, e.g.:
         #   GOPROXY=https://goproxy.cn,direct docker compose up -d --build
         GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
+        VERSION: ${VOCAT_TAG:-0.1.0-dev}
+        BUILD_TIME: ${VOCAT_BUILD_TIME:-}
     container_name: vocat
     restart: unless-stopped
 
