@@ -247,6 +247,33 @@ Administrator credentials are stored only in SQLite. Initialize an empty
 database once with `vocat bootstrap-admin`; environment variables and JSON
 configuration cannot set or overwrite the administrator username or password.
 
+### API tokens
+
+For scripted or automated access that should not go through the browser
+login flow, issue a long-lived API token instead of using the admin session
+cookie:
+
+```bash
+vocat api-token create --name "my script" --ttl 720h   # 720h = 30 days (default)
+vocat api-token list
+vocat api-token revoke <id>
+```
+
+The raw token is printed once at creation time; only its hash is stored.
+Send it as a bearer credential instead of logging in through the UI:
+
+```bash
+curl -H "Authorization: Bearer <token>" http://<server-address>:7575/api/devices
+```
+
+API tokens authenticate as the single administrator and need no CSRF token
+or cookie, unlike browser sessions. In Docker, run the command inside the
+running container so it reads the same database as the service:
+
+```bash
+docker exec -it vocat vocat api-token create --name "my script"
+```
+
 Do not store Telegram tokens, SMTP passwords, webhook secrets, SIM credentials, or other private data in the repository. Configure them through the application settings or protected environment files.
 
 ## Telegram bot

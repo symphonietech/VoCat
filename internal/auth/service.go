@@ -282,6 +282,100 @@ func (s *Service) Logout(ctx context.Context, sessionToken string) error {
 	return nil
 }
 
+// apiTokenPrefix marks a raw token as a VoCat API token so it is
+// recognizable (e.g. in logs or config files) without decoding it.
+const apiTokenPrefix = "vocat_at_"
+
+// DefaultAPITokenTTL is applied by callers that do not pick their own
+// lifetime (the CLI's --ttl flag, for example).
+const DefaultAPITokenTTL = 30 * 24 * time.Hour
+
+type APITokenInfo struct {
+	ID         int64
+	Name       string
+	CreatedAt  time.Time
+	ExpiresAt  time.Time
+	LastUsedAt *time.Time
+}
+
+// CreateAPIToken mints a new long-lived, non-interactive credential and
+// returns the raw token exactly once; only its SHA-256 hash is persisted.
+func (s *Service) CreateAPIToken(ctx context.Context, name string, ttl time.Duration) (string, APITokenInfo, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", APITokenInfo{}, errors.New("auth: api token name is required")
+	}
+	if ttl <= 0 {
+		return "", APITokenInfo{}, errors.New("auth: api token ttl must be positive")
+	}
+	secret, err := randomToken()
+	if err != nil {
+		return "", APITokenInfo{}, err
+	}
+	rawToken := apiTokenPrefix + secret
+	expiresAt := time.Now().UTC().Add(ttl)
+	record, err := s.store.CreateAPIToken(ctx, name, hashToken(rawToken), expiresAt)
+	if err != nil {
+		return "", APITokenInfo{}, err
+	}
+	return rawToken, APITokenInfo{
+		ID:        record.ID,
+		Name:      record.Name,
+		CreatedAt: record.CreatedAt,
+		ExpiresAt: record.ExpiresAt,
+	}, nil
+}
+
+// AuthenticateAPIToken validates a raw bearer token and returns the
+// principal it grants access as. VoCat has a single administrator, so a
+// valid token always authenticates as the current admin. Expired tokens are
+// deleted so ListAPITokens does not accumulate dead rows.
+func (s *Service) AuthenticateAPIToken(ctx context.Context, rawToken string) (Principal, error) {
+	if rawToken == "" || !strings.HasPrefix(rawToken, apiTokenPrefix) {
+		return Principal{}, ErrUnauthorized
+	}
+	record, err := s.store.APITokenByHash(ctx, hashToken(rawToken))
+	if errors.Is(err, store.ErrNotFound) {
+		return Principal{}, ErrUnauthorized
+	}
+	if err != nil {
+		return Principal{}, fmt.Errorf("auth: load api token: %w", err)
+	}
+	if !record.ExpiresAt.After(time.Now().UTC()) {
+		_ = s.store.DeleteAPIToken(ctx, record.ID)
+		return Principal{}, ErrUnauthorized
+	}
+	admin, err := s.store.CurrentAdmin(ctx)
+	if err != nil {
+		return Principal{}, fmt.Errorf("auth: read administrator: %w", err)
+	}
+	// Best-effort: a failed last-used update must never block the request.
+	_ = s.store.TouchAPIToken(ctx, record.ID, time.Now().UTC())
+	return Principal{ID: admin.ID, Username: admin.Username}, nil
+}
+
+func (s *Service) ListAPITokens(ctx context.Context) ([]APITokenInfo, error) {
+	records, err := s.store.ListAPITokens(ctx)
+	if err != nil {
+		return nil, err
+	}
+	infos := make([]APITokenInfo, 0, len(records))
+	for _, record := range records {
+		infos = append(infos, APITokenInfo{
+			ID:         record.ID,
+			Name:       record.Name,
+			CreatedAt:  record.CreatedAt,
+			ExpiresAt:  record.ExpiresAt,
+			LastUsedAt: record.LastUsedAt,
+		})
+	}
+	return infos, nil
+}
+
+func (s *Service) RevokeAPIToken(ctx context.Context, id int64) error {
+	return s.store.DeleteAPIToken(ctx, id)
+}
+
 // ChangePassword verifies the current password, replaces it with a fresh
 // bcrypt hash and revokes every session through Store.SetAdmin.
 func (s *Service) ChangePassword(

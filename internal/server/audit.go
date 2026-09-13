@@ -80,6 +80,10 @@ func (s *Server) audit(r *http.Request, action string, entityType string, entity
 			if session, authErr := s.auth.Authenticate(r.Context(), cookie.Value); authErr == nil {
 				actor = session.Principal.Username
 			}
+		} else if token, ok := s.bearerToken(r); ok {
+			if principal, authErr := s.auth.AuthenticateAPIToken(r.Context(), token); authErr == nil {
+				actor = principal.Username + " (api token)"
+			}
 		}
 	}
 	s.recordAudit(r.Context(), actor, action, entityType, entityID, outcome, requestRemoteHost(r))

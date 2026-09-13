@@ -425,6 +425,18 @@ func migrationStatements(version int) []string {
 			`CREATE INDEX IF NOT EXISTS sms_messages_subscription_thread_idx
 				ON sms_messages(modem_imei, iccid, imsi, peer, message_time DESC, id DESC)`,
 		}
+	case 24:
+		return []string{
+			`CREATE TABLE IF NOT EXISTS api_tokens (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				name TEXT NOT NULL,
+				token_hash BLOB NOT NULL UNIQUE,
+				created_at INTEGER NOT NULL,
+				expires_at INTEGER NOT NULL,
+				last_used_at INTEGER
+			)`,
+			`CREATE INDEX IF NOT EXISTS api_tokens_expires_at_idx ON api_tokens(expires_at)`,
+		}
 	default:
 		return nil
 	}

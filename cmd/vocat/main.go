@@ -396,6 +396,11 @@ func main() {
 			logger.Error("bootstrap admin failed", "error", err)
 			os.Exit(1)
 		}
+	case "api-token":
+		if err := runAPIToken(rest, logger); err != nil {
+			logger.Error("api-token failed", "error", err)
+			os.Exit(1)
+		}
 	case "help", "-h", "--help":
 		printUsage(os.Stdout)
 	default:

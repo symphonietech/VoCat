@@ -377,7 +377,12 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
 	}
-	if r.Method != http.MethodGet &&
+	// A bearer API token is immune to CSRF (browsers cannot attach a custom
+	// Authorization header cross-site), and it has no session cookie to pair
+	// a double-submit token against, so the CSRF flow below applies only to
+	// cookie-authenticated requests.
+	_, viaBearer := s.bearerToken(r)
+	if !viaBearer && r.Method != http.MethodGet &&
 		r.Method != http.MethodHead &&
 		r.Method != http.MethodOptions {
 		sessionToken, ok := s.sessionToken(w, r)
@@ -472,7 +477,41 @@ func (s *Server) sessionToken(w http.ResponseWriter, r *http.Request) (string, b
 	return cookie.Value, true
 }
 
+const bearerAuthPrefix = "Bearer "
+
+// bearerToken extracts a raw API token from an Authorization: Bearer header.
+// It does not validate the token; callers pass it to auth.AuthenticateAPIToken.
+func (s *Server) bearerToken(r *http.Request) (string, bool) {
+	header := r.Header.Get("Authorization")
+	if !strings.HasPrefix(header, bearerAuthPrefix) {
+		return "", false
+	}
+	token := strings.TrimSpace(strings.TrimPrefix(header, bearerAuthPrefix))
+	if token == "" {
+		return "", false
+	}
+	return token, true
+}
+
+// requireAuthenticated accepts either an API token (Authorization: Bearer)
+// or a browser session cookie. A request carrying an Authorization header is
+// treated as token auth exclusively — it never falls back to the cookie, so
+// a bad or expired token fails the request instead of silently degrading to
+// a different identity.
 func (s *Server) requireAuthenticated(w http.ResponseWriter, r *http.Request) bool {
+	if token, ok := s.bearerToken(r); ok {
+		if _, err := s.auth.AuthenticateAPIToken(r.Context(), token); err != nil {
+			if errors.Is(err, auth.ErrUnauthorized) {
+				w.Header().Set("Cache-Control", "no-store")
+				writeError(w, http.StatusUnauthorized, "unauthorized", "authentication is required")
+			} else {
+				s.logger.Error("API token authentication failed", "error", err)
+				writeError(w, http.StatusInternalServerError, "internal_error", "an internal error occurred")
+			}
+			return false
+		}
+		return true
+	}
 	sessionToken, ok := s.sessionToken(w, r)
 	if !ok {
 		return false

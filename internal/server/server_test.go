@@ -52,6 +52,7 @@ func TestUserOperationLoggerExcludesReadTraffic(t *testing.T) {
 type testApplication struct {
 	server *httptest.Server
 	client *http.Client
+	auth   *auth.Service
 }
 
 func newTestApplication(t *testing.T) testApplication {
@@ -95,6 +96,7 @@ func newTestApplication(t *testing.T) testApplication {
 	return testApplication{
 		server: httpServer,
 		client: &http.Client{Jar: jar},
+		auth:   authService,
 	}
 }
 
@@ -421,5 +423,89 @@ func TestUIPreferencesDefaultPublicReadAndPersistedWrite(t *testing.T) {
 	}
 	if status, language := readLanguage(); status != http.StatusOK || language != "zh" {
 		t.Fatalf("persisted preferences = %d %q", status, language)
+	}
+}
+
+func TestBearerAPITokenAuthenticatesWithoutCookieOrCSRF(t *testing.T) {
+	app := newTestApplication(t)
+	ctx := context.Background()
+
+	rawToken, _, err := app.auth.CreateAPIToken(ctx, "ci", time.Hour)
+	if err != nil {
+		t.Fatalf("CreateAPIToken() error = %v", err)
+	}
+
+	// A plain client with no cookie jar: the token alone must carry auth.
+	bearerClient := &http.Client{}
+
+	getRequest, err := http.NewRequest(http.MethodGet, app.server.URL+"/api/system/info", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	getRequest.Header.Set("Authorization", "Bearer "+rawToken)
+	getResponse, err := bearerClient.Do(getRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	getResponse.Body.Close()
+	if getResponse.StatusCode != http.StatusOK {
+		t.Fatalf("bearer GET status = %d, want 200", getResponse.StatusCode)
+	}
+
+	// PUT is a mutating request: with cookie auth this would 403 without a
+	// matching CSRF header, but a bearer token needs no CSRF token at all.
+	putBody := bytes.NewBufferString(`{"language":"zh"}`)
+	putRequest, err := http.NewRequest(http.MethodPut, app.server.URL+"/api/settings/preferences", putBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	putRequest.Header.Set("Authorization", "Bearer "+rawToken)
+	putRequest.Header.Set("Content-Type", "application/json")
+	putResponse, err := bearerClient.Do(putRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	putResponse.Body.Close()
+	if putResponse.StatusCode != http.StatusOK {
+		t.Fatalf("bearer PUT status = %d, want 200", putResponse.StatusCode)
+	}
+}
+
+func TestBearerAPITokenRejectsInvalidOrExpiredToken(t *testing.T) {
+	app := newTestApplication(t)
+	ctx := context.Background()
+	client := &http.Client{}
+
+	badRequest, err := http.NewRequest(http.MethodGet, app.server.URL+"/api/system/info", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	badRequest.Header.Set("Authorization", "Bearer vocat_at_not-a-real-token")
+	badResponse, err := client.Do(badRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	badResponse.Body.Close()
+	if badResponse.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("bad token status = %d, want 401", badResponse.StatusCode)
+	}
+
+	expiredToken, _, err := app.auth.CreateAPIToken(ctx, "short-lived", time.Nanosecond)
+	if err != nil {
+		t.Fatalf("CreateAPIToken() error = %v", err)
+	}
+	time.Sleep(time.Millisecond)
+	expiredRequest, err := http.NewRequest(http.MethodGet, app.server.URL+"/api/system/info", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expiredRequest.Header.Set("Authorization", "Bearer "+expiredToken)
+	expiredResponse, err := client.Do(expiredRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expiredResponse.Body.Close()
+	if expiredResponse.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expired token status = %d, want 401", expiredResponse.StatusCode)
 	}
 }

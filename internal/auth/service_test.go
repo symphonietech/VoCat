@@ -185,3 +185,85 @@ func TestEnsureAdminIfMissingDoesNotOverwriteChangedPassword(t *testing.T) {
 		t.Fatalf("stale configured password became active: %v", err)
 	}
 }
+
+func TestCreateAndAuthenticateAPIToken(t *testing.T) {
+	ctx := context.Background()
+	service := newTestService(t)
+
+	rawToken, info, err := service.CreateAPIToken(ctx, "ci script", time.Hour)
+	if err != nil {
+		t.Fatalf("CreateAPIToken() error = %v", err)
+	}
+	if !strings.HasPrefix(rawToken, apiTokenPrefix) {
+		t.Fatalf("raw token = %q, want prefix %q", rawToken, apiTokenPrefix)
+	}
+	if info.Name != "ci script" {
+		t.Fatalf("info.Name = %q", info.Name)
+	}
+
+	principal, err := service.AuthenticateAPIToken(ctx, rawToken)
+	if err != nil {
+		t.Fatalf("AuthenticateAPIToken() error = %v", err)
+	}
+	if principal.Username != "admin" {
+		t.Fatalf("principal = %+v, want admin", principal)
+	}
+
+	if _, err := service.AuthenticateAPIToken(ctx, "vocat_at_not-a-real-token"); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("AuthenticateAPIToken(garbage) error = %v, want ErrUnauthorized", err)
+	}
+	if _, err := service.AuthenticateAPIToken(ctx, ""); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("AuthenticateAPIToken(empty) error = %v, want ErrUnauthorized", err)
+	}
+
+	tokens, err := service.ListAPITokens(ctx)
+	if err != nil {
+		t.Fatalf("ListAPITokens() error = %v", err)
+	}
+	if len(tokens) != 1 || tokens[0].ID != info.ID {
+		t.Fatalf("ListAPITokens() = %+v", tokens)
+	}
+	if tokens[0].LastUsedAt == nil {
+		t.Fatal("LastUsedAt was not updated by AuthenticateAPIToken")
+	}
+
+	if err := service.RevokeAPIToken(ctx, info.ID); err != nil {
+		t.Fatalf("RevokeAPIToken() error = %v", err)
+	}
+	if _, err := service.AuthenticateAPIToken(ctx, rawToken); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("AuthenticateAPIToken() after revoke error = %v, want ErrUnauthorized", err)
+	}
+}
+
+func TestAPITokenExpires(t *testing.T) {
+	ctx := context.Background()
+	service := newTestService(t)
+
+	rawToken, _, err := service.CreateAPIToken(ctx, "short-lived", time.Nanosecond)
+	if err != nil {
+		t.Fatalf("CreateAPIToken() error = %v", err)
+	}
+	time.Sleep(time.Millisecond)
+	if _, err := service.AuthenticateAPIToken(ctx, rawToken); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("AuthenticateAPIToken(expired) error = %v, want ErrUnauthorized", err)
+	}
+	tokens, err := service.ListAPITokens(ctx)
+	if err != nil {
+		t.Fatalf("ListAPITokens() error = %v", err)
+	}
+	if len(tokens) != 0 {
+		t.Fatalf("expired token was not pruned: %+v", tokens)
+	}
+}
+
+func TestCreateAPITokenValidatesInput(t *testing.T) {
+	ctx := context.Background()
+	service := newTestService(t)
+
+	if _, _, err := service.CreateAPIToken(ctx, "", time.Hour); err == nil {
+		t.Fatal("CreateAPIToken() with empty name should fail")
+	}
+	if _, _, err := service.CreateAPIToken(ctx, "name", 0); err == nil {
+		t.Fatal("CreateAPIToken() with non-positive ttl should fail")
+	}
+}

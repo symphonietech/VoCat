@@ -44,6 +44,12 @@ Usage:
   vocat menu         Interactive lifecycle menu (root on the host):
                        toggle language, change password, change the Web port,
                        restart, update, uninstall.
+  vocat api-token    Manage long-lived, non-interactive API credentials that
+                     authenticate as "Authorization: Bearer <token>" instead
+                     of a browser session cookie.
+                       create --name NAME [--ttl 720h]   (default 30 days)
+                       list
+                       revoke ID
   vocat help         Show this help message.
 
 When run without a subcommand on a non-TTY (e.g. systemd), vocat starts the
