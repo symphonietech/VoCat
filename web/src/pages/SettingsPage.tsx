@@ -74,7 +74,7 @@ export default function SettingsPage() {
   const [savingHTTPS, setSavingHTTPS] = useState(false);
   const [developerSettings, setDeveloperSettings] = useState<DeveloperSettings | null>(null);
   const [deviceLimit, setDeviceLimit] = useState(1000);
-  const [smsHourlyLimit, setSMSHourlyLimit] = useState(10);
+  const [smsHourlyLimit, setSMSHourlyLimit] = useState(999999);
   const [loadingDeveloper, setLoadingDeveloper] = useState(false);
   const [savingDeveloper, setSavingDeveloper] = useState(false);
   const [savingSMSLimit, setSavingSMSLimit] = useState(false);
@@ -180,7 +180,7 @@ export default function SettingsPage() {
       setHTTPSSettings(null);
       setDeveloperSettings(null);
       setDeviceLimit(1000);
-      setSMSHourlyLimit(10);
+      setSMSHourlyLimit(999999);
     }
   }, [systemInfo.developer, fetchHTTPS, fetchDeveloperSettings]);
 
@@ -218,7 +218,7 @@ export default function SettingsPage() {
   }, [developerSettings, deviceLimit, lang]);
 
   const onSaveSMSHourlyLimit = useCallback(async () => {
-    const maximum = developerSettings?.maxSmsHourlyLimit ?? 20;
+    const maximum = developerSettings?.maxSmsHourlyLimit ?? 999999;
     if (!Number.isInteger(smsHourlyLimit) || smsHourlyLimit < 1 || smsHourlyLimit > maximum) {
       message.error(lang === "zh" ? `短信发送限制必须是 1 到 ${maximum} 的整数` : `SMS limit must be an integer between 1 and ${maximum}`);
       return;

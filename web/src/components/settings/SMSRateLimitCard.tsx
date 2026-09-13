@@ -38,7 +38,7 @@ export function SMSRateLimitCard({
         <Input
           type="number"
           min={1}
-          max={value?.maxSmsHourlyLimit ?? 20}
+          max={value?.maxSmsHourlyLimit ?? 999999}
           value={Number.isFinite(limit) ? limit : ""}
           disabled={loading || saving}
           onChange={(event) => onLimitChange(Number(event.target.value))}

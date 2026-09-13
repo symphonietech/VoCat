@@ -29,8 +29,8 @@ const (
 	AutoClearModemStorageKey = "sms.auto_clear_modem_storage"
 	DefaultDeviceLimit       = 1000
 	MaxDeviceLimit           = 1000
-	DefaultSMSHourlyLimit    = 10
-	MaxSMSHourlyLimit        = 20
+	DefaultSMSHourlyLimit    = 999999
+	MaxSMSHourlyLimit        = 999999
 )
 
 func DeviceLimit(ctx context.Context, database *store.Store, enabled bool) int {
