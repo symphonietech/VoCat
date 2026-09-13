@@ -5,6 +5,12 @@
  * 富文本片段（嵌套链接/代码块的说明框）不走字典，在组件里按语言分支渲染。
  */
 export const EN_DICT: Record<string, string> = {
+  "VoWiFi MTU 兼容模式": "VoWiFi MTU compatibility mode",
+  "改善部分系统因网络包大小限制导致的注册失败": "Help resolve registration failures caused by packet size limits on some systems",
+  "默认关闭。遇到 MTU 不足导致的 VoWiFi 连接问题时可尝试开启。此设置适用于所有设备，保存后请重连 VoWiFi。": "Off by default. Try enabling this if MTU limits cause VoWiFi connection problems. Applies to all devices; reconnect VoWiFi after saving.",
+  "VoWiFi 兼容设置加载失败": "Failed to load VoWiFi compatibility settings",
+  "VoWiFi 兼容设置保存失败": "Failed to save VoWiFi compatibility settings",
+  "设置已保存，请重连 VoWiFi 后生效": "Settings saved. Reconnect VoWiFi to apply.",
 	"未知设备": "Unknown device",
 	"系统已发现 USB 读卡器，但 PC/SC 服务未运行；请安装并启动 pcscd 后重新扫描。": "The USB card reader was found, but the PC/SC service is not running. Install and start pcscd, then scan again.",
 	"系统已发现 USB 读卡器，但 PC/SC 驱动未加载；请安装 libccid 或厂商驱动后重新扫描。": "The USB card reader was found, but its PC/SC driver is not loaded. Install libccid or the vendor driver, then scan again.",
@@ -1259,4 +1265,16 @@ export const EN_DICT: Record<string, string> = {
   "VoLTE 可用": "VoLTE available",
   "VoLTE 未就绪": "VoLTE not ready",
   "设备离线，无法读取或修改模组 IMS 配置。": "The device is offline; its modem IMS configuration cannot be read or changed.",
+  "自动清理模组短信存储": "Auto-clear modem SMS storage",
+  "入库成功后删除模组 SM/ME 副本，网页记录保留":
+    "Delete the modem SM/ME copy after VoCat saves the message; the web inbox is kept",
+  "模组 ME 存储通常只有二十多格。关闭后 VoCat 仍会同步到数据库，但不再删除模组原件，存满后可能收不到新短信。":
+    "Modem ME storage is often only about twenty slots. Turning this off still syncs into the database but leaves the modem copies, so a full mailbox can block new SMS.",
+  "短信存储设置加载失败": "Failed to load SMS storage settings",
+  "短信存储设置保存失败": "Failed to save SMS storage settings",
+  "已开启模组短信自动清理": "Modem SMS auto-clear is on",
+  "已关闭模组短信自动清理": "Modem SMS auto-clear is off",
+  "模组短信存储已满，新短信可能无法接收": "Modem SMS storage is full; new messages may not be received",
+  "SIM 短信存储已满，新短信可能无法接收": "SIM SMS storage is full; new messages may not be received",
+  "模组和 SIM 短信存储已满，新短信可能无法接收": "Modem and SIM SMS storage are full; new messages may not be received",
 };
