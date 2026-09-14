@@ -1339,4 +1339,6 @@ export const EN_DICT: Record<string, string> = {
   "接口配置加载失败": "Failed to load endpoints",
   "测试计划加载失败": "Failed to load schedules",
   "测试结果加载失败": "Failed to load test results",
+  "图形视图": "Chart view",
+  "表格视图": "Table view",
 };

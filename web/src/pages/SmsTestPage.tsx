@@ -23,10 +23,12 @@ import {
   Tabs,
   Tag,
   Textarea,
+  Tooltip,
   confirmDialog,
   message,
 } from "../components/ui";
 import { useI18n } from "../lib/i18n";
+import { cx } from "../lib/utils";
 
 type TabKey = "statistics" | "schedules" | "endpoints";
 
@@ -92,6 +94,40 @@ function statusLabel(status: string, zh: boolean): string {
   const entry = STATUS_LABELS[status];
   if (!entry) return status;
   return zh ? entry.zh : entry.en;
+}
+
+// Delivery latency is a magnitude, so the dot strip bands it into a short
+// severity scale instead of a rainbow: exact timings live in the hover
+// tooltip. Colours are validated for colour-vision deficiency, and every band
+// also differs in shape so the state never rests on colour alone.
+type DotKind = "fast" | "slow" | "late" | "failed" | "external" | "pending";
+
+const DOT_BANDS: {
+  kind: DotKind;
+  zh: string;
+  en: string;
+  className: string;
+}[] = [
+  { kind: "fast", zh: "30 秒内送达", en: "Under 30s", className: "rounded-full bg-[#16a34a] dark:bg-[#4ade80]" },
+  { kind: "slow", zh: "30–60 秒", en: "30-60s", className: "rounded-full bg-[#d9a404] dark:bg-[#facc15]" },
+  { kind: "late", zh: "超过 60 秒", en: "Over 60s", className: "rounded-full bg-[#dc2626] dark:bg-[#f87171]" },
+  { kind: "failed", zh: "未收到 / 超时", en: "Never arrived", className: "rounded-[2px] bg-[#dc2626] dark:bg-[#f87171]" },
+  { kind: "external", zh: "外部号码（仅发送）", en: "External (send only)", className: "rotate-45 rounded-[2px] bg-[#2563eb] dark:bg-[#60a5fa]" },
+  { kind: "pending", zh: "等待接收", en: "Waiting", className: "animate-pulse rounded-full border-2 border-gray-500 bg-white dark:border-gray-300 dark:bg-transparent" },
+];
+
+const DOT_CLASS = new Map(DOT_BANDS.map((band) => [band.kind, band.className]));
+
+function dotKind(result: SMSTestResult, schedule?: SMSTestSchedule): DotKind {
+  if (result.status === "pending") return "pending";
+  if (result.status === "failed") return "failed";
+  if (result.status === "sent" || schedule?.isExternal) return "external";
+  if (result.receivedAt && result.elapsedMs !== null && result.elapsedMs !== undefined) {
+    if (result.elapsedMs < 30_000) return "fast";
+    if (result.elapsedMs < 60_000) return "slow";
+    return "late";
+  }
+  return "fast";
 }
 
 function statusType(status: string): "success" | "warning" | "danger" | "info" {
@@ -192,7 +228,7 @@ export default function SmsTestPage() {
   const [results, setResults] = useState<SMSTestResult[]>([]);
   const [summary, setSummary] = useState<Record<string, number>>({});
   const [hours, setHours] = useState(24);
-  const [scheduleFilter, setScheduleFilter] = useState("");
+  const [detailView, setDetailView] = useState(false);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
 
@@ -221,15 +257,13 @@ export default function SmsTestPage() {
 
   const loadResults = useCallback(async () => {
     try {
-      const query = new URLSearchParams({ hours: String(hours) });
-      if (scheduleFilter) query.set("scheduleId", scheduleFilter);
-      const data = await api<SMSTestResultsResponse>(`/smstest/results?${query.toString()}`);
+      const data = await api<SMSTestResultsResponse>(`/smstest/results?hours=${hours}`);
       setResults(data.results ?? []);
       setSummary(data.summary ?? {});
     } catch (error) {
       message.error(apiMessage(error) || t("测试结果加载失败"));
     }
-  }, [hours, scheduleFilter, t]);
+  }, [hours, t]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -258,6 +292,21 @@ export default function SmsTestPage() {
     for (const schedule of schedules) names.set(schedule.id, schedule.name || schedule.id);
     return names;
   }, [schedules]);
+
+  // Results arrive newest first; the dot strip reads left to right as time
+  // moving forward, so each schedule's row is reversed into oldest-first.
+  const resultsBySchedule = useMemo(() => {
+    const grouped = new Map<string, SMSTestResult[]>();
+    for (const result of results) {
+      const bucket = grouped.get(result.scheduleId);
+      if (bucket) bucket.push(result);
+      else grouped.set(result.scheduleId, [result]);
+    }
+    for (const bucket of grouped.values()) {
+      bucket.sort((left, right) => left.sentAt.localeCompare(right.sentAt));
+    }
+    return grouped;
+  }, [results]);
 
   function openEndpointEditor(endpoint?: SMSTestEndpoint) {
     if (!endpoint) {
@@ -421,37 +470,50 @@ export default function SmsTestPage() {
 
       {tab === "statistics" && (
         <div className="space-y-4">
-          <div className="flex flex-wrap items-end gap-3">
-            <label className="space-y-1.5 text-sm">
-              <span>{t("时间范围")}</span>
-              <Select
-                value={String(hours)}
-                onChange={(value) => setHours(Number(value))}
-                options={[
-                  { value: "1", label: t("最近 1 小时") },
-                  { value: "24", label: t("最近 24 小时") },
-                  { value: "168", label: t("最近 7 天") },
-                  { value: "720", label: t("最近 30 天") },
-                ]}
-              />
-            </label>
-            <label className="space-y-1.5 text-sm">
-              <span>{t("测试计划")}</span>
-              <Select
-                value={scheduleFilter}
-                onChange={setScheduleFilter}
-                options={[
-                  { value: "", label: t("全部") },
-                  ...schedules.map((schedule) => ({
-                    value: schedule.id,
-                    label: schedule.name || schedule.id,
-                  })),
-                ]}
-              />
-            </label>
-            <Button variant="default" loading={loading} onClick={() => void loadResults()}>
-              {t("刷新")}
-            </Button>
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex gap-1">
+              {[
+                { value: 1, label: "1h" },
+                { value: 6, label: "6h" },
+                { value: 24, label: "24h" },
+                { value: 168, label: "7d" },
+              ].map((window) => (
+                <button
+                  key={window.value}
+                  type="button"
+                  onClick={() => setHours(window.value)}
+                  className={cx(
+                    "rounded-full px-3 py-1 text-xs font-medium transition-colors",
+                    hours === window.value
+                      ? "bg-[#0ea5e9] text-white"
+                      : "bg-gray-200 text-gray-600 hover:bg-gray-300 dark:bg-white/10 dark:text-gray-300 dark:hover:bg-white/20",
+                  )}
+                >
+                  {window.label}
+                </button>
+              ))}
+            </div>
+            <div className="ml-auto flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setDetailView((value) => !value)}
+                className="rounded-full bg-gray-200 px-3 py-1 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-300 dark:bg-white/10 dark:text-gray-300 dark:hover:bg-white/20"
+              >
+                {detailView ? t("图形视图") : t("表格视图")}
+              </button>
+              <Button size="small" variant="default" loading={loading} onClick={() => void loadResults()}>
+                {t("刷新")}
+              </Button>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap gap-x-4 gap-y-2 text-xs text-gray-500 dark:text-gray-400">
+            {DOT_BANDS.map((band) => (
+              <span key={band.kind} className="flex items-center gap-1.5">
+                <span className={cx("inline-block h-2.5 w-2.5 shrink-0", band.className)} />
+                {zh ? band.zh : band.en}
+              </span>
+            ))}
           </div>
 
           <div className="grid grid-cols-2 gap-4 sm:grid-cols-5">
@@ -469,44 +531,127 @@ export default function SmsTestPage() {
             ))}
           </div>
 
-          <div className="ui-card overflow-x-auto">
-            <table className="w-full min-w-[720px] text-sm">
-              <thead className="border-b border-gray-200/70 text-left text-xs uppercase text-gray-500 dark:border-white/10 dark:text-gray-400">
-                <tr>
-                  <th className="px-4 py-3">{t("测试计划")}</th>
-                  <th className="px-4 py-3">{t("校验码")}</th>
-                  <th className="px-4 py-3">{t("状态")}</th>
-                  <th className="px-4 py-3">{t("发送时间")}</th>
-                  <th className="px-4 py-3">{t("接收时间")}</th>
-                  <th className="px-4 py-3">{t("耗时")}</th>
-                  <th className="px-4 py-3">{t("接收设备")}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {results.length === 0 ? (
+          {detailView ? (
+            <div className="ui-card overflow-x-auto">
+              <table className="w-full min-w-[720px] text-sm">
+                <thead className="border-b border-gray-200/70 text-left text-xs uppercase text-gray-500 dark:border-white/10 dark:text-gray-400">
                   <tr>
-                    <td className="px-4 py-8 text-center text-gray-400" colSpan={7}>
-                      {t("暂无测试结果")}
-                    </td>
+                    <th className="px-4 py-3">{t("测试计划")}</th>
+                    <th className="px-4 py-3">{t("校验码")}</th>
+                    <th className="px-4 py-3">{t("状态")}</th>
+                    <th className="px-4 py-3">{t("发送时间")}</th>
+                    <th className="px-4 py-3">{t("接收时间")}</th>
+                    <th className="px-4 py-3">{t("耗时")}</th>
+                    <th className="px-4 py-3">{t("接收设备")}</th>
                   </tr>
-                ) : (
-                  results.map((result) => (
-                    <tr key={result.id} className="border-b border-gray-100 last:border-0 dark:border-white/5">
-                      <td className="px-4 py-3">{scheduleNames.get(result.scheduleId) ?? result.scheduleId}</td>
-                      <td className="px-4 py-3 font-mono text-xs">{result.code}</td>
-                      <td className="px-4 py-3">
-                        <Tag type={statusType(result.status)}>{statusLabel(result.status, zh)}</Tag>
+                </thead>
+                <tbody>
+                  {results.length === 0 ? (
+                    <tr>
+                      <td className="px-4 py-8 text-center text-gray-400" colSpan={7}>
+                        {t("暂无测试结果")}
                       </td>
-                      <td className="px-4 py-3">{formatTimestamp(result.sentAt)}</td>
-                      <td className="px-4 py-3">{formatTimestamp(result.receivedAt)}</td>
-                      <td className="px-4 py-3">{formatElapsed(result)}</td>
-                      <td className="px-4 py-3">{result.deviceId || "--"}</td>
                     </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
+                  ) : (
+                    results.map((result) => (
+                      <tr key={result.id} className="border-b border-gray-100 last:border-0 dark:border-white/5">
+                        <td className="px-4 py-3">{scheduleNames.get(result.scheduleId) ?? result.scheduleId}</td>
+                        <td className="px-4 py-3 font-mono text-xs">{result.code}</td>
+                        <td className="px-4 py-3">
+                          <Tag type={statusType(result.status)}>{statusLabel(result.status, zh)}</Tag>
+                        </td>
+                        <td className="px-4 py-3">{formatTimestamp(result.sentAt)}</td>
+                        <td className="px-4 py-3">{formatTimestamp(result.receivedAt)}</td>
+                        <td className="px-4 py-3">{formatElapsed(result)}</td>
+                        <td className="px-4 py-3">{result.deviceId || "--"}</td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          ) : schedules.length === 0 ? (
+            <div className="ui-card py-12 text-center text-sm text-gray-400">{t("暂无测试计划")}</div>
+          ) : (
+            <div className="space-y-4">
+              {schedules.map((schedule) => {
+                const scheduleResults = resultsBySchedule.get(schedule.id) ?? [];
+                return (
+                  <div key={schedule.id} className="ui-card p-4">
+                    <div className="mb-3 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-medium">{schedule.name || schedule.id}</span>
+                        <span className="text-xs text-gray-400">
+                          {zh
+                            ? `每 ${schedule.frequencyMinutes} 分钟`
+                            : `every ${schedule.frequencyMinutes} min`}
+                        </span>
+                        {schedule.isExternal && (
+                          <span className="text-xs text-[#2563eb] dark:text-[#60a5fa]">{t("外部号码")}</span>
+                        )}
+                        {!schedule.enabled && (
+                          <span className="text-xs text-[#d9a404] dark:text-[#facc15]">{t("已停用")}</span>
+                        )}
+                      </div>
+                      <div className="flex flex-wrap items-center gap-3 text-xs text-gray-400">
+                        <span>
+                          {t("接收号码")}: {schedule.recipient}
+                        </span>
+                        {schedule.sender && (
+                          <span className="hidden sm:inline">
+                            {t("发送方标识")}: {schedule.sender}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    {scheduleResults.length === 0 ? (
+                      <p className="text-xs text-gray-400">{t("暂无测试结果")}</p>
+                    ) : (
+                      <div className="flex flex-wrap items-center gap-1">
+                        {scheduleResults.map((result) => (
+                          <Tooltip
+                            key={result.id}
+                            content={
+                              <span className="block space-y-0.5 text-left">
+                                <span className="block">
+                                  {t("发送时间")}: {formatTimestamp(result.sentAt)}
+                                </span>
+                                <span className="block">
+                                  {t("状态")}: {statusLabel(result.status, zh)}
+                                </span>
+                                <span className="block">
+                                  {t("校验码")}: {result.code}
+                                </span>
+                                {result.receivedAt && (
+                                  <span className="block">
+                                    {t("接收时间")}: {formatTimestamp(result.receivedAt)} ({formatElapsed(result)})
+                                  </span>
+                                )}
+                                {result.deviceId && (
+                                  <span className="block">
+                                    {t("接收设备")}: {result.deviceId}
+                                  </span>
+                                )}
+                              </span>
+                            }
+                          >
+                            <span
+                              tabIndex={0}
+                              aria-label={`${statusLabel(result.status, zh)} ${result.code}`}
+                              className={cx(
+                                "inline-block h-3 w-3 cursor-pointer outline-none transition-transform hover:scale-150 focus:scale-150",
+                                DOT_CLASS.get(dotKind(result, schedule)),
+                              )}
+                            />
+                          </Tooltip>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
 
