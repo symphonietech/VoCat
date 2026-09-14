@@ -50,13 +50,16 @@ type ReceivedSMS struct {
 	Text                   string
 	Timestamp              time.Time
 	ServiceCenterTimestamp *time.Time
-	Encoding               device.SMSEncoding
-	Concat                 *device.SMSConcatInfo
-	RPReference            int
-	CallID                 string
-	RawRPDU                string
-	RawTPDU                string
-	DecodeError            string
+	// ServiceCenter is the SCA taken from the RP-Originator Address. It is
+	// empty when the network omitted the field or it failed to decode.
+	ServiceCenter string
+	Encoding      device.SMSEncoding
+	Concat        *device.SMSConcatInfo
+	RPReference   int
+	CallID        string
+	RawRPDU       string
+	RawTPDU       string
+	DecodeError   string
 }
 
 // ReceivedSMSStatus is network delivery evidence for one submitted SMS part.
@@ -563,6 +566,7 @@ func (session *Session) processSMSMessage(request *sipRequest) {
 			Text:                   message.Text,
 			Timestamp:              receivedAt,
 			ServiceCenterTimestamp: serviceCenterTimestamp,
+			ServiceCenter:          rpdu.originator,
 			Encoding:               message.Encoding,
 			Concat:                 message.Concat,
 			RPReference:            int(rpdu.reference),
@@ -1292,7 +1296,11 @@ func runtimeSecurityHeaders(active bool, verifyValue string) []string {
 type rpMessage struct {
 	messageType byte
 	reference   byte
-	tpdu        []byte
+	// originator is the RP-Originator Address. On a network-to-mobile
+	// RP-DATA this is the service centre that delivered the message, which
+	// is the only place an IMS-delivered SMS carries its SCA.
+	originator string
+	tpdu       []byte
 }
 
 func parseRPDU(data []byte) (rpMessage, error) {
@@ -1312,6 +1320,11 @@ func parseRPDU(data []byte) (rpMessage, error) {
 		index++
 		if length > len(data)-index {
 			return rpMessage{}, errors.New("ims: RP-DATA address length is invalid")
+		}
+		// The originator address comes first; the destination address is
+		// empty on a mobile-terminated message.
+		if count == 0 && length > 0 {
+			result.originator = decodeRPAddress(data[index : index+length])
 		}
 		index += length
 	}
@@ -1344,6 +1357,36 @@ func buildRPData(reference byte, smsc string, tpdu []byte) ([]byte, error) {
 
 func buildRPError(reference byte, cause byte) []byte {
 	return []byte{0x04, reference, 0x01, cause & 0x7f}
+}
+
+// decodeRPAddress reads an RP address field: one type-of-address octet
+// followed by BCD digit pairs in swapped nibble order, padded with 0xF.
+// It returns an empty string rather than an error, because a malformed
+// service-centre address must not discard an otherwise valid message.
+func decodeRPAddress(field []byte) string {
+	if len(field) < 2 {
+		return ""
+	}
+	typeOfAddress := field[0]
+	var builder strings.Builder
+	// Type-of-number 001 (international) is the only form that implies a
+	// leading "+".
+	if typeOfAddress&0x70 == 0x10 {
+		builder.WriteByte('+')
+	}
+	for _, octet := range field[1:] {
+		for _, digit := range []byte{octet & 0x0f, octet >> 4} {
+			if digit == 0x0f {
+				// Padding half-octet: the address ends here.
+				return builder.String()
+			}
+			if digit > 9 {
+				return ""
+			}
+			builder.WriteByte('0' + digit)
+		}
+	}
+	return builder.String()
 }
 
 func encodeRPAddress(value string) ([]byte, error) {

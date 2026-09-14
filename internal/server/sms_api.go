@@ -768,6 +768,7 @@ func (s *Server) syncModemSMS(ctx context.Context, onlyDevice string) {
 				"storage":            message.Storage,
 				"storage_status":     message.StorageStatus,
 				"encoding":           message.Encoding,
+				"service_center":     message.ServiceCenter,
 				"concat":             message.Concat,
 				"decode_error":       message.DecodeError,
 				"status_code":        message.StatusCode,
@@ -1116,7 +1117,8 @@ func (s *Server) StartSMSSyncLoop(ctx context.Context, interval time.Duration) {
 }
 
 func storedSMSResponse(message store.SMSMessage) map[string]any {
-	return map[string]any{
+	serviceCenter, serviceCenterTime, receivedAt := smsReceiptDetails(message)
+	response := map[string]any{
 		"id":             message.ID,
 		"message_id":     message.MessageID,
 		"device_id":      message.DeviceID,
@@ -1136,7 +1138,54 @@ func storedSMSResponse(message store.SMSMessage) map[string]any {
 		"source":         message.Source,
 		"parts_total":    message.PartsTotal,
 		"delivery_state": message.DeliveryState,
+		"service_center": serviceCenter,
+		"received_at":    receivedAt,
 	}
+	if serviceCenterTime != nil {
+		response["service_center_timestamp"] = *serviceCenterTime
+	} else {
+		response["service_center_timestamp"] = nil
+	}
+	return response
+}
+
+// smsReceiptDetails resolves the service-centre address, the service-centre
+// timestamp and this server's own receipt time from a stored row. The two
+// ingest paths record them differently: a cellular AT message carries the
+// service-centre timestamp as its primary timestamp, while an IMS message
+// times itself locally and keeps the service-centre clock in extra_json.
+// Rows written before those fields existed simply resolve to empty.
+func smsReceiptDetails(message store.SMSMessage) (string, *time.Time, time.Time) {
+	var extra struct {
+		ServiceCenter          string     `json:"service_center"`
+		ServiceCenterTimestamp *time.Time `json:"service_center_timestamp"`
+		ReceivedAt             *time.Time `json:"received_at"`
+		// Rows rewritten by the schema-v4 migration store unix seconds.
+		ServiceCenterTimestampUnix int64 `json:"service_center_timestamp_unix"`
+		ReceivedAtUnix             int64 `json:"received_at_unix"`
+	}
+	if len(message.Extra) > 0 {
+		_ = json.Unmarshal(message.Extra, &extra)
+	}
+
+	serviceCenterTime := extra.ServiceCenterTimestamp
+	if serviceCenterTime == nil && extra.ServiceCenterTimestampUnix > 0 {
+		value := time.Unix(extra.ServiceCenterTimestampUnix, 0).UTC()
+		serviceCenterTime = &value
+	}
+	if serviceCenterTime == nil && message.Source != "ims" {
+		value := message.Timestamp
+		serviceCenterTime = &value
+	}
+
+	receivedAt := message.CreatedAt
+	switch {
+	case extra.ReceivedAt != nil:
+		receivedAt = *extra.ReceivedAt
+	case extra.ReceivedAtUnix > 0:
+		receivedAt = time.Unix(extra.ReceivedAtUnix, 0).UTC()
+	}
+	return extra.ServiceCenter, serviceCenterTime, receivedAt
 }
 
 func reverseSMS(messages []store.SMSMessage) {

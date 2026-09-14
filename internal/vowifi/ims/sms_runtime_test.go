@@ -988,3 +988,71 @@ func (*fakeConn) RemoteAddr() net.Addr {
 func (*fakeConn) SetDeadline(time.Time) error      { return nil }
 func (*fakeConn) SetReadDeadline(time.Time) error  { return nil }
 func (*fakeConn) SetWriteDeadline(time.Time) error { return nil }
+
+func TestDecodeRPAddress(t *testing.T) {
+	cases := []struct {
+		name  string
+		field []byte
+		want  string
+	}{
+		// TOA 0x91 = international; digits are BCD pairs in swapped nibble
+		// order, so 0x21 0x43 0x65 reads as 123456.
+		{"international even digits", []byte{0x91, 0x21, 0x43, 0x65}, "+123456"},
+		// A trailing 0xF nibble pads an odd digit count.
+		{"international odd digits", []byte{0x91, 0x21, 0x43, 0xF5}, "+12345"},
+		{"national number", []byte{0x81, 0x21, 0x43}, "1234"},
+		{"empty field", []byte{}, ""},
+		{"only type of address", []byte{0x91}, ""},
+		{"invalid digit", []byte{0x91, 0xAB}, ""},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := decodeRPAddress(testCase.field); got != testCase.want {
+				t.Fatalf("decodeRPAddress(% X) = %q, want %q", testCase.field, got, testCase.want)
+			}
+		})
+	}
+}
+
+func TestParseRPDUExtractsServiceCentreAddress(t *testing.T) {
+	// RP-DATA (network to mobile): message type 1, reference 0x2A,
+	// RP-OA = +8613800100500, empty RP-DA, then a one-octet user data field.
+	originator := []byte{0x91, 0x68, 0x31, 0x08, 0x10, 0x00, 0x05, 0xF0}
+	frame := []byte{0x01, 0x2A, byte(len(originator))}
+	frame = append(frame, originator...)
+	frame = append(frame, 0x00)       // RP-DA length 0
+	frame = append(frame, 0x02, 0xAB, 0xCD) // RP-UD length 2 + TPDU
+
+	parsed, err := parseRPDU(frame)
+	if err != nil {
+		t.Fatalf("parseRPDU() error = %v", err)
+	}
+	if parsed.originator != "+8613800100500" {
+		t.Fatalf("originator = %q", parsed.originator)
+	}
+	if parsed.reference != 0x2A {
+		t.Fatalf("reference = %#x", parsed.reference)
+	}
+	if len(parsed.tpdu) != 2 || parsed.tpdu[0] != 0xAB {
+		t.Fatalf("tpdu = % X", parsed.tpdu)
+	}
+}
+
+// A malformed service-centre address must never cost us the message.
+func TestParseRPDUKeepsMessageWhenAddressIsUndecodable(t *testing.T) {
+	originator := []byte{0x91, 0xAB}
+	frame := []byte{0x01, 0x07, byte(len(originator))}
+	frame = append(frame, originator...)
+	frame = append(frame, 0x00, 0x01, 0x42)
+
+	parsed, err := parseRPDU(frame)
+	if err != nil {
+		t.Fatalf("parseRPDU() error = %v", err)
+	}
+	if parsed.originator != "" {
+		t.Fatalf("originator = %q, want empty", parsed.originator)
+	}
+	if len(parsed.tpdu) != 1 || parsed.tpdu[0] != 0x42 {
+		t.Fatalf("tpdu = % X, want the message to survive", parsed.tpdu)
+	}
+}

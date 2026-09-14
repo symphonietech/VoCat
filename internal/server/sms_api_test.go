@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -774,5 +775,110 @@ func TestHandleSMSSendEnforcesGlobalHourlyLimit(t *testing.T) {
 	}
 	if envelope.Error.Code != "sms_rate_limited" {
 		t.Fatalf("error code = %q, want sms_rate_limited", envelope.Error.Code)
+	}
+}
+
+func TestSMSReceiptDetailsResolvesPerSource(t *testing.T) {
+	smscTime := time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
+	ingestTime := time.Date(2026, 9, 14, 10, 0, 12, 0, time.UTC)
+
+	t.Run("cellular AT uses the row timestamp as the service centre clock", func(t *testing.T) {
+		message := store.SMSMessage{
+			Source:    "cellular_at",
+			Timestamp: smscTime,
+			CreatedAt: ingestTime,
+			Extra:     json.RawMessage(`{"service_center":"+8613800100500"}`),
+		}
+		center, centerTime, receivedAt := smsReceiptDetails(message)
+		if center != "+8613800100500" {
+			t.Fatalf("service centre = %q", center)
+		}
+		if centerTime == nil || !centerTime.Equal(smscTime) {
+			t.Fatalf("service centre time = %v, want %v", centerTime, smscTime)
+		}
+		if !receivedAt.Equal(ingestTime) {
+			t.Fatalf("received at = %v, want the ingest time %v", receivedAt, ingestTime)
+		}
+	})
+
+	t.Run("IMS reads both clocks from extra", func(t *testing.T) {
+		message := store.SMSMessage{
+			Source:    "ims",
+			Timestamp: ingestTime,
+			CreatedAt: ingestTime,
+			Extra: json.RawMessage(`{
+				"service_center":"+8613800100500",
+				"service_center_timestamp":"2026-09-14T10:00:00Z",
+				"received_at":"2026-09-14T10:00:12Z"
+			}`),
+		}
+		center, centerTime, receivedAt := smsReceiptDetails(message)
+		if center != "+8613800100500" {
+			t.Fatalf("service centre = %q", center)
+		}
+		if centerTime == nil || !centerTime.Equal(smscTime) {
+			t.Fatalf("service centre time = %v, want %v", centerTime, smscTime)
+		}
+		if !receivedAt.Equal(ingestTime) {
+			t.Fatalf("received at = %v", receivedAt)
+		}
+	})
+
+	t.Run("migrated rows read the unix variants", func(t *testing.T) {
+		message := store.SMSMessage{
+			Source:    "ims",
+			Timestamp: ingestTime,
+			CreatedAt: time.Unix(0, 0).UTC(),
+			Extra: json.RawMessage(fmt.Sprintf(
+				`{"service_center_timestamp_unix":%d,"received_at_unix":%d}`,
+				smscTime.Unix(), ingestTime.Unix())),
+		}
+		_, centerTime, receivedAt := smsReceiptDetails(message)
+		if centerTime == nil || !centerTime.Equal(smscTime) {
+			t.Fatalf("service centre time = %v, want %v", centerTime, smscTime)
+		}
+		if !receivedAt.Equal(ingestTime) {
+			t.Fatalf("received at = %v, want %v", receivedAt, ingestTime)
+		}
+	})
+
+	t.Run("an IMS row with no extra reports no service centre clock", func(t *testing.T) {
+		message := store.SMSMessage{Source: "ims", Timestamp: ingestTime, CreatedAt: ingestTime}
+		center, centerTime, receivedAt := smsReceiptDetails(message)
+		if center != "" {
+			t.Fatalf("service centre = %q, want empty", center)
+		}
+		// Claiming the local clock as the network's would be a lie.
+		if centerTime != nil {
+			t.Fatalf("service centre time = %v, want nil", centerTime)
+		}
+		if !receivedAt.Equal(ingestTime) {
+			t.Fatalf("received at = %v", receivedAt)
+		}
+	})
+}
+
+func TestStoredSMSResponseCarriesReceiptDetails(t *testing.T) {
+	message := store.SMSMessage{
+		ID:        7,
+		Source:    "cellular_at",
+		Direction: "inbound",
+		Peer:      "+15551234567",
+		Timestamp: time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC),
+		CreatedAt: time.Date(2026, 9, 14, 10, 0, 9, 0, time.UTC),
+		Extra:     json.RawMessage(`{"service_center":"+8613800100500"}`),
+	}
+	response := storedSMSResponse(message)
+	if response["service_center"] != "+8613800100500" {
+		t.Fatalf("service_center = %v", response["service_center"])
+	}
+	if response["sender"] != "+15551234567" {
+		t.Fatalf("sender = %v", response["sender"])
+	}
+	if response["service_center_timestamp"] == nil {
+		t.Fatal("service_center_timestamp missing")
+	}
+	if response["received_at"] == nil {
+		t.Fatal("received_at missing")
 	}
 }

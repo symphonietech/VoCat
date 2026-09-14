@@ -13,6 +13,47 @@ import {
 } from "./smsText";
 import { tf, useI18n } from "../../lib/i18n";
 
+function formatReceiptTime(value?: string | null): string {
+  if (!value) return "";
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? "" : parsed.toLocaleString();
+}
+
+// ReceiptDetails shows how a received message reached this server: the
+// service-centre address it came through, when the service centre stamped
+// it, and when this server actually stored it. Each line is omitted when
+// the underlying value is unknown, so messages received before these
+// fields were recorded simply show nothing extra.
+function ReceiptDetails({ message }: { message: SMSMessage }) {
+  const { t } = useI18n();
+  const serviceCenterTime = formatReceiptTime(message.serviceCenterTimestamp);
+  const receivedAt = formatReceiptTime(message.receivedAt);
+  const serviceCenter = (message.serviceCenter || "").trim();
+  if (!serviceCenterTime && !receivedAt && !serviceCenter) return null;
+  return (
+    <div className="mt-2 space-y-0.5 border-t border-gray-100 pt-2 font-mono text-[10px] leading-relaxed text-gray-400 dark:border-white/10 dark:text-gray-500">
+      {serviceCenterTime ? (
+        <div>
+          <span className="select-none">{t("短信中心时间")}: </span>
+          <span className="select-all">{serviceCenterTime}</span>
+        </div>
+      ) : null}
+      {receivedAt ? (
+        <div>
+          <span className="select-none">{t("模组接收时间")}: </span>
+          <span className="select-all">{receivedAt}</span>
+        </div>
+      ) : null}
+      {serviceCenter ? (
+        <div>
+          <span className="select-none">SCA: </span>
+          <span className="select-all">{serviceCenter}</span>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export interface ThreadPanelProps {
   isMobile: boolean;
   isDesktop: boolean;
@@ -196,6 +237,7 @@ export function ThreadPanel(props: ThreadPanelProps) {
   )}
 >
   {messageBody(m)}
+  {!outbound ? <ReceiptDetails message={m} /> : null}
 </div>
 </div>
         </div>

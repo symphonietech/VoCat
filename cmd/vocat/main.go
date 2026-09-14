@@ -1201,6 +1201,7 @@ func newVoWiFiOrchestrator(
 				"call_id":                  message.CallID,
 				"received_at":              message.Timestamp,
 				"service_center_timestamp": message.ServiceCenterTimestamp,
+				"service_center":           message.ServiceCenter,
 				"raw_rpdu":                 message.RawRPDU,
 				"raw_tpdu":                 message.RawTPDU,
 				"decode_error":             message.DecodeError,

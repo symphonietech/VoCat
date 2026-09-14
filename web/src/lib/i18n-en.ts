@@ -1341,4 +1341,6 @@ export const EN_DICT: Record<string, string> = {
   "测试结果加载失败": "Failed to load test results",
   "图形视图": "Chart view",
   "表格视图": "Table view",
+  "短信中心时间": "SMSC time",
+  "模组接收时间": "Modem received",
 };

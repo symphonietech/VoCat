@@ -345,6 +345,11 @@ export interface SMSMessage {
   status: string;
   source?: string;
   deliveryState?: string;
+  // Service-centre address (SCA) and the two clocks a received message
+  // carries: when the service centre handled it, and when this server did.
+  serviceCenter?: string;
+  serviceCenterTimestamp?: string | null;
+  receivedAt?: string;
 }
 
 export interface UpstreamProxy {
