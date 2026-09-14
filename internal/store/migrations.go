@@ -437,6 +437,58 @@ func migrationStatements(version int) []string {
 			)`,
 			`CREATE INDEX IF NOT EXISTS api_tokens_expires_at_idx ON api_tokens(expires_at)`,
 		}
+	case 25:
+		return []string{
+			// SMS delivery testing: an endpoint describes an external SMS
+			// gateway API, a schedule drives recurring sends through it, and a
+			// result records one send plus the inbound message that matched its
+			// one-time code.
+			`CREATE TABLE IF NOT EXISTS smstest_endpoints (
+				id TEXT PRIMARY KEY,
+				name TEXT NOT NULL DEFAULT '',
+				method TEXT NOT NULL DEFAULT 'POST',
+				url TEXT NOT NULL DEFAULT '',
+				username TEXT NOT NULL DEFAULT '',
+				password TEXT NOT NULL DEFAULT '',
+				headers TEXT NOT NULL DEFAULT '[]',
+				body_params TEXT NOT NULL DEFAULT '[]',
+				created_at INTEGER NOT NULL,
+				updated_at INTEGER NOT NULL
+			)`,
+			`CREATE TABLE IF NOT EXISTS smstest_schedules (
+				id TEXT PRIMARY KEY,
+				name TEXT NOT NULL DEFAULT '',
+				endpoint_id TEXT NOT NULL DEFAULT '',
+				recipient TEXT NOT NULL DEFAULT '',
+				sender TEXT NOT NULL DEFAULT '',
+				content_template TEXT NOT NULL DEFAULT '',
+				code_type TEXT NOT NULL DEFAULT 'digits',
+				code_length INTEGER NOT NULL DEFAULT 6,
+				frequency_minutes INTEGER NOT NULL DEFAULT 60,
+				start_time TEXT NOT NULL DEFAULT '',
+				enabled INTEGER NOT NULL DEFAULT 0,
+				is_external INTEGER NOT NULL DEFAULT 0,
+				last_run_at INTEGER,
+				created_at INTEGER NOT NULL,
+				updated_at INTEGER NOT NULL
+			)`,
+			`CREATE TABLE IF NOT EXISTS smstest_results (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				schedule_id TEXT NOT NULL,
+				sent_at INTEGER NOT NULL,
+				received_at INTEGER,
+				code TEXT NOT NULL DEFAULT '',
+				status TEXT NOT NULL DEFAULT 'pending',
+				send_response TEXT NOT NULL DEFAULT '',
+				device_id TEXT NOT NULL DEFAULT '',
+				created_at INTEGER NOT NULL,
+				FOREIGN KEY (schedule_id) REFERENCES smstest_schedules(id) ON DELETE CASCADE
+			)`,
+			`CREATE INDEX IF NOT EXISTS smstest_results_schedule_idx
+				ON smstest_results(schedule_id, sent_at DESC)`,
+			`CREATE INDEX IF NOT EXISTS smstest_results_status_idx
+				ON smstest_results(status, sent_at)`,
+		}
 	default:
 		return nil
 	}

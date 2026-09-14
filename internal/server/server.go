@@ -23,6 +23,7 @@ import (
 	"vocat/internal/extensions"
 	"vocat/internal/httpsmode"
 	"vocat/internal/loghub"
+	"vocat/internal/smstest"
 	"vocat/internal/store"
 	"vocat/internal/update"
 	"vocat/internal/vowifi"
@@ -50,6 +51,7 @@ type Options struct {
 	UpdateRepository    string
 	UpdateToken         string
 	HTTPS               *httpsmode.Manager
+	SMSTest             *smstest.Scheduler
 }
 
 // Server is the single HTTP handler for the JSON API and embedded SPA.
@@ -97,6 +99,7 @@ type Server struct {
 	cellularDataEventOnce     sync.Once
 	cellularDataLifecycleOnce sync.Once
 	cellularData              *cellularDataRuntime
+	smsTest                   *smstest.Scheduler
 }
 
 func New(options Options) (*Server, error) {
@@ -145,6 +148,7 @@ func New(options Options) (*Server, error) {
 		updateRepository:    strings.TrimSpace(options.UpdateRepository),
 		updateToken:         strings.TrimSpace(options.UpdateToken),
 		https:               options.HTTPS,
+		smsTest:             options.SMSTest,
 		netTraffic:          newLiveNetTracker(),
 		hostStats:           newHostStatsSampler(),
 		publicIPs:           make(map[string]cachedPublicIP),

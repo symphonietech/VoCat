@@ -36,6 +36,9 @@ func (s *Server) routeGeneralAPI(w http.ResponseWriter, r *http.Request) bool {
 	if s.routeSMSAPI(w, r, cleanPath) {
 		return true
 	}
+	if s.routeSMSTestAPI(w, r, cleanPath) {
+		return true
+	}
 	if s.routeProxyAPI(w, r, cleanPath) {
 		return true
 	}
