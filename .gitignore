@@ -57,6 +57,3 @@ Thumbs.db
 # ---- Claude Code / agent ----
 .claude/
 .worktrees/
-
-# ---- Docker bind-mounted runtime state (see docker-compose.yml) ----
-/data/

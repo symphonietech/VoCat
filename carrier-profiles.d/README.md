@@ -1,21 +1,15 @@
 # Carrier profile overrides
 
-VoCat reads carrier profile overrides from `carrier-profiles.d/` inside its
-data directory — `/opt/vocat/data/carrier-profiles.d` in the container, which
-`docker-compose.yml` bind-mounts to `./data/carrier-profiles.d` on the host
-(or `$VOCAT_DATA_DIR/carrier-profiles.d`). Create the directory if it is not
-there yet; a missing one simply means no overrides.
-
-Files are loaded **once at startup**, after the profile database compiled into
-the binary. Restart the container after editing:
+Files in this directory are bind-mounted into the container at
+`/opt/vocat/data/carrier-profiles.d` by `docker-compose.yml` and are loaded
+**once at startup**, after the profile database compiled into the binary.
+Restart the container after editing:
 
 ```sh
 docker compose restart vocat
 ```
 
-Only `*.json` files directly in that directory are read — no
-subdirectories, no symlinks. Each file is capped at 1 MiB and the directory
-at 256 entries.
+Only `*.json` files are read. This `README.md` is ignored.
 
 ## File format
 
@@ -75,5 +69,5 @@ A malformed `.json` aborts startup rather than being skipped, which under
 `restart: unless-stopped` becomes a restart loop:
 
 ```sh
-python3 -m json.tool < data/carrier-profiles.d/your-file.json
+python3 -m json.tool < carrier-profiles.d/your-file.json
 ```

@@ -28,9 +28,6 @@
 #   VOCAT_TAG         image tag AND the version compiled into the binary
 #   VOCAT_BUILD_TIME  build timestamp compiled into the binary
 #   VOCAT_PORT        host port to listen on (default 7676)
-#   VOCAT_DATA_DIR    host directory holding all server state (default
-#                     ./data) — see the volumes section for how to migrate
-#                     off the named volume earlier versions of this file used
 #   GOPROXY           Go module proxy, for networks that cannot reach
 #                     the GCS-backed proxy.golang.org, e.g.
 #                     GOPROXY=https://goproxy.cn,direct
@@ -83,42 +80,39 @@ services:
       VOCAT_ADDR: 0.0.0.0:${VOCAT_PORT:-7676}
 
     volumes:
-      # The entire server state directory, bind-mounted to the host so all of
-      # it survives `docker compose down -v`, image rebuilds and container
-      # recreates, and so it can be backed up with ordinary file tools. It
-      # holds everything the server writes:
-      #   vocat.db (+ -wal, -shm)  devices, SMS, users, API tokens, settings
-      #   carrier-profiles.d/      carrier profile overrides (see
-      #                            docs/carrier-profiles.md)
-      #   plugins/                 installed plugins and their own data/
-      #   tls/                     self-signed certificate for HTTPS mode
-      # Subdirectories are created on demand; an empty or missing host
-      # directory is a valid fresh install.
+      # SQLite database and all persistent state. VoCat also derives the
+      # carrier profile directory from the database location, so
+      # carrier-profiles.d lands inside this volume by default.
       #
-      # Override the host location with VOCAT_DATA_DIR. Use an absolute path
-      # on a NAS (QNAP Container Station, Synology) — e.g.
-      #   VOCAT_DATA_DIR=/share/Container/vocat/data
-      # so bootstrap-admin and the running service cannot end up pointed at
-      # different files, which surfaces as "Incorrect password". Keep it on a
-      # local filesystem: SQLite's locking is unreliable over NFS/SMB, and on
-      # Docker Desktop's file sharing rather than a native Linux filesystem.
+      # NAS note (QNAP Container Station, Synology): replace this named volume
+      # with a host absolute path — e.g. /share/Container/vocat/data — because
+      # volume isolation there can point bootstrap-admin and the running
+      # service at different files, which surfaces as "Incorrect password".
+      - vocat-data:/opt/vocat/data
+
+      # Carrier profile overrides, bind-mounted so they can be edited with a
+      # normal editor and tracked in git. Each .json file here overrides the
+      # built-in profile database compiled into the binary; a rule only wins
+      # if its `match` is at least as specific as the built-in rule for the
+      # same SIM, and the winner replaces rather than merges. Loaded once at
+      # startup, so restart after editing. Format and worked example:
+      # carrier-profiles.d/README.md
       #
-      # The container runs as root, so these files are root-owned on the host.
-      #
-      # MIGRATING from the named volume this file used previously: copy the
-      # data out before the first `up`, or the server will find an empty
-      # directory and auto-provision a fresh admin/admin123, and your devices
-      # and messages will look lost while still sitting in the old volume.
-      #   docker compose down
-      #   docker volume ls | grep vocat        # confirm the name
-      #   mkdir -p ./data
-      #   docker run --rm -v vocat_vocat-data:/from -v "$PWD/data":/to \
-      #     alpine sh -c 'cd /from && cp -a . /to'
-      # Verify ./data contains vocat.db, then `docker compose up -d`. Keep the
-      # old volume until you have confirmed the UI shows your data.
-      - ${VOCAT_DATA_DIR:-./data}:/opt/vocat/data
+      # WARNING, two sharp edges:
+      #  - This shadows any carrier-profiles.d already inside the named
+      #    volume. If you created profiles there with `docker exec`, copy them
+      #    out before the first `up` with this mount:
+      #      docker compose cp vocat:/opt/vocat/data/carrier-profiles.d/. ./carrier-profiles.d/
+      #  - A malformed .json aborts startup rather than being skipped, which
+      #    with `restart: unless-stopped` becomes a restart loop. Validate
+      #    before restarting:
+      #      python3 -m json.tool < carrier-profiles.d/your-file.json
+      - ./carrier-profiles.d:/opt/vocat/data/carrier-profiles.d
 
       # Required for modem, MHI/WWAN and PC/SC USB-reader discovery, including
       # devices attached after the container starts.
       - /dev:/dev
       - /sys:/sys:ro
+
+volumes:
+  vocat-data:
