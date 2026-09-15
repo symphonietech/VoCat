@@ -1,46 +1,51 @@
-# VoCat Docker Compose deployment.
+# VoCat Docker Compose deployment (test-tool branch).
 #
-# First-time setup (password is read from stdin and stored only in SQLite):
-#   docker compose pull
-#   read -rsp "Admin password: " VOCAT_BOOTSTRAP_PASSWORD; echo
-#   printf '%s\n' "$VOCAT_BOOTSTRAP_PASSWORD" | docker compose run --rm -T \
-#     --entrypoint /opt/vocat/bin/vocat vocat bootstrap-admin
-#   unset VOCAT_BOOTSTRAP_PASSWORD
-#   docker compose up -d
+# Quick start — build from this checkout and run:
+#   ./scripts/docker-build.sh
 #
-# Build locally from this repo instead of using the GHCR image:
-#   docker compose up -d --build
-#
-# Version each local build distinctly (embeds the version into the binary
-# itself — vocat version, Settings > System Info, GET /api/system/info — and
-# gives the image its own tag so a later `docker compose pull` cannot
-# silently replace your custom build under the shared ":latest" tag):
+# That script derives a version from the current git state and runs
+# `docker compose up -d --build`. The equivalent by hand:
 #   VOCAT_TAG=$(git rev-parse --short HEAD) docker compose up -d --build
-# Or just run scripts/docker-build.sh, which computes VOCAT_TAG/VOCAT_BUILD_TIME
-# from the current git state automatically.
 #
-# In-container binary self-update is intentionally disabled (VOCAT_CONTAINER=docker
-# makes the server return 409 on the apply endpoint). Update by pulling a new
-# image and recreating the container:
-#   docker compose pull && docker compose up -d
+# Then open http://<host>:7676 and sign in. On a fresh database this branch
+# auto-provisions admin/admin123 on first start and logs a warning — change
+# that password immediately from Settings on anything reachable beyond your
+# own machine. To choose the password up front instead, initialise the
+# database before the first `up` (it is read from stdin, never from argv or
+# the environment):
+#   read -rsp "Admin password: " P; echo
+#   printf '%s\n' "$P" | docker compose run --rm -T \
+#     --entrypoint /opt/vocat/bin/vocat vocat bootstrap-admin
+#   unset P
+#
+# Updating: in-container binary self-update is intentionally disabled
+# (VOCAT_CONTAINER=docker makes the server return 409 on the apply endpoint),
+# because a replaced binary would not survive the next recreate. Update by
+# rebuilding from a newer checkout:
+#   git pull && ./scripts/docker-build.sh
+#
+# Environment variables this file reads (all optional):
+#   VOCAT_TAG         image tag AND the version compiled into the binary
+#   VOCAT_BUILD_TIME  build timestamp compiled into the binary
+#   VOCAT_PORT        host port to listen on (default 7676)
+#   GOPROXY           Go module proxy, for networks that cannot reach
+#                     the GCS-backed proxy.golang.org, e.g.
+#                     GOPROXY=https://goproxy.cn,direct
 
 services:
   vocat:
-    # Use the prebuilt multi-arch image from GHCR by default. Override with
-    # --build to compile from the local Dockerfile instead. VOCAT_TAG (see
-    # top-of-file comment) both tags the built image and becomes the binary's
-    # own reported version; it defaults to "latest" so plain `docker compose
-    # pull`/`up` behavior is unchanged when you never set it.
+    # Tagging the image with VOCAT_TAG keeps each local build distinct, so a
+    # later `docker compose pull` cannot silently replace your build under a
+    # shared ":latest" tag. Defaults preserve the stock pull-and-run flow.
     image: ghcr.io/mengmengcode/vocat:${VOCAT_TAG:-latest}
     pull_policy: missing
     build:
       context: .
       dockerfile: Dockerfile
       args:
-        # Set GOPROXY in the shell/.env before building on networks that
-        # cannot reach the default GCS-backed proxy.golang.org, e.g.:
-        #   GOPROXY=https://goproxy.cn,direct docker compose up -d --build
         GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
+        # Surfaced by `vocat version`, Settings > System Info and
+        # GET /api/system/info.
         VERSION: ${VOCAT_TAG:-0.1.0-dev}
         BUILD_TIME: ${VOCAT_BUILD_TIME:-}
     container_name: vocat
@@ -51,14 +56,16 @@ services:
     # egresses only the module — never the host's default route. That syscall
     # needs the host network namespace visible inside the container, which
     # network_mode: host provides directly. Port publishing is therefore
-    # meaningless (the container shares the host stack and vocat binds
-    # 0.0.0.0:7575 itself); proxy ports opened by the plugin are likewise
+    # meaningless — the container shares the host stack and vocat binds
+    # VOCAT_ADDR itself — and proxy ports opened by the plugin are likewise
     # reachable on the host IP without explicit mapping.
     network_mode: host
 
     # Modem/QMI/USB-reader hot-plug uses dynamic character devices. Privileged
     # mode mirrors the documented hardware-access docker run command and also
     # supplies the raw-socket/netlink permissions needed by VoWiFi/IPsec.
+    # Combined with host networking this is broad access to the host: run it
+    # only on a machine you trust.
     privileged: true
     user: "0:0"
 
@@ -66,17 +73,44 @@ services:
       # Marks the process as containerized: the web UI then advertises
       # "pull new image" instead of attempting an in-place binary update.
       VOCAT_CONTAINER: docker
-      # VOCAT_ADDR / VOCAT_DATABASE_PATH are set in the Dockerfile. Admin
-      # credentials are stored only in SQLite and are not process environment.
+      # Overrides the Dockerfile default so the port can be changed without
+      # rebuilding. VOCAT_DATABASE_PATH stays as the Dockerfile sets it,
+      # because the volume below and the carrier profile directory are both
+      # anchored to it. Admin credentials live only in SQLite.
+      VOCAT_ADDR: 0.0.0.0:${VOCAT_PORT:-7676}
 
     volumes:
-      # SQLite database + persistent state.
-      # Note for NAS (e.g. QNAP Container Station / Synology): replace named volume
-      # with a host absolute path (e.g. /share/Container/vocat/data:/opt/vocat/data)
-      # to avoid volume isolation issues between bootstrap-admin and runtime.
+      # SQLite database and all persistent state. VoCat also derives the
+      # carrier profile directory from the database location, so
+      # carrier-profiles.d lands inside this volume by default.
+      #
+      # NAS note (QNAP Container Station, Synology): replace this named volume
+      # with a host absolute path — e.g. /share/Container/vocat/data — because
+      # volume isolation there can point bootstrap-admin and the running
+      # service at different files, which surfaces as "Incorrect password".
       - vocat-data:/opt/vocat/data
+
+      # Carrier profile overrides, bind-mounted so they can be edited with a
+      # normal editor and tracked in git. Each .json file here overrides the
+      # built-in profile database compiled into the binary; a rule only wins
+      # if its `match` is at least as specific as the built-in rule for the
+      # same SIM, and the winner replaces rather than merges. Loaded once at
+      # startup, so restart after editing. Format and worked example:
+      # carrier-profiles.d/README.md
+      #
+      # WARNING, two sharp edges:
+      #  - This shadows any carrier-profiles.d already inside the named
+      #    volume. If you created profiles there with `docker exec`, copy them
+      #    out before the first `up` with this mount:
+      #      docker compose cp vocat:/opt/vocat/data/carrier-profiles.d/. ./carrier-profiles.d/
+      #  - A malformed .json aborts startup rather than being skipped, which
+      #    with `restart: unless-stopped` becomes a restart loop. Validate
+      #    before restarting:
+      #      python3 -m json.tool < carrier-profiles.d/your-file.json
+      - ./carrier-profiles.d:/opt/vocat/data/carrier-profiles.d
+
       # Required for modem, MHI/WWAN and PC/SC USB-reader discovery, including
-      # devices added after the container starts.
+      # devices attached after the container starts.
       - /dev:/dev
       - /sys:/sys:ro
 
