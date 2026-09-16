@@ -558,3 +558,27 @@ export interface SMSTestResultsResponse {
   summary: Record<string, number>;
   hours: number;
 }
+
+// Call mirrors vowifi.Call from the IMS provider. `codec` and `mediaReady`
+// only appear once SDP has been negotiated — on a provisional response with a
+// body (early media) or on the 200 OK — so they are absent while dialing.
+export interface Call {
+  id: string;
+  number: string;
+  direction: string;
+  state: string;
+  startedAt: string;
+  answeredAt?: string;
+  sipCode?: number;
+  reason?: string;
+  mediaReady?: boolean;
+  codec?: string;
+  endedAt?: string;
+}
+
+export interface CallsResponse {
+  deviceId: string;
+  // "vowifi" once IMS registration completes, otherwise "cellular" (AT+CLCC).
+  transport: string;
+  calls: Call[];
+}

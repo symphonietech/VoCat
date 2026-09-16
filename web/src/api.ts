@@ -1,5 +1,7 @@
 import type {
   ApiErrorBody,
+  Call,
+  CallsResponse,
   LoggingSettings,
   LoginResponse,
   SecuritySettings,
@@ -214,6 +216,41 @@ export function updateLoggingSettings(settings: {
   days: number;
 }) {
   return api<LoggingSettings>("/settings/logging", { method: "PUT", body: settings });
+}
+
+export function listCalls(deviceId: string) {
+  return api<CallsResponse>(`/devices/${encodeURIComponent(deviceId)}/calls`);
+}
+
+// durationSeconds arms a server-side automatic hang-up: 0 disables it, and the
+// server rejects anything above 600.
+export function dialCall(deviceId: string, number: string, durationSeconds = 0) {
+  return api<{ callId: string; call?: Call; transport: string }>(
+    `/devices/${encodeURIComponent(deviceId)}/calls/dial`,
+    { method: "POST", body: { number, durationSeconds } },
+  );
+}
+
+export function answerCall(deviceId: string, callId: string) {
+  return api<{ callId: string; transport: string }>(
+    `/devices/${encodeURIComponent(deviceId)}/calls/answer`,
+    { method: "POST", body: { callId } },
+  );
+}
+
+export function hangupCall(deviceId: string, callId: string) {
+  return api<{ callId: string; transport: string }>(
+    `/devices/${encodeURIComponent(deviceId)}/calls/hangup`,
+    { method: "POST", body: { callId } },
+  );
+}
+
+// The media bridge is a WebSocket, so it cannot go through api(): it carries
+// the session cookie automatically and is same-origin checked by the server.
+export function callMediaURL(deviceId: string, callId: string) {
+  const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const query = new URLSearchParams({ call_id: callId });
+  return `${scheme}//${window.location.host}/api/devices/${encodeURIComponent(deviceId)}/calls/media?${query}`;
 }
 
 export function apiMessage(error: unknown) {
