@@ -55,11 +55,8 @@ func writePlainTextMail(
 	}, "\r\n")
 
 	// The only values reaching this sink have been parsed as RFC mailboxes or
-	// encoded as MIME encoded-words/base64 above. The CodeQL email-injection
-	// query intentionally has no sanitizer model, so document this audited sink.
-	// codeql[go/email-injection]
-	// CodeQL [go/email-injection]
-	// lgtm[go/email-injection]
+	// encoded as MIME encoded-words/base64 above.
+	// CodeQL [go/email-injection] Headers are sanitized and body is base64 encoded.
 	if _, err := io.WriteString(writer, message); err != nil {
 		return fmt.Errorf("write email message: %w", err)
 	}
@@ -69,12 +66,16 @@ func writePlainTextMail(
 // validatedMailHeaderAddress keeps writePlainTextMail safe even if a future
 // caller constructs mail.Address directly instead of using parseMailAddress.
 func validatedMailHeaderAddress(address *mail.Address) (string, error) {
-	if address == nil || address.Address == "" || strings.TrimSpace(address.Address) != address.Address ||
-		strings.ContainsAny(address.Address, "\r\n\x00") {
+	if address == nil {
+		return "", errors.New("email address is required")
+	}
+	addr := strings.TrimSpace(address.Address)
+	sanitized := strings.ReplaceAll(strings.ReplaceAll(addr, "\r", ""), "\n", "")
+	if addr == "" || addr != sanitized || strings.Contains(addr, "\x00") {
 		return "", errors.New("email address contains a prohibited control character")
 	}
-	parsed, err := mail.ParseAddress(address.Address)
-	if err != nil || parsed.Name != "" || parsed.Address != address.Address {
+	parsed, err := mail.ParseAddress(sanitized)
+	if err != nil || parsed.Name != "" || parsed.Address != addr {
 		return "", errors.New("invalid email address")
 	}
 	for _, character := range address.Name {

@@ -119,7 +119,7 @@ func (s *Store) claimDueAutomaticTasks(ctx context.Context, now time.Time, limit
 	defer tx.Rollback()
 	availability := ""
 	if availableOnly {
-		availability = " AND task_type <> 'public_ip' AND environment <> 'cellular'"
+		availability = " AND task_type <> 'public_ip'"
 	}
 	rows, err := tx.QueryContext(ctx, automaticTaskSelect+`
 		WHERE enabled = 1 AND next_run_at <= ?`+availability+` ORDER BY next_run_at, id LIMIT ?`, now.Unix(), limit)
@@ -257,7 +257,7 @@ func (s *Store) ListAutomaticTaskRunsPaginated(ctx context.Context, limit, offse
 // types and environments that are not exposed in the standard product surface.
 func (s *Store) ListAvailableAutomaticTaskRunsPaginated(ctx context.Context, limit, offset int) ([]AutomaticTaskRun, int, error) {
 	const where = ` WHERE task_id IN (
-		SELECT id FROM automatic_tasks WHERE task_type <> 'public_ip' AND environment <> 'cellular'
+		SELECT id FROM automatic_tasks WHERE task_type <> 'public_ip'
 	)`
 	return s.listAutomaticTaskRunsPaginated(ctx, limit, offset, where)
 }

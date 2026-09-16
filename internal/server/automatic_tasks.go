@@ -882,8 +882,8 @@ func (s *Server) decodeAutomaticTask(r *http.Request, id int64) (store.Automatic
 	return task, nil
 }
 
-func validateAutomaticTaskAvailability(available bool, taskType, environment string) error {
-	if !available && (taskType == "public_ip" || environment == "cellular") {
+func validateAutomaticTaskAvailability(available bool, taskType, _ string) error {
+	if !available && taskType == "public_ip" {
 		return errors.New("unsupported task type or environment")
 	}
 	return nil

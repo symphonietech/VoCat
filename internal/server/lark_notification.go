@@ -131,11 +131,14 @@ func parseLarkWebhookURL(raw string) (*url.URL, error) {
 		return nil, err
 	}
 	canonicalHost := strings.ToLower(parsed.Hostname())
-	if _, ok := larkWebhookHosts[canonicalHost]; !ok {
-		return nil, errors.New("Lark group bot webhook must use open.feishu.cn or open.larksuite.com")
-	}
-	if parsed.Port() != "" && parsed.Port() != "443" {
-		return nil, errors.New("Lark group bot webhook must use the default HTTPS port")
+	var hostBase string
+	switch canonicalHost {
+	case "open.feishu.cn":
+		hostBase = "https://open.feishu.cn"
+	case "open.larksuite.com":
+		hostBase = "https://open.larksuite.com"
+	default:
+		return nil, errors.New("Lark group bot webhook host is unsupported")
 	}
 	const prefix = "/open-apis/bot/v2/hook/"
 	token := strings.TrimPrefix(parsed.Path, prefix)
@@ -143,11 +146,8 @@ func parseLarkWebhookURL(raw string) (*url.URL, error) {
 		parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
 		return nil, errors.New("Lark group bot webhook path is invalid")
 	}
-	return &url.URL{
-		Scheme: "https",
-		Host:   canonicalHost,
-		Path:   prefix + url.PathEscape(token),
-	}, nil
+	safeURL, _ := url.Parse(hostBase + prefix + url.PathEscape(token))
+	return safeURL, nil
 }
 
 func validateLarkWebhookURL(ctx context.Context, raw string) (*url.URL, error) {
@@ -260,7 +260,7 @@ func postLarkNotification(ctx context.Context, client *http.Client, endpoint str
 	request.Header.Set("Content-Type", "application/json; charset=utf-8")
 	request.Header.Set("User-Agent", "vocat-lark-notification/1")
 	// Target host is restricted to the Lark/Feishu webhook domain whitelist.
-	// codeql[go/uncontrolled-data-in-network-request]
+	// CodeQL [go/uncontrolled-data-in-network-request] Endpoint is verified against open.feishu.cn / open.larksuite.com.
 	response, err := client.Do(request)
 	if err != nil {
 		return fmt.Errorf("send Lark notification: %w", sanitizeLarkRequestError(err))

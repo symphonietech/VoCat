@@ -48,7 +48,8 @@ func TestAutomaticTaskAvailabilityHidesRestrictedPaths(t *testing.T) {
 	}{
 		{false, "sms", "vowifi", false},
 		{false, "call", "vowifi", false},
-		{false, "sms", "cellular", true},
+		{false, "sms", "cellular", false},
+		{false, "call", "cellular", false},
 		{false, "public_ip", "cellular", true},
 		{true, "public_ip", "cellular", false},
 	} {
