@@ -303,8 +303,8 @@ export default function AutomaticTasksPage() {
 	if (selectedDevice?.deviceType === "usb_sim_reader") {
 	  next = { ...next, taskType: next.taskType === "public_ip" ? "sms" : next.taskType, environment: "vowifi" };
 	}
-	if (!advancedTasksAvailable && (next.taskType === "public_ip" || next.environment === "cellular")) {
-	  next = { ...next, taskType: "sms", environment: "vowifi" };
+	if (!advancedTasksAvailable && next.taskType === "public_ip") {
+	  next = { ...next, taskType: "sms" };
 	}
     setForm(next);
     setOpen(true);
@@ -317,7 +317,7 @@ export default function AutomaticTasksPage() {
     setForm((current) => ({
 	  ...current, deviceId, profileIccid: "", profileAid: "",
 	  taskType: reader && current.taskType === "public_ip" ? "sms" : current.taskType,
-	  environment: reader || !advancedTasksAvailable ? "vowifi" : current.environment,
+	  environment: reader ? "vowifi" : current.environment,
 	}));
     void loadProfiles(deviceId, "", currentDeviceICCID(selectedDevice));
   }
@@ -343,7 +343,7 @@ export default function AutomaticTasksPage() {
 	if (deviceByID.get(form.deviceId)?.deviceType === "usb_sim_reader" && (form.environment !== "vowifi" || form.taskType === "public_ip")) {
 	  return message.warning(t("USB SIM读卡器仅支持VoWiFi短信和通话任务"));
 	}
-	if (!advancedTasksAvailable && (form.environment !== "vowifi" || form.taskType === "public_ip")) return;
+	if (!advancedTasksAvailable && form.taskType === "public_ip") return;
     if (form.taskType !== "public_ip" && !form.phone.trim()) return message.warning(t("请输入号码"));
     if (form.taskType === "sms" && !form.message.trim()) return message.warning(t("请输入短信内容"));
     setSaving(true);
@@ -431,7 +431,7 @@ export default function AutomaticTasksPage() {
 	  { value: "call", label: t("拨打电话并自动挂断") },
 	  ...(advancedTasksAvailable && !selectedTaskDeviceIsReader ? [{ value: "public_ip", label: t("开启漫游流量并获取一次公网 IP") }] : []),
 	];
-	const environmentOptions = selectedTaskDeviceIsReader || !advancedTasksAvailable
+	const environmentOptions = selectedTaskDeviceIsReader
 	  ? [{ value: "vowifi", label: "VoWiFi" }]
 	  : [{ value: "vowifi", label: "VoWiFi" }, { value: "cellular", label: t("基站直连（自动选网）") }];
 

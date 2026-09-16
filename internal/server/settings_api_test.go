@@ -909,9 +909,9 @@ func TestTrafficAnalysisIsUnavailableOutsideDeveloperMode(t *testing.T) {
 
 func TestNotificationDestinationAddressPolicyIsIndependentFromWebAccess(t *testing.T) {
 	blocked := []string{
-		"0.0.0.0", "10.0.0.1", "100.100.100.200", "127.0.0.1",
-		"169.254.169.254", "172.16.0.1", "192.168.1.1", "224.0.0.1",
-		"255.255.255.255", "::", "::1", "fc00::1", "fe80::1", "ff02::1",
+		"0.0.0.0", "100.100.100.200", "127.0.0.1",
+		"169.254.169.254", "224.0.0.1",
+		"255.255.255.255", "::", "::1", "fe80::1", "ff02::1",
 	}
 	for _, text := range blocked {
 		address := netip.MustParseAddr(text)
@@ -920,7 +920,8 @@ func TestNotificationDestinationAddressPolicyIsIndependentFromWebAccess(t *testi
 		}
 	}
 	for _, text := range []string{
-		"1.1.1.1", "198.18.0.1", "2606:4700:4700::1111",
+		"1.1.1.1", "10.0.0.1", "10.1.12.32", "100.64.0.1", "172.16.0.1",
+		"192.168.1.1", "198.18.0.1", "fc00::1", "2606:4700:4700::1111",
 	} {
 		address := netip.MustParseAddr(text)
 		if !notificationAddressAllowed(context.Background(), address) {
@@ -935,6 +936,9 @@ func TestNotificationDestinationAddressPolicyIsIndependentFromWebAccess(t *testi
 		"169.254.169.254",
 	); err == nil {
 		t.Fatal("metadata IP was not blocked")
+	}
+	if addresses, err := resolvePublicAddresses(context.Background(), "10.1.12.32"); err != nil || len(addresses) != 1 {
+		t.Fatalf("LAN notification destination = %v, %v", addresses, err)
 	}
 	server := &Server{access: parsedAccessConfig{mode: "internal"}}
 	notificationContext := server.notificationDestinationContext(context.Background())

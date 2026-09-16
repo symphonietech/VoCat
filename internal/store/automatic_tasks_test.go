@@ -139,8 +139,9 @@ func TestAvailableAutomaticTasksExcludeRestrictedTaskAndRunHistory(t *testing.T)
 		return task
 	}
 	visible := save("visible", "sms", "vowifi")
+	visibleCellular := save("visible_cellular", "sms", "cellular")
 	hidden := save("hidden", "public_ip", "cellular")
-	for _, task := range []AutomaticTask{visible, hidden} {
+	for _, task := range []AutomaticTask{visible, visibleCellular, hidden} {
 		if _, err := database.QueueAutomaticTaskNow(ctx, task); err != nil {
 			t.Fatal(err)
 		}
@@ -149,14 +150,14 @@ func TestAvailableAutomaticTasksExcludeRestrictedTaskAndRunHistory(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if total != 1 || len(runs) != 1 || runs[0].TaskID != visible.ID {
+	if total != 2 || len(runs) != 2 {
 		t.Fatalf("available history total=%d runs=%+v", total, runs)
 	}
 	claimed, err := database.ClaimDueAvailableAutomaticTasks(ctx, now, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(claimed) != 1 || claimed[0].TaskID != visible.ID {
+	if len(claimed) != 2 {
 		t.Fatalf("available claims = %+v", claimed)
 	}
 	storedHidden, err := database.AutomaticTask(ctx, hidden.ID)

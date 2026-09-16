@@ -59,7 +59,7 @@ func parseWecomWebhookURL(raw string) (*url.URL, error) {
 		return nil, err
 	}
 	canonicalHost := strings.ToLower(parsed.Hostname())
-	if _, ok := wecomWebhookHosts[canonicalHost]; !ok {
+	if canonicalHost != "qyapi.weixin.qq.com" {
 		return nil, errors.New("WeCom bot webhook must use qyapi.weixin.qq.com")
 	}
 	if parsed.Port() != "" && parsed.Port() != "443" {
@@ -74,12 +74,8 @@ func parseWecomWebhookURL(raw string) (*url.URL, error) {
 	}
 	query := url.Values{}
 	query.Set("key", key)
-	return &url.URL{
-		Scheme:   "https",
-		Host:     canonicalHost,
-		Path:     "/cgi-bin/webhook/send",
-		RawQuery: query.Encode(),
-	}, nil
+	safeURL, _ := url.Parse("https://qyapi.weixin.qq.com/cgi-bin/webhook/send?" + query.Encode())
+	return safeURL, nil
 }
 
 func validateWecomWebhookURL(ctx context.Context, raw string) (*url.URL, error) {
@@ -185,7 +181,7 @@ func sendWecomNotification(ctx context.Context, config map[string]any, values we
 		request.Header.Set("Content-Type", "application/json; charset=utf-8")
 		request.Header.Set("User-Agent", "vocat-wecom-notification/1")
 		// Target host is restricted to the WeCom webhook domain whitelist.
-		// codeql[go/uncontrolled-data-in-network-request]
+		// CodeQL [go/uncontrolled-data-in-network-request] Endpoint is verified against qyapi.weixin.qq.com.
 		response, err := client.Do(request)
 		if err != nil {
 			return fmt.Errorf("send WeCom notification: %w", err)

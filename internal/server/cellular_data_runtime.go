@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"vocat/internal/device"
+	"vocat/internal/store"
 )
 
 type cellularNetworkSetter interface {
@@ -1022,7 +1023,12 @@ func (runtime *cellularDataRuntime) run(configID string, entry *cellularDataRunt
 				runtime.closeSessionLocked(entry)
 			}
 			if runtime.logger != nil && !errors.Is(err, context.Canceled) {
-				runtime.logger.Warn("cellular data reconcile failed", "device_id", configID, "desired_enabled", request.Enabled, "error", err)
+				runtime.logger.Warn(
+					"cellular data reconcile failed",
+					"device_id", configID,
+					"desired_enabled", entry.status.DesiredEnabled,
+					"error", store.RedactText(err.Error()),
+				)
 			}
 		} else {
 			entry.status.Connected = result.Enabled

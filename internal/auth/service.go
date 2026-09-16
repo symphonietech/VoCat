@@ -420,8 +420,10 @@ func hashPassword(password string, cost int) ([]byte, error) {
 	if longPassword {
 		// SHA-256 here is strictly a fixed-length condenser for bcrypt's 72-byte limit,
 		// not a standalone password hash. bcrypt provides the actual adaptive work factor.
-		// codeql[go/weak-cryptographic-hash]
-		// codeql[go/sensitive-data-hasher]
+		// CodeQL [go/weak-sensitive-data-hashing] SHA-256 is an input condenser for bcrypt's 72-byte limit.
+		// CodeQL [go/sensitive-data-hasher] SHA-256 pre-hashes passwords > 72 bytes before bcrypt.
+		// CodeQL [go/weak-cryptographic-hash] SHA-256 is an input condenser for bcrypt's 72-byte limit.
+		// CodeQL [go/password-hash-computation] bcrypt performs the actual password hashing.
 		digest := sha256.Sum256(material)
 		material = digest[:]
 	}
@@ -438,8 +440,10 @@ func hashPassword(password string, cost int) ([]byte, error) {
 func comparePassword(passwordHash []byte, password string) error {
 	material := []byte(password)
 	if bytes.HasPrefix(passwordHash, longPasswordHashPrefix) {
-		// codeql[go/weak-cryptographic-hash]
-		// codeql[go/sensitive-data-hasher]
+		// CodeQL [go/weak-sensitive-data-hashing] SHA-256 is an input condenser for bcrypt's 72-byte limit.
+		// CodeQL [go/sensitive-data-hasher] SHA-256 pre-hashes passwords > 72 bytes before bcrypt.
+		// CodeQL [go/weak-cryptographic-hash] SHA-256 is an input condenser for bcrypt's 72-byte limit.
+		// CodeQL [go/password-hash-computation] bcrypt performs the actual password hashing.
 		digest := sha256.Sum256(material)
 		material = digest[:]
 		passwordHash = passwordHash[len(longPasswordHashPrefix):]

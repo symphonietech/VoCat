@@ -171,7 +171,7 @@ func (media *rtpMedia) configureRemote(body []byte) error {
 		}
 	}
 	if codec == "" && len(formats) > 0 {
-		if parsed, parseErr := strconv.Atoi(formats[0]); parseErr == nil {
+		if parsed, parseErr := strconv.Atoi(formats[0]); parseErr == nil && parsed >= 0 && parsed <= 127 {
 			codec, payload = fmt.Sprintf("PAYLOAD-%d", parsed), byte(parsed)
 		}
 	}
