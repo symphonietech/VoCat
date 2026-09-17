@@ -17,6 +17,13 @@ import (
 const (
 	rtpClockRate     = 8000
 	rtpPacketSamples = 160
+	// One packet per 20 ms, matching the a=ptime:20 in the SDP offer.
+	rtpPacketInterval = time.Duration(rtpPacketSamples) * time.Second / rtpClockRate
+	// Cap on queued uplink audio (160 ms). A browser whose sample clock runs
+	// slightly fast would otherwise build an ever-growing delay between
+	// speaking and transmission; dropping the oldest audio keeps the
+	// conversation current instead.
+	maxPendingSamples = 8 * rtpPacketSamples
 )
 
 type rtpMedia struct {
@@ -36,6 +43,7 @@ type rtpMedia struct {
 	downlink chan []int16
 	closed   chan struct{}
 	close    sync.Once
+	pump     sync.Once
 }
 
 func newRTPMedia(local net.IP) (*rtpMedia, error) {
@@ -183,6 +191,7 @@ func (media *rtpMedia) configureRemote(body []byte) error {
 	media.codec = codec
 	media.payloadType = payload
 	media.mu.Unlock()
+	media.startTransmit()
 	return nil
 }
 
@@ -242,40 +251,89 @@ func (media *rtpMedia) ReadPCM(ctx context.Context) ([]int16, error) {
 	}
 }
 
+// WritePCM queues uplink audio. It does not transmit: the pump below owns the
+// socket so packets leave at a steady 20 ms cadence regardless of how the
+// WebSocket delivers them.
 func (media *rtpMedia) WritePCM(samples []int16) error {
 	media.mu.RLock()
-	var remote *net.UDPAddr
-	if media.remote != nil {
-		copy := *media.remote
-		remote = &copy
-	}
-	codec, payload := media.codec, media.payloadType
+	negotiated := media.remote != nil && media.codec != ""
 	media.mu.RUnlock()
-	if remote == nil || codec == "" {
+	if !negotiated {
 		return errors.New("ims: RTP media is not negotiated")
 	}
 	media.writeMu.Lock()
 	defer media.writeMu.Unlock()
 	media.pending = append(media.pending, samples...)
-	for len(media.pending) >= rtpPacketSamples {
-		packet := make([]byte, 12+rtpPacketSamples)
-		packet[0], packet[1] = 0x80, payload
-		binary.BigEndian.PutUint16(packet[2:4], media.sequence)
-		binary.BigEndian.PutUint32(packet[4:8], media.timestamp)
-		binary.BigEndian.PutUint32(packet[8:12], media.ssrc)
-		for index, sample := range media.pending[:rtpPacketSamples] {
-			if codec == "PCMA" {
-				packet[12+index] = linearToALaw(sample)
-			} else {
-				packet[12+index] = linearToMuLaw(sample)
-			}
+	if len(media.pending) > maxPendingSamples {
+		media.pending = media.pending[len(media.pending)-maxPendingSamples:]
+	}
+	return nil
+}
+
+// startTransmit begins the uplink once the remote address and codec are known.
+// RTP has to keep flowing for the lifetime of the call: an IMS access gateway
+// that stops seeing packets treats the call as dead and sends BYE, typically
+// within seconds. Browser audio is optional and intermittent — nobody may be
+// attached, the microphone may be muted, WebSocket messages arrive in bursts —
+// so the pump sends silence whenever the queue is short, and the call survives
+// with no browser attached at all.
+func (media *rtpMedia) startTransmit() {
+	media.pump.Do(func() { go media.transmit() })
+}
+
+func (media *rtpMedia) transmit() {
+	ticker := time.NewTicker(rtpPacketInterval)
+	defer ticker.Stop()
+	frame := make([]int16, rtpPacketSamples)
+	for {
+		select {
+		case <-media.closed:
+			return
+		case <-ticker.C:
 		}
-		if _, err := media.conn.WriteToUDP(packet, remote); err != nil {
-			return fmt.Errorf("ims: send RTP: %w", err)
+		media.writeMu.Lock()
+		filled := copy(frame, media.pending)
+		media.pending = media.pending[filled:]
+		media.writeMu.Unlock()
+		for index := filled; index < rtpPacketSamples; index++ {
+			frame[index] = 0
 		}
-		media.pending = media.pending[rtpPacketSamples:]
-		media.sequence++
-		media.timestamp += rtpPacketSamples
+		// A transient send error must not end the uplink for the rest of the
+		// call; a permanently closed socket is caught by the select above.
+		_ = media.sendFrame(frame)
+	}
+}
+
+// sendFrame encodes and transmits exactly one packet. The sequence number and
+// timestamp are owned by the single pump goroutine, so they need no lock.
+func (media *rtpMedia) sendFrame(samples []int16) error {
+	media.mu.RLock()
+	var remote *net.UDPAddr
+	if media.remote != nil {
+		clone := *media.remote
+		remote = &clone
+	}
+	codec, payload := media.codec, media.payloadType
+	media.mu.RUnlock()
+	if remote == nil || codec == "" {
+		return nil
+	}
+	packet := make([]byte, 12+rtpPacketSamples)
+	packet[0], packet[1] = 0x80, payload
+	binary.BigEndian.PutUint16(packet[2:4], media.sequence)
+	binary.BigEndian.PutUint32(packet[4:8], media.timestamp)
+	binary.BigEndian.PutUint32(packet[8:12], media.ssrc)
+	for index, sample := range samples {
+		if codec == "PCMA" {
+			packet[12+index] = linearToALaw(sample)
+		} else {
+			packet[12+index] = linearToMuLaw(sample)
+		}
+	}
+	media.sequence++
+	media.timestamp += rtpPacketSamples
+	if _, err := media.conn.WriteToUDP(packet, remote); err != nil {
+		return fmt.Errorf("ims: send RTP: %w", err)
 	}
 	return nil
 }
