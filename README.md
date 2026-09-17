@@ -281,8 +281,10 @@ A ready-made Asterisk container is included:
 
 ```bash
 cp -n .env.example .env
-printf 'ASTERISK_SIP_PASSWORD=%s\n' "$(openssl rand -base64 24)" >> .env
-echo 'COMPOSE_FILE=docker-compose.yml:docker-compose.asterisk.yml' >> .env
+# Edit in place. Appending would leave two ASTERISK_SIP_PASSWORD lines, and
+# which one Compose uses is not visible from the file.
+sed -i "s|^ASTERISK_SIP_PASSWORD=.*|ASTERISK_SIP_PASSWORD=$(openssl rand -base64 24)|" .env
+sed -i "s|^#*COMPOSE_FILE=.*|COMPOSE_FILE=docker-compose.yml:docker-compose.asterisk.yml|" .env
 ./scripts/docker-build.sh
 ```
 
