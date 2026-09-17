@@ -16,6 +16,7 @@ import (
 	"vocat/internal/device"
 	"vocat/internal/exportproxy"
 	"vocat/internal/modem"
+	"vocat/internal/pcsc"
 	"vocat/internal/store"
 	"vocat/internal/update"
 	"vocat/internal/vowifi"
@@ -1129,5 +1130,86 @@ func TestHandleCellularDataRejectsDisableWhileExportProxyActive(t *testing.T) {
 	}
 	if stored.NetworkEnabled {
 		t.Fatal("roaming data was not turned off after the export proxy was disabled")
+	}
+}
+
+// The layout below is taken from a live eight-device deployment: seven EG25-G
+// modules (identical 2c7c:0125, most with an empty or "Android" USB serial) on
+// nested hubs, plus one PC/SC reader. Five of the modules had been moved to
+// different ports since they were configured, which is what exposed both bugs
+// this exercises.
+func TestPhysicalMatchesConfigPrefersIMEIOverAReusedTopologyID(t *testing.T) {
+	// A configuration created while this modem sat at 3-4.5.
+	config := store.Device{
+		ID:        "usb-2c7c-0125-3-4-5",
+		USBPath:   "/sys/bus/usb/devices/3-4.2",
+		ATPort:    "/dev/ttyUSB10",
+		ModemIMEI: "866069051699286",
+	}
+	// A different modem now occupies 3-4.5, so discovery mints the same
+	// topology-derived key the configuration above happens to carry.
+	intruder := device.Device{
+		ID: "usb-2c7c-0125-3-4-5",
+		Candidate: modem.Candidate{
+			USBPath: "/sys/bus/usb/devices/3-4.5",
+			ATPort:  modem.Port{Path: "/dev/ttyUSB18"},
+		},
+		Snapshot: &device.Snapshot{IMEI: "861529040829604"},
+	}
+	if physicalMatchesConfig(intruder, config) {
+		t.Fatal("a different modem matched through a reused topology ID despite a known, different IMEI")
+	}
+
+	// The configured modem itself, now at 3-4.2, must still be recognised.
+	owner := device.Device{
+		ID: "usb-2c7c-0125-3-4-2",
+		Candidate: modem.Candidate{
+			USBPath: "/sys/bus/usb/devices/3-4.2",
+			ATPort:  modem.Port{Path: "/dev/ttyUSB10"},
+		},
+		Snapshot: &device.Snapshot{IMEI: "866069051699286"},
+	}
+	if !physicalMatchesConfig(owner, config) {
+		t.Fatal("the configured modem should match on its IMEI")
+	}
+}
+
+func TestPhysicalMatchesConfigKeepsReadersAndModemsApart(t *testing.T) {
+	// A reader configuration whose ID was generated from a USB position that a
+	// modem now occupies. It carries no IMEI, so IMEI cannot break the tie.
+	readerConfig := store.Device{
+		ID:            "usb-2c7c-0125-3-4-6",
+		DeviceType:    store.DeviceTypeUSBSIMReader,
+		USBPath:       "3-3.1",
+		ControlDevice: "Generic Smart Card Reader Interface (204E365D5541) 00 00",
+	}
+	modemAtThatPort := device.Device{
+		ID: "usb-2c7c-0125-3-4-6",
+		Candidate: modem.Candidate{
+			USBPath: "/sys/bus/usb/devices/3-4.6",
+			ATPort:  modem.Port{Path: "/dev/ttyUSB22"},
+		},
+		Snapshot: &device.Snapshot{IMEI: "867383055134912"},
+	}
+	if physicalMatchesConfig(modemAtThatPort, readerConfig) {
+		t.Fatal("a modem matched a PC/SC reader configuration through a shared topology ID")
+	}
+
+	reader := device.Device{
+		ID: "reader-2035baec08c933eb",
+		Candidate: modem.Candidate{
+			HardwareKind: pcsc.HardwareKind,
+			USBPath:      "3-3.1",
+			ReaderName:   readerConfig.ControlDevice,
+		},
+	}
+	if !physicalMatchesConfig(reader, readerConfig) {
+		t.Fatal("the reader should still match its own configuration by reader name")
+	}
+
+	// The converse: a modem configuration must not absorb a reader.
+	modemConfig := store.Device{ID: "usb-2c7c-0125-3-4-4", USBPath: "3-3.1"}
+	if physicalMatchesConfig(reader, modemConfig) {
+		t.Fatal("a reader matched a modem configuration")
 	}
 }

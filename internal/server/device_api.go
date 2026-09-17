@@ -403,6 +403,7 @@ func (s *Server) handleDiscoveredDevices(w http.ResponseWriter, r *http.Request)
 		return true
 	}
 	result := make([]map[string]any, 0, len(devices))
+	claimedConfigs := make(map[string]bool, len(configured))
 	for _, entry := range devices {
 		if !entry.Discovered {
 			continue
@@ -420,8 +421,17 @@ func (s *Server) handleDiscoveredDevices(w http.ResponseWriter, r *http.Request)
 		}
 		configuredID := ""
 		for _, config := range configured {
+			// A configuration already taken by another device in this scan is
+			// not available: matching is one-to-one, and the weaker fallbacks
+			// (ttyUSB/cdc-wdm nodes, which are allocation-order dependent) can
+			// otherwise let two modems land on the same entry, hiding both from
+			// the add-device dialog.
+			if claimedConfigs[config.ID] {
+				continue
+			}
 			if physicalMatchesConfig(entry, config) {
 				configuredID = config.ID
+				claimedConfigs[config.ID] = true
 				break
 			}
 		}
@@ -1921,13 +1931,33 @@ func (s *Server) physicalForConfig(config store.Device) (device.Device, string, 
 	return device.Device{ID: config.ID}, "", false
 }
 
+// configIsReader reports whether a stored configuration describes a PC/SC
+// card reader rather than a cellular modem.
+func configIsReader(config store.Device) bool {
+	return store.NormalizeDeviceType(config.DeviceType) == store.DeviceTypeUSBSIMReader
+}
+
 func physicalMatchesConfig(entry device.Device, config store.Device) bool {
 	candidate := entry.Candidate
-	if entry.ID == config.ID {
-		return true
+	// A card reader and a modem are never the same device, whatever their
+	// identifiers happen to collide on. Without this, a reader configuration
+	// whose ID was generated from a USB position still in use by a modem
+	// matches that modem on the ID comparison below.
+	if configIsReader(config) != (candidate.HardwareKind == pcsc.HardwareKind) {
+		return false
 	}
+	// IMEI is the only identifier that follows a modem when it is moved to a
+	// different port, so when both sides report one it settles the question --
+	// including against an ID that merely encodes the position the configured
+	// device used to occupy. This has to precede the ID comparison: discovery
+	// keys are derived from USB topology (see candidateID), so the key of
+	// whatever modem now sits in a given socket is byte-identical to the ID of
+	// a configuration created for the modem that used to sit there.
 	if config.ModemIMEI != "" && entry.Snapshot != nil && entry.Snapshot.IMEI != "" {
 		return config.ModemIMEI == entry.Snapshot.IMEI
+	}
+	if entry.ID == config.ID {
+		return true
 	}
 	if config.USBPath != "" && candidate.USBPath != "" {
 		if config.USBPath == candidate.USBPath {
