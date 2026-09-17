@@ -1,0 +1,64 @@
+# Asterisk in front of VoCat's SIP trunk.
+#
+# This is an overlay, not a replacement. Both files, every time:
+#   docker compose -f docker-compose.yml -f docker-compose.asterisk.yml up -d --build
+#
+# Set the password first:
+#   cp .env.example .env && ${EDITOR:-nano} .env
+#
+# Then point a softphone (Linphone, Zoiper, a desk phone) at this host:
+#   server    <this host's LAN IP>
+#   username  1001          (ASTERISK_SIP_USER)
+#   password  <ASTERISK_SIP_PASSWORD>
+#   transport UDP
+#
+# Dial any number and the call goes out over the SIM's IMS registration.
+#
+# WHY HOST NETWORKING. VoCat already runs with network_mode: host, so its
+# trunk on 127.0.0.1:5062 is the *host's* loopback -- a bridged container
+# cannot reach it. Putting Asterisk on host networking too means both sides
+# talk over loopback with no NAT anywhere, and the RTP range needs no port
+# publishing. The cost is that Asterisk binds the host's port 5060 directly:
+# if something already has it, see the bridged alternative in
+# docs/sip-trunk.md.
+
+services:
+  vocat:
+    environment:
+      # Enables the trunk. Loopback only: authorisation here is by source
+      # address, so the listener must not be reachable from anywhere the
+      # operator has not chosen deliberately.
+      VOCAT_SIP_TRUNK_ADDR: 127.0.0.1:5062
+      VOCAT_SIP_TRUNK_PEERS: 127.0.0.1
+
+  asterisk:
+    build:
+      context: ./asterisk
+      dockerfile: Dockerfile
+    image: vocat-asterisk:${VOCAT_TAG:-latest}
+    container_name: vocat-asterisk
+    restart: unless-stopped
+    depends_on:
+      - vocat
+    network_mode: host
+
+    environment:
+      # Required. The entrypoint refuses to start without it, and refuses one
+      # shorter than 12 characters: SIP registrars are scanned continuously,
+      # and a weak one on a PBX with a SIM behind it becomes someone else's
+      # long-distance plan.
+      ASTERISK_SIP_PASSWORD: ${ASTERISK_SIP_PASSWORD:?set ASTERISK_SIP_PASSWORD in .env}
+      ASTERISK_SIP_USER: ${ASTERISK_SIP_USER:-1001}
+      VOCAT_TRUNK_HOST: ${VOCAT_TRUNK_HOST:-127.0.0.1:5062}
+      # Which SIM places outbound calls. Leave empty while one device is
+      # IMS-registered; name one (device ID or name) once a second is.
+      VOCAT_DEVICE: ${VOCAT_DEVICE:-}
+
+    volumes:
+      # Rendered into /etc/asterisk at start, on top of the package defaults.
+      - ./asterisk/templates:/etc/asterisk/templates:ro
+      # Voicemail and recordings, which should survive a recreate.
+      - asterisk-spool:/var/spool/asterisk
+
+volumes:
+  asterisk-spool:

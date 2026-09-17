@@ -45,6 +45,104 @@ listed in the peers.
 A request from an address outside the list is dropped without a reply, so a
 scanner cannot confirm anything is listening.
 
+## Running Asterisk in a container
+
+There is a ready-made setup in this repo: `asterisk/` (image and config
+templates) plus `docker-compose.asterisk.yml`, an overlay on the main compose
+file. Three commands:
+
+```sh
+cp .env.example .env
+${EDITOR:-nano} .env                     # set ASTERISK_SIP_PASSWORD
+docker compose -f docker-compose.yml -f docker-compose.asterisk.yml up -d --build
+```
+
+Pass both `-f` files on every later `compose` command too, or the second one
+will not know the Asterisk service exists — including `scripts/docker-build.sh`,
+which runs a plain `docker compose up`. Easier: put this in `.env` and every
+`docker compose` command picks up both files with no flags at all.
+
+```sh
+COMPOSE_FILE=docker-compose.yml:docker-compose.asterisk.yml
+```
+
+The overlay also sets `VOCAT_SIP_TRUNK_ADDR` and `VOCAT_SIP_TRUNK_PEERS` on the
+VoCat service, so enabling the trunk and starting the PBX are one step.
+
+Then point a softphone at the host:
+
+| | |
+| --- | --- |
+| Server / domain | this host's LAN IP |
+| Username | `1001`, or whatever `ASTERISK_SIP_USER` says |
+| Password | `ASTERISK_SIP_PASSWORD` |
+| Transport | UDP |
+
+Dial a number and it goes out over the SIM.
+
+### Why both containers use host networking
+
+VoCat already runs with `network_mode: host`, because the export-proxy plugin
+needs `SO_BINDTODEVICE` in the host's network namespace. That has a
+consequence for the trunk: `127.0.0.1:5062` is the **host's** loopback, and a
+container on a bridge network cannot reach it.
+
+Putting Asterisk on host networking too makes the whole thing trivial — both
+sides on loopback, no NAT, and the RTP range needs no port publishing at all.
+The cost is that Asterisk binds the host's port 5060 directly, so it will fail
+to start if something else already has it.
+
+### The bridged alternative
+
+If port 5060 is taken, or policy rules out host networking for the PBX, the
+trunk can listen on the bridge gateway instead — still a host address, but one
+containers can reach:
+
+```yaml
+    environment:
+      VOCAT_SIP_TRUNK_ADDR: 172.18.0.1:5062
+      VOCAT_SIP_TRUNK_PEERS: 172.18.0.0/16
+```
+
+with `contact=sip:vocat@172.18.0.1:5062` and `match=172.18.0.1` in
+`pjsip.conf`, and the Asterisk service on a user-defined bridge rather than
+`network_mode: host`. Check the real gateway first — it is not always
+`172.18.0.1`:
+
+```sh
+docker network inspect <network> -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}'
+```
+
+VoCat's RTP leg binds whatever address the trunk listens on, so the media
+follows the signalling onto the bridge without further configuration.
+
+What this does **not** solve is softphones: they are outside Docker, so
+Asterisk's own 5060 and its whole RTP range have to be published, and
+`docker-proxy` handles a 200-port UDP range badly. Expect to add
+`external_media_address` and `external_signaling_address` to the PJSIP
+transport as well. Host networking avoids all of it, which is why it is the
+default here.
+
+### What is in `asterisk/`
+
+| Path | |
+| --- | --- |
+| `Dockerfile` | Debian bookworm plus the packaged Asterisk 20 (an LTS release that gets Debian's security updates) — not a third-party image, since a SIM's call charges sit behind this |
+| `entrypoint.sh` | Renders the templates into `/etc/asterisk`, then runs Asterisk in the foreground |
+| `templates/pjsip.conf` | The trunk endpoint and one softphone account |
+| `templates/extensions.conf` | Outbound dial plan, `[from-vocat]` ready for inbound |
+| `templates/rtp.conf` | Ports 10000-10200 |
+
+The configs are rendered rather than mounted so the SIP password stays in the
+environment and never reaches a git-tracked file. `envsubst` is given an
+explicit variable list, without which it would also expand Asterisk's own
+`${EXTEN}` and `${VOCATDEV}`. The entrypoint refuses a password under 12
+characters: SIP registrars are scanned continuously, and a weak one on a PBX
+with a real SIM behind it becomes someone else's long-distance plan.
+
+Everything below is what those files contain, for anyone wiring up an existing
+Asterisk instead.
+
 ## Asterisk side
 
 In `pjsip.conf`, a transport, an endpoint pointing at VoCat, and an `identify`
@@ -126,21 +224,33 @@ there is to it. With more than one, VoCat refuses to guess — picking for you
 would put a real, billed call on whichever SIM happened to sort first — so the
 dial plan has to name one. Either an ID or the device name works.
 
-A header, which is the easier half of a PJSIP dial plan:
+A header. Note the `b()` pre-dial handler: `PJSIP_HEADER(add,...)` applies to
+the channel it runs on, so setting it in `[from-internal]` would attach the
+header to the *softphone's* leg, where VoCat never sees it. `b()` runs on the
+outbound channel, just before the INVITE leaves.
 
 ```ini
-exten => _X.,1,Set(PJSIP_HEADER(add,X-VoCat-Device)=SLOT1-1)
- same => n,Dial(PJSIP/${EXTEN}@vocat,60)
+[from-internal]
+exten => _X.,1,Set(__VOCATDEV=SLOT1-1)
+ same => n,Dial(PJSIP/${EXTEN}@vocat,60,b(vocat-predial^s^1))
+ same => n,Hangup()
+
+[vocat-predial]
+; The __ prefix is what makes VOCATDEV inherit onto the outbound channel.
+exten => s,1,Set(PJSIP_HEADER(add,X-VoCat-Device)=${VOCATDEV})
+ same => n,Return()
 ```
 
-or a URI parameter, when the dial string is being built anyway:
+Or a URI parameter, which needs no handler because it is part of the dial
+string. The `;` has to be escaped, or `extensions.conf` reads the rest of the
+line as a comment:
 
 ```ini
-exten => _X.,1,Dial(PJSIP/vocat/sip:${EXTEN}@127.0.0.1:5062;device=SLOT1-1,60)
+exten => _X.,1,Dial(PJSIP/vocat/sip:${EXTEN}@127.0.0.1:5062\;device=SLOT1-1,60)
 ```
 
 A per-SIM outbound route is usually clearer than either: give each SIM its own
-extension pattern and set the header there.
+extension pattern and set `__VOCATDEV` there.
 
 ## What the PBX sees
 
