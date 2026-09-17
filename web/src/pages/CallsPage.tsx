@@ -242,8 +242,12 @@ export default function CallsPage() {
               <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
                 <dt className="text-gray-400">{t("状态")}</dt>
                 <dd className="font-mono">{active.state}</dd>
-                <dt className="text-gray-400">SIP</dt>
+                <dt className="text-gray-400">{t("最后响应")}</dt>
                 <dd className="font-mono">{active.sipCode ? `${active.sipCode} ${active.reason || ""}` : "—"}</dd>
+                <dt className="text-gray-400">{t("接通时间")}</dt>
+                <dd className="font-mono">
+                  {active.answeredAt ? new Date(active.answeredAt).toLocaleTimeString() : t("未接通")}
+                </dd>
                 <dt className="text-gray-400">{t("编解码")}</dt>
                 <dd className="font-mono">{active.codec || "—"}</dd>
                 <dt className="text-gray-400">{t("媒体就绪")}</dt>

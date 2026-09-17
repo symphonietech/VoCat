@@ -228,6 +228,11 @@ func (session *Session) watchOutgoingCall(call *imsCall, key sipTransactionKey) 
 					return
 				}
 				session.setCallMediaReady(call.callID)
+				// Record the final status too. Without this the call keeps
+				// whatever the last provisional said, so an answered call
+				// reports "180 Ringing" for its whole life -- which reads as a
+				// 200 OK that never arrived rather than one that did.
+				session.setCallDiagnostic(call.callID, response.StatusCode, diagnostic)
 				session.setCallState(call.callID, "active")
 				session.startSessionTimer(call, response.value("Session-Expires"))
 			} else {

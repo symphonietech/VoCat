@@ -378,3 +378,70 @@ func TestRejectedInviteACKUsesOriginalTransaction(t *testing.T) {
 		}
 	}
 }
+
+// An answered call kept whatever the last provisional response said, so it
+// reported "180 Ringing" for its entire life. That reads as a 200 OK which
+// never arrived rather than one that did, and it misdirected a real
+// investigation into a call that was answered and then dropped.
+func TestAnsweredOutgoingCallReportsTheFinalStatus(t *testing.T) {
+	media, err := newRTPMedia(net.IPv4(127, 0, 0, 1), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer media.Close()
+	// A remote end to negotiate against, so the 200 OK carries answerable SDP.
+	remote, err := newRTPMedia(net.IPv4(127, 0, 0, 1), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer remote.Close()
+
+	call := &imsCall{
+		public:    vowifi.Call{ID: "answered", State: "dialing"},
+		callID:    "answered",
+		media:     media,
+		responses: make(chan *sipResponse, 2),
+	}
+	// net.Pipe gives sendACK somewhere to write; drain it so it cannot block.
+	local, peer := net.Pipe()
+	go func() {
+		buffer := make([]byte, 4096)
+		for {
+			if _, err := peer.Read(buffer); err != nil {
+				return
+			}
+		}
+	}()
+	defer local.Close()
+	defer peer.Close()
+
+	session := &Session{
+		calls:          map[string]*imsCall{call.callID: call},
+		transactions:   make(map[sipTransactionKey]chan *sipResponse),
+		refreshContext: context.Background(),
+		conn:           local,
+	}
+	key := sipTransactionKey{callID: call.callID, cseq: 1, method: "INVITE"}
+	go session.watchOutgoingCall(call, key)
+
+	call.responses <- &sipResponse{StatusCode: 180, Reason: "Ringing"}
+	call.responses <- &sipResponse{
+		StatusCode: 200,
+		Reason:     "OK",
+		Body:       remote.offerSDP(net.IPv4(127, 0, 0, 1)),
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		calls := session.Calls()
+		if len(calls) == 1 && calls[0].State == "active" {
+			if calls[0].SIPCode != 200 {
+				t.Fatalf("answered call reports SIP %d %q, want 200: %#v",
+					calls[0].SIPCode, calls[0].Reason, calls[0])
+			}
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("call never became active: %#v", session.Calls())
+}
