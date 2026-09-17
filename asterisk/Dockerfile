@@ -1,20 +1,32 @@
 # Asterisk for the VoCat SIP trunk.
 #
-# Built from Debian's package rather than a third-party image: bookworm ships
-# Asterisk 20, which is an LTS release, and the package is the one that gets
-# Debian's security updates. A PBX with a SIM's call charges behind it is not
-# somewhere to trust an unmaintained image from a registry.
-FROM debian:bookworm-slim
+# Ubuntu 24.04 rather than Debian: Asterisk was dropped from Debian before
+# bookworm released, so `apt-get install asterisk` there fails outright.
+# Noble carries 20.6.0 -- an upstream LTS release -- and is itself an LTS
+# base. It is a distribution package rather than an image from a registry
+# because a PBX with a SIM's call charges behind it is not somewhere to run
+# something nobody is patching.
+#
+# Caveat worth knowing: asterisk is in universe, which is community-maintained
+# for security rather than covered by Canonical's main support (Ubuntu Pro
+# extends to universe if you have it).
+FROM ubuntu:24.04
 
-# --no-install-recommends keeps this to the modules the trunk actually uses.
-# asterisk-config supplies the /etc/asterisk defaults the entrypoint renders
-# on top of; the sounds package is what Asterisk plays for anything that is
-# not a straight pass-through of the far end's ringback. If a dial plan you
-# add later reports a missing module, drop the flag and rebuild.
+# universe is enabled in this image's default sources, so no extra repository
+# setup is needed.
+#
+# --no-install-recommends skips music-on-hold and sox, which this trunk never
+# plays: it passes the far end's audio through. asterisk-config and
+# asterisk-modules arrive as hard dependencies. asterisk-core-sounds-en-gsm is
+# listed explicitly to settle the virtual asterisk-core-sounds-en dependency,
+# which several packages provide. gettext-base is for the entrypoint's
+# envsubst.
+#
+# If a dial plan you add later reports a missing module, drop the flag and
+# rebuild -- the recommends are what carry the optional extras.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       asterisk \
-      asterisk-config \
       asterisk-core-sounds-en-gsm \
       gettext-base \
  && rm -rf /var/lib/apt/lists/*

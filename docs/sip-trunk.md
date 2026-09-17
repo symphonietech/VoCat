@@ -149,7 +149,7 @@ default here.
 
 | Path | |
 | --- | --- |
-| `Dockerfile` | Debian bookworm plus the packaged Asterisk 20 (an LTS release that gets Debian's security updates) — not a third-party image, since a SIM's call charges sit behind this |
+| `Dockerfile` | Ubuntu 24.04 plus the packaged Asterisk 20.6 (an upstream LTS release) — a distribution package rather than a registry image, since a SIM's call charges sit behind this. Debian is not usable here: Asterisk was dropped before bookworm released. Note `asterisk` is in universe, so its security updates are community-maintained rather than Canonical-supported |
 | `entrypoint.sh` | Renders the templates into `/etc/asterisk`, then runs Asterisk in the foreground |
 | `templates/pjsip.conf` | The trunk endpoint and one softphone account |
 | `templates/extensions.conf` | Outbound dial plan, `[from-vocat]` ready for inbound |
