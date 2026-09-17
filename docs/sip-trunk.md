@@ -238,13 +238,20 @@ Routing, in `extensions.conf`:
 
 ```ini
 [from-internal]
-; Anything that looks like a number goes out through the SIM.
-exten => _X.,1,Dial(PJSIP/${EXTEN}@vocat,60)
+; Everything goes out through the SIM, so the pattern is "everything".
+; Asterisk warns that _. matches any extension; here that is the intent --
+; this context has no feature codes and one destination.
+;
+; Do not narrow this to _X.: that does not match +E.164, and a softphone
+; sending "+1813..." is then answered 404 by Asterisk before the INVITE ever
+; reaches VoCat. A bare + in a pattern is unreliable, so match everything and
+; let VoCat validate the number.
+exten => _.,1,Dial(PJSIP/${EXTEN}@vocat,60)
  same => n,Hangup()
 
 [from-vocat]
 ; Inbound from the SIM rings the softphone. Not reached yet -- see Status.
-exten => _X.,1,Dial(PJSIP/1001,30)
+exten => _.,1,Dial(PJSIP/1001,30)
  same => n,Hangup()
 ```
 
@@ -346,6 +353,32 @@ siptrunk released a call  call_id=...
 the preceding `siptrunk call failed` line carries the reason. No `placed` line
 at all means the INVITE was refused before dialling — the status table above
 says which case that was.
+
+### Asterisk answers 404 before VoCat sees anything
+
+A capture shows the INVITE reaching Asterisk, a `100 Trying`, then:
+
+```
+SIP/2.0 404 Not Found
+Reason: Q.850;cause=3
+```
+
+and **no INVITE to port 5062 at all**. That is Asterisk's own "no matching
+extension" — the call never got as far as the trunk, so nothing in VoCat is
+at fault.
+
+Ask Asterisk directly whether the number matches:
+
+```sh
+docker compose exec asterisk asterisk -rx "dialplan show from-internal"
+docker compose exec asterisk asterisk -rx "dialplan show +18133659364@from-internal"
+```
+
+The usual cause is a pattern that does not cover the leading `+` of an E.164
+number, which is why the shipped dialplan matches `_.` rather than trying to
+enumerate first characters. If `dialplan show from-internal` prints nothing at
+all, `extensions.conf` did not load and `docker compose logs asterisk` will
+say why.
 
 ### Softphone cannot register
 
