@@ -92,6 +92,13 @@ func TestTrunkRefusesToGuessBetweenTwoDevices(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "X-VoCat-Device") {
 		t.Fatalf("ResolveDevice(\"\") error = %v; want a hint to name a device", err)
 	}
+	// The candidates have to be in the message. Refusing to choose is only
+	// useful if the operator can act on it without going to look them up.
+	for _, want := range []string{"slot1", "slot2"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name candidate %q", err, want)
+		}
+	}
 }
 
 func TestTrunkResolvesADeviceByIDOrName(t *testing.T) {

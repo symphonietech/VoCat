@@ -80,9 +80,13 @@ func (g *sipTrunkGateway) ResolveDevice(hint string) (string, error) {
 	case 1:
 		return ready[0], nil
 	default:
+		// Naming them matters: the operator has to pick one, and the whole
+		// point of refusing is that VoCat must not choose. Sending them off to
+		// find the IDs elsewhere makes the refusal harder to act on than the
+		// wrong guess would have been.
 		return "", fmt.Errorf(
-			"%d devices are registered for VoWiFi calling; name one with an X-VoCat-Device header or a device= URI parameter",
-			len(ready))
+			"%d devices are registered for VoWiFi calling (%s); name one with an X-VoCat-Device header or a device= URI parameter",
+			len(ready), strings.Join(ready, ", "))
 	}
 }
 
