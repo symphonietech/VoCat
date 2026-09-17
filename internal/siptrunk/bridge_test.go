@@ -495,3 +495,63 @@ func waitFor(t *testing.T, what string, condition func() bool) {
 	}
 	t.Fatalf("timed out waiting for %s", what)
 }
+
+// A response to an ACK is not merely a spec violation: the peer answers it
+// with another ACK, and two processes on a loopback trade packets as fast as
+// the kernel allows. This happened against a real Asterisk, at roughly one
+// exchange per 150 microseconds, until the call was abandoned.
+//
+// The nil-gateway case is the one that broke. dispatch checked the gateway
+// before the method, so with no gateway an ACK fell through to route(), which
+// listed it among the methods answered 501.
+func TestServerNeverAnswersAnACK(t *testing.T) {
+	for _, testCase := range []struct {
+		name    string
+		gateway Gateway
+	}{
+		{name: "with a gateway", gateway: newFakeGateway()},
+		{name: "without a gateway", gateway: nil},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			server, err := Listen(Options{
+				Address: "127.0.0.1:0",
+				Peers:   []string{"127.0.0.1"},
+				Gateway: testCase.gateway,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = server.Close() })
+
+			conn, err := net.DialUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)}, server.LocalAddr())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Close()
+			if _, err := conn.Write([]byte(inDialogMessage("ACK", "call-ack", "t"))); err != nil {
+				t.Fatal(err)
+			}
+			if err := conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond)); err != nil {
+				t.Fatal(err)
+			}
+			buffer := make([]byte, maxMessageBytes)
+			count, readErr := conn.Read(buffer)
+			if readErr == nil {
+				first, _, _ := strings.Cut(string(buffer[:count]), "\r\n")
+				t.Fatalf("ACK was answered with %q; any response restarts the storm", first)
+			}
+
+			// The server must still be alive and answering everything else.
+			if _, err := conn.Write([]byte(request("OPTIONS"))); err != nil {
+				t.Fatal(err)
+			}
+			if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			count, err = conn.Read(buffer)
+			if err != nil || !strings.HasPrefix(string(buffer[:count]), "SIP/2.0 200") {
+				t.Fatalf("OPTIONS after the ACK: %q, %v", string(buffer[:min(count, 40)]), err)
+			}
+		})
+	}
+}

@@ -82,19 +82,26 @@ type dialog struct {
 // dispatch handles the methods that carry their own responses. It reports
 // whether it took the request; anything it declines falls through to route.
 func (s *Server) dispatch(request *Request, from *net.UDPAddr) bool {
+	// An ACK is answered by nothing, ever -- RFC 3261 §17.1.1.3 gives it no
+	// response at all. This is checked before the gateway, because a response
+	// to an ACK does not merely violate the spec: the peer answers it with
+	// another ACK, and two processes on a loopback then trade packets as fast
+	// as the kernel allows until someone notices the CPU. Taking the request
+	// here is what keeps route() from replying to it.
+	if request.Method == "ACK" {
+		if s.gateway != nil {
+			if current := s.dialog(request.Value("call-id")); current != nil {
+				current.markACKed()
+			}
+		}
+		return true
+	}
 	if s.gateway == nil {
 		return false
 	}
 	switch request.Method {
 	case "INVITE":
 		return s.handleInvite(request, from)
-	case "ACK":
-		if current := s.dialog(request.Value("call-id")); current != nil {
-			current.markACKed()
-		}
-		// An ACK is never answered, so taking it here is what keeps the
-		// fall-through from sending a response to one.
-		return true
 	case "BYE":
 		return s.handleBye(request, from)
 	case "CANCEL":

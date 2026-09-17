@@ -198,6 +198,10 @@ func (s *Server) handle(_ context.Context, packet []byte, from *net.UDPAddr) {
 		return
 	}
 	status, reason := s.route(request)
+	if status == 0 {
+		// route decided this request gets no response at all.
+		return
+	}
 	response, err := BuildResponse(request, status, reason, newTag(), nil)
 	if err != nil {
 		s.log("siptrunk could not build a response", "peer", from.String(), "error", err)
@@ -227,8 +231,13 @@ func (s *Server) route(request *Request) (int, string) {
 	switch request.Method {
 	case "OPTIONS":
 		return 200, "OK"
-	case "INVITE", "ACK", "BYE", "CANCEL", "UPDATE", "INFO":
+	case "INVITE", "BYE", "CANCEL", "UPDATE", "INFO":
 		return 501, "Not Implemented"
+	case "ACK":
+		// Unreachable: dispatch takes every ACK. Listed anyway so that nobody
+		// adds it to the 501 group above, which is what caused a 501-to-ACK
+		// packet storm once already.
+		return 0, ""
 	default:
 		return 405, "Method Not Allowed"
 	}
