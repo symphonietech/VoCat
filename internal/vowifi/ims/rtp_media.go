@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"vocat/internal/g711"
 )
 
 const (
@@ -419,68 +421,12 @@ func (media *rtpMedia) Close() error {
 	return nil
 }
 
-func linearToMuLaw(sample int16) byte {
-	value := int(sample)
-	sign := byte(0)
-	if value < 0 {
-		sign, value = 0x80, -value
-		if value > 32767 {
-			value = 32767
-		}
-	}
-	value += 132
-	if value > 32635 {
-		value = 32635
-	}
-	exponent := 7
-	for mask := 0x4000; exponent > 0 && value&mask == 0; mask >>= 1 {
-		exponent--
-	}
-	mantissa := (value >> (exponent + 3)) & 0x0f
-	return ^(sign | byte(exponent<<4) | byte(mantissa))
-}
+// The G.711 laws live in internal/g711 so the SIP trunk can use the same
+// implementation. These keep the local names the RTP paths already read by.
+func linearToMuLaw(sample int16) byte { return g711.LinearToMuLaw(sample) }
 
-func muLawToLinear(value byte) int16 {
-	value = ^value
-	magnitude := ((int(value)&0x0f)<<3 + 132) << ((value & 0x70) >> 4)
-	magnitude -= 132
-	if value&0x80 != 0 {
-		return int16(-magnitude)
-	}
-	return int16(magnitude)
-}
+func muLawToLinear(value byte) int16 { return g711.MuLawToLinear(value) }
 
-func linearToALaw(sample int16) byte {
-	value := int(sample)
-	mask := byte(0xd5)
-	if value < 0 {
-		mask, value = 0x55, -value-1
-	}
-	if value > 32767 {
-		value = 32767
-	}
-	var encoded byte
-	if value < 256 {
-		encoded = byte(value >> 4)
-	} else {
-		exponent := 1
-		for threshold := 512; exponent < 7 && value >= threshold; threshold <<= 1 {
-			exponent++
-		}
-		encoded = byte(exponent<<4) | byte((value>>(exponent+3))&0x0f)
-	}
-	return encoded ^ mask
-}
+func linearToALaw(sample int16) byte { return g711.LinearToALaw(sample) }
 
-func aLawToLinear(value byte) int16 {
-	value ^= 0x55
-	magnitude := int(value&0x0f)<<4 + 8
-	exponent := int((value & 0x70) >> 4)
-	if exponent != 0 {
-		magnitude = (magnitude + 0x100) << (exponent - 1)
-	}
-	if value&0x80 == 0 {
-		return int16(-magnitude)
-	}
-	return int16(magnitude)
-}
+func aLawToLinear(value byte) int16 { return g711.ALawToLinear(value) }
