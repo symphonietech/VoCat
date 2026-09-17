@@ -337,7 +337,35 @@ func (session *Session) callWasTerminated(id string) bool {
 	return call != nil && call.terminated
 }
 
+// logCallRequest records requests the network sends us inside a dialog. Only
+// responses were logged before, which left the other half of the conversation
+// invisible: whether an ACK arrived for a call we answered, and whether a
+// teardown was a BYE from the network or something local, are both decided by
+// requests.
+func (session *Session) logCallRequest(request *sipRequest, known bool) {
+	if session == nil || session.provider == nil || session.provider.config.Logger == nil || request == nil {
+		return
+	}
+	session.provider.config.Logger.Info("IMS call request",
+		"category", "call",
+		"device_id", session.request.DeviceID,
+		"method", request.Method,
+		"known_call", known,
+		"content_type", safeSIPDiagnostic(request.value("Content-Type")),
+		"body_bytes", len(request.Body),
+		"session_expires", safeSIPDiagnostic(request.value("Session-Expires")),
+	)
+}
+
 func (session *Session) handleCallRequest(request *sipRequest, respond func([]byte) error) bool {
+	switch request.Method {
+	case "INVITE", "ACK", "BYE", "CANCEL", "UPDATE", "INFO":
+		callID := strings.TrimSpace(request.value("Call-ID"))
+		session.callMu.Lock()
+		known := callID != "" && session.calls[callID] != nil
+		session.callMu.Unlock()
+		session.logCallRequest(request, known)
+	}
 	switch request.Method {
 	case "INVITE":
 		callID := strings.TrimSpace(request.value("Call-ID"))
