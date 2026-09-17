@@ -120,7 +120,7 @@ func (s *Server) handleInvite(request *Request, from *net.UDPAddr) bool {
 		// A retransmitted INVITE. Repeating the last answer is correct and
 		// placing a second call would not be.
 		if answer := existing.currentAnswer(); answer != nil {
-			_, _ = s.conn.WriteToUDP(answer, from)
+			s.send(answer, from)
 		} else {
 			s.reply(request, from, 100, "Trying", nil)
 		}
@@ -220,9 +220,7 @@ func (s *Server) reply(request *Request, to *net.UDPAddr, status int, reason str
 		s.log("siptrunk could not build a response", "error", err)
 		return
 	}
-	if _, err := s.conn.WriteToUDP(response, to); err != nil {
-		s.log("siptrunk could not send a response", "peer", to.String(), "error", err)
-	}
+	s.send(response, to)
 }
 
 // run drives one outbound call from INVITE to answer. Every failure path sends
@@ -363,9 +361,7 @@ func (d *dialog) respondToInvite(status int, reason string, body []byte) {
 		d.answer = response
 		d.mu.Unlock()
 	}
-	if _, err := d.server.conn.WriteToUDP(response, d.peer); err != nil {
-		d.server.log("siptrunk could not send a response", "call_id", d.callID, "error", err)
-	}
+	d.server.send(response, d.peer)
 }
 
 func (d *dialog) currentAnswer() []byte {
@@ -409,7 +405,7 @@ func (d *dialog) retransmitAnswer() {
 			return
 		}
 		if answer != nil {
-			_, _ = d.server.conn.WriteToUDP(answer, d.peer)
+			d.server.send(answer, d.peer)
 		}
 		if interval *= 2; interval > timerT2 {
 			interval = timerT2
@@ -469,9 +465,7 @@ func (d *dialog) sendBye() {
 		"Content-Length: 0",
 		"", "",
 	}, "\r\n")
-	if _, err := d.server.conn.WriteToUDP([]byte(message), d.peer); err != nil {
-		d.server.log("siptrunk could not send BYE", "call_id", d.callID, "error", err)
-	}
+	d.server.send([]byte(message), d.peer)
 }
 
 // uriUser extracts the user part of a SIP URI, accepting the "Name <uri>" form

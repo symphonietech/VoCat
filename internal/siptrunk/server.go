@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Options configures a trunk listener.
@@ -47,6 +48,7 @@ type Server struct {
 
 	mu      sync.Mutex
 	dialogs map[string]*dialog
+	limiter responseLimiter
 }
 
 // ParsePeers converts textual peer entries into prefixes. A bare address
@@ -207,8 +209,7 @@ func (s *Server) handle(_ context.Context, packet []byte, from *net.UDPAddr) {
 		s.log("siptrunk could not build a response", "peer", from.String(), "error", err)
 		return
 	}
-	if _, err := s.conn.WriteToUDP(response, from); err != nil {
-		s.log("siptrunk could not send a response", "peer", from.String(), "error", err)
+	if !s.send(response, from) {
 		return
 	}
 	if request.Method == "OPTIONS" {
@@ -275,6 +276,27 @@ func (s *Server) viaHost(peer *net.UDPAddr) string {
 
 func (s *Server) contactURI(peer *net.UDPAddr) string {
 	return "sip:vocat@" + s.viaHost(peer)
+}
+
+// send writes one packet to a peer, subject to the runaway cap. It reports
+// whether the packet went out, so callers do not log a success that did not
+// happen.
+func (s *Server) send(packet []byte, to *net.UDPAddr) bool {
+	peer := to.String()
+	allowed, firstRefusal := s.limiter.allow(peer, time.Now())
+	if !allowed {
+		if firstRefusal {
+			s.log("siptrunk is dropping packets to a peer, over "+
+				"the per-second cap; this is a loop, not load",
+				"peer", peer, "cap", maxResponsesPerSecond)
+		}
+		return false
+	}
+	if _, err := s.conn.WriteToUDP(packet, to); err != nil {
+		s.log("siptrunk could not send a packet", "peer", peer, "error", err)
+		return false
+	}
+	return true
 }
 
 func (s *Server) log(message string, args ...any) {
