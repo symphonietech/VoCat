@@ -159,3 +159,42 @@ func TestTrunkReportsWhyACallEnded(t *testing.T) {
 		t.Fatalf("WaitAnswered error = %v; want the SIP status", err)
 	}
 }
+
+// An IMS call has one RTP bridge, and its downlink is a single channel: a
+// second reader would take roughly half the frames and leave the PBX's audio
+// as choppy as the browser's. The browser bridge must refuse rather than
+// quietly degrade a call the trunk is already carrying.
+func TestTrunkClaimBlocksTheBrowserMediaBridge(t *testing.T) {
+	server := &Server{logger: regionTestLogger()}
+	if server.trunkHoldsCall("slot1", "call-1") {
+		t.Fatal("a fresh server already holds a call")
+	}
+	server.claimTrunkCall("slot1", "call-1")
+	if !server.trunkHoldsCall("slot1", "call-1") {
+		t.Fatal("claimed call is not held")
+	}
+	// Scoped per device: the same call ID on another SIM is a different call.
+	if server.trunkHoldsCall("slot2", "call-1") {
+		t.Fatal("a claim on one device leaked to another")
+	}
+	server.releaseTrunkCall("slot1", "call-1")
+	if server.trunkHoldsCall("slot1", "call-1") {
+		t.Fatal("released call is still held")
+	}
+}
+
+// Hangup runs on every teardown path, including ones that never reached
+// media, so it is what must release the claim -- otherwise a failed call
+// would lock the browser bridge out of that call ID for the process's life.
+func TestTrunkHangupReleasesTheClaim(t *testing.T) {
+	controller := &trunkVoWiFiController{ready: map[string]bool{"slot1": true}}
+	server := &Server{vowifi: controller, logger: regionTestLogger()}
+	gateway := &sipTrunkGateway{server: server}
+	server.claimTrunkCall("slot1", "call-1")
+	if err := gateway.Hangup(context.Background(), "slot1", "call-1"); err != nil {
+		t.Fatal(err)
+	}
+	if server.trunkHoldsCall("slot1", "call-1") {
+		t.Fatal("Hangup left the claim in place")
+	}
+}

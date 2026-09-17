@@ -333,6 +333,30 @@ the preceding `siptrunk call failed` line carries the reason. No `placed` line
 at all means the INVITE was refused before dialling — the status table above
 says which case that was.
 
+## The trunk and the Calls page together
+
+Both work at once, and neither has to be off for the other to run. The Calls
+page places and answers calls exactly as before; the trunk is inert unless
+`VOCAT_SIP_TRUNK_ADDR` is set, and even then it only touches calls a PBX
+placed through it.
+
+The one thing that cannot be shared is a single call's **audio**. An IMS call
+has one RTP bridge and its downlink is a single channel, so a second reader
+would take roughly half the frames and leave the PBX's audio as choppy as the
+browser's. Connecting browser audio to a call the trunk is carrying therefore
+returns:
+
+```
+409 call_media_in_use
+this call's audio is bridged to the SIP trunk; use the PBX's own client, or
+hang up from the PBX first
+```
+
+The call still appears on the Calls page with its state, duration and SIP
+status, and hanging up from there still works — it is only the audio bridge
+that is exclusive. Calls placed from the Calls page are never claimed by the
+trunk, so browser audio on those is unaffected.
+
 ## Why a trunk rather than a registrar
 
 Putting registration in Asterisk keeps the security-sensitive part in software

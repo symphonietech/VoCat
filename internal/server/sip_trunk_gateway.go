@@ -146,10 +146,43 @@ func (g *sipTrunkGateway) Media(ctx context.Context, deviceID, callID string) (s
 	if err != nil {
 		return nil, err
 	}
+	g.server.claimTrunkCall(deviceID, callID)
 	return media, nil
 }
 
+// An IMS call has one RTP bridge and its downlink is a single channel, so two
+// readers would take roughly half the frames each and leave both sides
+// choppy. Claiming a call is what lets the browser bridge refuse rather than
+// quietly degrade a call the PBX is already carrying.
+
+func trunkCallKey(deviceID, callID string) string { return deviceID + "\x00" + callID }
+
+func (s *Server) claimTrunkCall(deviceID, callID string) {
+	s.trunkMu.Lock()
+	defer s.trunkMu.Unlock()
+	if s.trunkCalls == nil {
+		s.trunkCalls = make(map[string]bool)
+	}
+	s.trunkCalls[trunkCallKey(deviceID, callID)] = true
+}
+
+func (s *Server) releaseTrunkCall(deviceID, callID string) {
+	s.trunkMu.Lock()
+	defer s.trunkMu.Unlock()
+	delete(s.trunkCalls, trunkCallKey(deviceID, callID))
+}
+
+// trunkHoldsCall reports whether the SIP trunk is carrying a call's audio.
+func (s *Server) trunkHoldsCall(deviceID, callID string) bool {
+	s.trunkMu.Lock()
+	defer s.trunkMu.Unlock()
+	return s.trunkCalls[trunkCallKey(deviceID, callID)]
+}
+
 func (g *sipTrunkGateway) Hangup(ctx context.Context, deviceID, callID string) error {
+	// Released here rather than in the bridge because Hangup is on every
+	// teardown path, including the ones that never reached media.
+	g.server.releaseTrunkCall(deviceID, callID)
 	controller, err := g.controller()
 	if err != nil {
 		return err

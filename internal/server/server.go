@@ -100,6 +100,8 @@ type Server struct {
 	cellularDataLifecycleOnce sync.Once
 	cellularData              *cellularDataRuntime
 	smsTest                   *smstest.Scheduler
+	trunkMu                   sync.Mutex
+	trunkCalls                map[string]bool
 }
 
 func New(options Options) (*Server, error) {

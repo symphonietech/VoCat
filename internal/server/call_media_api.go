@@ -31,6 +31,13 @@ func (s *Server) handleCallMedia(w http.ResponseWriter, r *http.Request, config 
 		writeError(w, http.StatusBadRequest, "invalid_call_id", "call_id is required")
 		return true
 	}
+	if s.trunkHoldsCall(config.ID, callID) {
+		// One RTP bridge per call: a second reader would split the downlink
+		// frames and leave the PBX's audio choppy as well as the browser's.
+		writeError(w, http.StatusConflict, "call_media_in_use",
+			"this call's audio is bridged to the SIP trunk; use the PBX's own client, or hang up from the PBX first")
+		return true
+	}
 	controller, ok := s.vowifi.(VoWiFiCallMediaController)
 	if !ok {
 		writeError(w, http.StatusNotImplemented, "call_media_unavailable", "the active IMS session does not expose RTP media")
