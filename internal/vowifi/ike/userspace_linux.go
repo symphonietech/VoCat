@@ -464,7 +464,80 @@ func (handle *linuxUserspaceHandle) configureFamily(
 			"src", local.String(),
 		)
 	}
+	return handle.installSelectorRoutes(ctx, family, local, tableValue)
+}
+
+// installSelectorRoutes routes everything the responder agreed to carry.
+//
+// The P-CSCF host routes above cover signalling only, but a call's media
+// endpoint is a different address, negotiated per call in SDP and unknown when
+// the tunnel is built. Without a route it falls through to the fail-closed
+// default and RTP fails with EHOSTUNREACH -- which looks like a working call
+// with no audio, because signalling has a route and media does not.
+//
+// The negotiated responder selectors are the right bound: they are what the
+// peer offered to carry, they are already validated against the P-CSCF
+// addresses by validateChildSAConfig, and anything outside them still falls
+// through to "unreachable". The routes carry a lower metric than that default
+// so a selector spanning the whole address space takes precedence over it
+// rather than colliding with it.
+func (handle *linuxUserspaceHandle) installSelectorRoutes(
+	ctx context.Context,
+	family string,
+	local net.IP,
+	tableValue string,
+) error {
+	installed := make(map[string]struct{}, len(handle.config.ResponderSelectors))
+	for _, selector := range handle.config.ResponderSelectors {
+		if selectorFamilyFlag(selector) != family {
+			continue
+		}
+		prefix, err := selectorPrefix(selector)
+		if err != nil {
+			// A range the peer did not express as a CIDR block cannot become a
+			// route. The P-CSCF host routes still stand, so signalling is
+			// unaffected; only media within that range stays unreachable.
+			continue
+		}
+		if _, duplicate := installed[prefix]; duplicate {
+			continue
+		}
+		installed[prefix] = struct{}{}
+		arguments := []string{
+			family, "route", "add",
+			"table", tableValue,
+			prefix,
+			"dev", handle.config.Name,
+			"src", local.String(),
+			"metric", selectorRouteMetric,
+		}
+		if err := handle.run(ctx, "install responder selector route", arguments...); err != nil {
+			return err
+		}
+		handle.recordCleanup(
+			"remove responder selector route",
+			family, "route", "delete",
+			"table", tableValue,
+			prefix,
+			"dev", handle.config.Name,
+			"src", local.String(),
+			"metric", selectorRouteMetric,
+		)
+	}
 	return nil
+}
+
+// selectorRouteMetric sits below the fail-closed default's 1024 so a selector
+// covering the whole address space is preferred over it.
+const selectorRouteMetric = "512"
+
+// selectorFamilyFlag reports the "ip" command family flag a selector belongs
+// to, so an IPv6 selector is never installed into the IPv4 table or vice versa.
+func selectorFamilyFlag(selector trafficSelector) string {
+	if selector.StartIP.To4() != nil {
+		return "-4"
+	}
+	return "-6"
 }
 
 func userspaceRoutingIdentifiers(spi uint32) (table uint32, priority uint32) {
