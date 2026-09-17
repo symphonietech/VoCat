@@ -154,6 +154,7 @@ default here.
 | `templates/pjsip.conf` | The trunk endpoint and one softphone account |
 | `templates/extensions.conf` | Outbound dial plan, `[from-vocat]` ready for inbound |
 | `templates/rtp.conf` | Ports 10000-10200 |
+| `templates/modules.conf` | `noload => chan_sip.so`, so PJSIP owns port 5060 |
 
 The configs are rendered rather than mounted so the SIP password stays in the
 environment and never reaches a git-tracked file. `envsubst` is given an
@@ -332,6 +333,38 @@ siptrunk released a call  call_id=...
 the preceding `siptrunk call failed` line carries the reason. No `placed` line
 at all means the INVITE was refused before dialling — the status table above
 says which case that was.
+
+### Softphone cannot register
+
+```
+chan_sip.c:29060 handle_request_register: Registration from 'sip:1001@...'
+failed for '...' - Wrong password
+```
+
+**`chan_sip.c` is the tell, and the message is a lie.** This setup is
+PJSIP-only, so a registration answered by `chan_sip` was answered by a driver
+that has never heard of extension 1001. chan_sip's `alwaysauthreject` default
+challenges an unknown peer and then reports "Wrong password" rather than "no
+such peer" — deliberate, so a scanner cannot enumerate valid extensions, but
+it sends anyone debugging their own setup after a credential problem that does
+not exist.
+
+Asterisk 20 still ships chan_sip, and the packaged `sip.conf` has it bind
+5060 — the port the PJSIP transport wants. Whichever driver loads first takes
+it. `templates/modules.conf` noloads chan_sip for exactly this reason; if you
+see the message above, that file is not in effect. Check:
+
+```sh
+docker compose exec asterisk asterisk -rx "module show like chan_sip"
+docker compose exec asterisk asterisk -rx "pjsip show endpoints"
+```
+
+The first should list nothing, the second should show `vocat` and your
+softphone extension. If `pjsip show endpoints` errors, `res_pjsip` did not
+load at all and `docker compose logs asterisk` will say why.
+
+A genuine wrong password from PJSIP looks different — it names the endpoint
+and comes from `res_pjsip`, not `chan_sip`.
 
 ## The trunk and the Calls page together
 

@@ -28,6 +28,9 @@ for template in /etc/asterisk/templates/*.conf; do
 done
 
 echo "entrypoint: trunk=$VOCAT_TRUNK_HOST device=${VOCAT_DEVICE:-<auto>} extension=$ASTERISK_SIP_USER"
+echo "entrypoint: PJSIP is the only SIP driver here; chan_sip is noloaded."
+echo "entrypoint: if a softphone gets 'Wrong password', check that res_pjsip"
+echo "entrypoint: loaded and bound 5060 -- run: asterisk -rx 'pjsip show endpoints'"
 
 # -f keeps Asterisk in the foreground so the container supervises it and its
 # console output becomes `docker compose logs`.
