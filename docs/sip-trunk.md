@@ -379,6 +379,44 @@ load at all and `docker compose logs asterisk` will say why.
 A genuine wrong password from PJSIP looks different — it names the endpoint
 and comes from `res_pjsip`, not `chan_sip`.
 
+### Another SIP server already owns port 5060
+
+If the container's log is **completely empty** while the phone reports a
+credential failure, the packet is very likely being answered by something
+else. This container uses host networking, so 5060 is the host's port: an
+Asterisk installed on the host, or any other PBX, wins the bind, and this
+container then runs with no SIP transport at all. `pjsip show endpoints` still
+lists everything, which makes it look healthy.
+
+The entrypoint now refuses to start in that situation and says so, but on an
+older image, prove it with a capture rather than a log:
+
+```sh
+sudo timeout 30 tcpdump -ni any port 5060 -vv
+```
+
+The `Server:` header in the response is the giveaway — it names the version
+that actually answered:
+
+```
+Server: Asterisk PBX 16.2.1~dfsg-2ubuntu1     <- a host install
+Server: Asterisk PBX 20.6.0                   <- this container
+```
+
+Find and remove the other one:
+
+```sh
+sudo ss -lunp | grep :5060
+sudo systemctl disable --now asterisk
+docker compose up -d asterisk
+```
+
+Verify the container is what answers:
+
+```sh
+docker compose exec asterisk asterisk -rx "core show version"
+```
+
 ## The trunk and the Calls page together
 
 Both work at once, and neither has to be off for the other to run. The Calls

@@ -20,7 +20,8 @@ FROM ubuntu:24.04
 # asterisk-modules arrive as hard dependencies. asterisk-core-sounds-en-gsm is
 # listed explicitly to settle the virtual asterisk-core-sounds-en dependency,
 # which several packages provide. gettext-base is for the entrypoint's
-# envsubst.
+# envsubst, and iproute2 for the port check the entrypoint does before
+# starting Asterisk.
 #
 # If a dial plan you add later reports a missing module, drop the flag and
 # rebuild -- the recommends are what carry the optional extras.
@@ -29,6 +30,7 @@ RUN apt-get update \
       asterisk \
       asterisk-core-sounds-en-gsm \
       gettext-base \
+      iproute2 \
  && rm -rf /var/lib/apt/lists/*
 
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
