@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { callMediaURL } from "../api";
+import { callMediaProbeURL, callMediaURL } from "../api";
 
 export type CallAudioState = "idle" | "connecting" | "live" | "error";
 
@@ -87,7 +87,24 @@ export function useCallAudio(
       socket.onclose = () => {
         if (!disposed) setStatus((previous) => ({ ...previous, state: previous.state === "error" ? "error" : "idle" }));
       };
-      socket.onerror = () => fail("media bridge connection failed");
+      // The WebSocket API deliberately withholds the HTTP status from script,
+      // so a refused upgrade surfaces as an eventless error. The server does
+      // explain itself though -- 501 when IMS is not registered, 409 when the
+      // call or its media is gone, 400 for a bad call id -- so ask the same
+      // URL over plain HTTP and report what it says instead of "failed".
+      socket.onerror = () => {
+        fetch(callMediaProbeURL(deviceId, callId), { credentials: "include" })
+          .then(async (response) => {
+            const body = await response.json().catch(() => null);
+            const detail = body?.error?.message || body?.message || "";
+            fail(
+              detail
+                ? `media bridge refused (HTTP ${response.status}): ${detail}`
+                : `media bridge refused (HTTP ${response.status})`,
+            );
+          })
+          .catch(() => fail("media bridge unreachable"));
+      };
 
       socket.onmessage = (event) => {
         if (!context || !output || !(event.data instanceof ArrayBuffer)) return;

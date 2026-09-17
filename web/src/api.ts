@@ -253,6 +253,14 @@ export function callMediaURL(deviceId: string, callId: string) {
   return `${scheme}//${window.location.host}/api/devices/${encodeURIComponent(deviceId)}/calls/media?${query}`;
 }
 
+// The same endpoint over http(s). A WebSocket upgrade that the server refuses
+// gives script no status, so this fetches the identical URL to read the error
+// body the handshake discarded.
+export function callMediaProbeURL(deviceId: string, callId: string) {
+  const query = new URLSearchParams({ call_id: callId });
+  return `/api/devices/${encodeURIComponent(deviceId)}/calls/media?${query}`;
+}
+
 export function apiMessage(error: unknown) {
   if (error instanceof ApiError) {
     const suffix = error.requestId ? `（${tl("请求")} ${error.requestId}）` : "";
