@@ -32,6 +32,7 @@ import (
 	"vocat/internal/modem"
 	"vocat/internal/pcsc"
 	"vocat/internal/server"
+	"vocat/internal/siptrunk"
 	"vocat/internal/smstest"
 	"vocat/internal/store"
 	"vocat/internal/update"
@@ -442,6 +443,27 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 		return err
 	}
 	defer database.Close()
+
+	// The SIP trunk lets a PBX route calls through a SIM's IMS registration.
+	// It stays off unless an address is configured, because it authorises by
+	// source address rather than credentials and so is only safe on an
+	// interface the operator has chosen deliberately.
+	if address := strings.TrimSpace(cfg.SIPTrunkAddress); address != "" {
+		trunk, trunkErr := siptrunk.Listen(siptrunk.Options{
+			Address: address,
+			Peers:   cfg.SIPTrunkPeers,
+			Logger:  logger,
+		})
+		if trunkErr != nil {
+			return fmt.Errorf("start SIP trunk: %w", trunkErr)
+		}
+		defer trunk.Close()
+		logger.Info("SIP trunk listening",
+			"category", "siptrunk",
+			"address", trunk.LocalAddr().String(),
+			"peers", cfg.SIPTrunkPeers,
+		)
+	}
 	developerEnabled := isDeveloperEnabled(startupContext, database)
 	pluginRoot := filepath.Join(filepath.Dir(cfg.DatabasePath), "plugins")
 	legacyExportProxyConfig := filepath.Join(pluginRoot, exportproxy.ReservedID, "data", "configs.json")

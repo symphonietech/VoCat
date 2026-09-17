@@ -23,6 +23,16 @@ type Config struct {
 	SecureCookies       bool
 	ShutdownTimeout     time.Duration
 	MaxRequestBodyBytes int64
+	// SIPTrunkAddress enables the SIP trunk when set, letting a PBX route
+	// calls through a SIM's IMS registration. Empty disables it. The trunk
+	// authorises peers by source address rather than credentials, so bind it
+	// to loopback or a private interface, never to one reachable from the
+	// internet.
+	SIPTrunkAddress string
+	// SIPTrunkPeers lists the addresses or CIDR prefixes allowed to use the
+	// trunk. No default: an operator naming the listen address must also say
+	// who may reach it.
+	SIPTrunkPeers []string
 }
 
 type fileConfig struct {
@@ -31,12 +41,14 @@ type fileConfig struct {
 	// Retain the legacy keys only so upgrades do not reject an existing config
 	// file. They are deliberately ignored: administrator credentials are read
 	// exclusively from SQLite.
-	LegacyAdminUsername *string `json:"admin_username"`
-	LegacyAdminPassword *string `json:"admin_password"`
-	SessionTTL          *string `json:"session_ttl"`
-	SecureCookies       *bool   `json:"secure_cookies"`
-	ShutdownTimeout     *string `json:"shutdown_timeout"`
-	MaxRequestBodyBytes *int64  `json:"max_request_body_bytes"`
+	LegacyAdminUsername *string  `json:"admin_username"`
+	LegacyAdminPassword *string  `json:"admin_password"`
+	SessionTTL          *string  `json:"session_ttl"`
+	SecureCookies       *bool    `json:"secure_cookies"`
+	ShutdownTimeout     *string  `json:"shutdown_timeout"`
+	MaxRequestBodyBytes *int64   `json:"max_request_body_bytes"`
+	SIPTrunkAddress     *string  `json:"sip_trunk_address"`
+	SIPTrunkPeers       []string `json:"sip_trunk_peers"`
 }
 
 // Default returns the non-secret process configuration. Administrator
@@ -114,6 +126,12 @@ func applyFile(cfg *Config, values fileConfig) error {
 	if values.DatabasePath != nil {
 		cfg.DatabasePath = *values.DatabasePath
 	}
+	if values.SIPTrunkAddress != nil {
+		cfg.SIPTrunkAddress = *values.SIPTrunkAddress
+	}
+	if values.SIPTrunkPeers != nil {
+		cfg.SIPTrunkPeers = append([]string(nil), values.SIPTrunkPeers...)
+	}
 	if values.SessionTTL != nil {
 		duration, err := time.ParseDuration(*values.SessionTTL)
 		if err != nil {
@@ -146,6 +164,10 @@ func applyEnvironment(cfg *Config) error {
 
 	applyString("VOCAT_ADDR", &cfg.Address)
 	applyString("VOCAT_DATABASE_PATH", &cfg.DatabasePath)
+	applyString("VOCAT_SIP_TRUNK_ADDR", &cfg.SIPTrunkAddress)
+	if value, ok := os.LookupEnv("VOCAT_SIP_TRUNK_PEERS"); ok {
+		cfg.SIPTrunkPeers = splitList(value)
+	}
 
 	if value, ok := os.LookupEnv("VOCAT_SESSION_TTL"); ok {
 		duration, err := time.ParseDuration(value)
@@ -203,4 +225,19 @@ func (cfg Config) Validate() error {
 		return errors.New("max_request_body_bytes must be between 1024 and 10485760")
 	}
 	return nil
+}
+
+// splitList parses a comma or space separated environment list, dropping empty
+// entries so a trailing comma is not read as an unnamed peer.
+func splitList(value string) []string {
+	fields := strings.FieldsFunc(value, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t'
+	})
+	result := make([]string, 0, len(fields))
+	for _, field := range fields {
+		if field = strings.TrimSpace(field); field != "" {
+			result = append(result, field)
+		}
+	}
+	return result
 }
