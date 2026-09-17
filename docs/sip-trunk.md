@@ -98,7 +98,7 @@ Then point a softphone at the host:
 | Server / domain | this host's LAN IP |
 | Username | `1001`, or whatever `ASTERISK_SIP_USER` says |
 | Password | `ASTERISK_SIP_PASSWORD` |
-| Transport | UDP |
+| Transport | UDP or TCP (not TLS — no certificate is configured) |
 
 Dial a number and it goes out over the SIM.
 
@@ -175,6 +175,14 @@ so inbound requests from VoCat are attributed to that endpoint:
 [transport-udp]
 type=transport
 protocol=udp
+bind=0.0.0.0:5060
+
+; Softphones do not all default to UDP, and a client set to TCP against a
+; UDP-only Asterisk gets its connection refused -- which looks like a bad
+; password at the phone and logs nothing at all here.
+[transport-tcp]
+type=transport
+protocol=tcp
 bind=0.0.0.0:5060
 
 [vocat]
