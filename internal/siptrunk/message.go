@@ -160,8 +160,10 @@ func (r *Request) contentLength() (int, bool) {
 // From, Call-ID and CSeq headers are copied from the request unchanged, and
 // every Via is copied in order so the response retraces the path it came by.
 // A tag is appended to To when the request has none, which is what lets the
-// peer match the response to its transaction.
-func BuildResponse(request *Request, status int, reason string, toTag string, body []byte) ([]byte, error) {
+// peer match the response to its transaction. Each extraHeader is a complete
+// "Name: value" line, for the Contact a 2xx to an INVITE must carry so the
+// peer knows where to send its ACK and its BYE.
+func BuildResponse(request *Request, status int, reason string, toTag string, body []byte, extraHeaders ...string) ([]byte, error) {
 	if request == nil {
 		return nil, errors.New("siptrunk: no request to respond to")
 	}
@@ -181,6 +183,12 @@ func BuildResponse(request *Request, status int, reason string, toTag string, bo
 	fmt.Fprintf(&builder, "To: %s\r\n", to)
 	fmt.Fprintf(&builder, "Call-ID: %s\r\n", request.Value("call-id"))
 	fmt.Fprintf(&builder, "CSeq: %s\r\n", request.Value("cseq"))
+	for _, header := range extraHeaders {
+		if header == "" {
+			continue
+		}
+		builder.WriteString(header + "\r\n")
+	}
 	if len(body) > 0 {
 		builder.WriteString("Content-Type: application/sdp\r\n")
 	}

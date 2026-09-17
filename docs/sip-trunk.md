@@ -9,10 +9,10 @@ This is deliberately **not** a registrar. There are no user accounts and no
 digest authentication: peers are authorised by source address. Identity is the
 PBX's job.
 
-> **Status.** The trunk currently answers `OPTIONS`, which is what a PBX uses to
-> qualify a peer, and replies `501 Not Implemented` to `INVITE` and the other
-> call methods. That is enough to stand Asterisk up against it and confirm the
-> path end to end; call bridging lands in a later change.
+> **Status.** Outbound calls work: the PBX sends an `INVITE`, VoCat places the
+> call over the SIM's IMS registration and bridges the audio. The inbound
+> direction — a call arriving on the SIM being offered to the PBX — is not here
+> yet; inbound calls are still answered from VoCat's own Calls page.
 
 ## Enabling it
 
@@ -114,10 +114,48 @@ exten => _X.,1,Dial(PJSIP/${EXTEN}@vocat,60)
  same => n,Hangup()
 
 [from-vocat]
-; Inbound from the SIM rings the softphone.
+; Inbound from the SIM rings the softphone. Not reached yet -- see Status.
 exten => _X.,1,Dial(PJSIP/1001,30)
  same => n,Hangup()
 ```
+
+## Choosing which SIM places a call
+
+With one IMS-registered device VoCat picks it, and the dial plan above is all
+there is to it. With more than one, VoCat refuses to guess — picking for you
+would put a real, billed call on whichever SIM happened to sort first — so the
+dial plan has to name one. Either an ID or the device name works.
+
+A header, which is the easier half of a PJSIP dial plan:
+
+```ini
+exten => _X.,1,Set(PJSIP_HEADER(add,X-VoCat-Device)=SLOT1-1)
+ same => n,Dial(PJSIP/${EXTEN}@vocat,60)
+```
+
+or a URI parameter, when the dial string is being built anyway:
+
+```ini
+exten => _X.,1,Dial(PJSIP/vocat/sip:${EXTEN}@127.0.0.1:5062;device=SLOT1-1,60)
+```
+
+A per-SIM outbound route is usually clearer than either: give each SIM its own
+extension pattern and set the header there.
+
+## What the PBX sees
+
+| Situation | Status | Meaning |
+| --- | --- | --- |
+| Call bridged | `200 OK` | Answered, with an SDP answer VoCat's RTP leg is listening on |
+| Named SIM absent, or not IMS-registered | `404 Not Found` | A dial plan mistake: try another route, do not retry this one |
+| No SIM named and more than one available | `404 Not Found` | Add the header or URI parameter above |
+| Offer with no G.711 | `488 Not Acceptable Here` | Fix `allow=` on the endpoint |
+| Nobody answered, busy, rejected | `480 Temporarily Unavailable` | The VoCat log carries the real SIP status from the carrier |
+| IMS session cannot signal or carry media | `503` / `500` | VoCat's own fault; the log says which |
+
+VoCat answers only once the SIM's own call is both answered **and** carrying
+RTP. Answering earlier would bridge a leg with nowhere to send audio, which is
+exactly the silent call this path exists to avoid.
 
 ## Verifying
 
@@ -129,8 +167,8 @@ pjsip qualify vocat
 ```
 
 The endpoint should read **Avail**. That means Asterisk's `OPTIONS` reached
-VoCat, was accepted from a trusted address, and was answered — the whole path
-apart from call handling.
+VoCat, was accepted from a trusted address, and was answered — the signalling
+path, before any call uses it.
 
 VoCat logs each handled request:
 
@@ -150,8 +188,18 @@ disagree, and nothing at all if the packets never arrive — which on host
 networking usually means the port, and on bridged networking usually means the
 container cannot reach the host's loopback.
 
-Placing a call will currently return `501 Not Implemented`, which is expected
-until bridging lands.
+Then place a call from the softphone. VoCat logs the call as it goes:
+
+```
+siptrunk placed a call    call_id=... device_id=SLOT1-1 number=+15551234 ims_call_id=...
+siptrunk bridged a call   call_id=... ims_call_id=... rtp_port=41234
+siptrunk released a call  call_id=...
+```
+
+`placed` without `bridged` means the SIM leg never reached answered-with-media;
+the preceding `siptrunk call failed` line carries the reason. No `placed` line
+at all means the INVITE was refused before dialling — the status table above
+says which case that was.
 
 ## Why a trunk rather than a registrar
 

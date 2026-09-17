@@ -444,26 +444,6 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 	}
 	defer database.Close()
 
-	// The SIP trunk lets a PBX route calls through a SIM's IMS registration.
-	// It stays off unless an address is configured, because it authorises by
-	// source address rather than credentials and so is only safe on an
-	// interface the operator has chosen deliberately.
-	if address := strings.TrimSpace(cfg.SIPTrunkAddress); address != "" {
-		trunk, trunkErr := siptrunk.Listen(siptrunk.Options{
-			Address: address,
-			Peers:   cfg.SIPTrunkPeers,
-			Logger:  logger,
-		})
-		if trunkErr != nil {
-			return fmt.Errorf("start SIP trunk: %w", trunkErr)
-		}
-		defer trunk.Close()
-		logger.Info("SIP trunk listening",
-			"category", "siptrunk",
-			"address", trunk.LocalAddr().String(),
-			"peers", cfg.SIPTrunkPeers,
-		)
-	}
 	developerEnabled := isDeveloperEnabled(startupContext, database)
 	pluginRoot := filepath.Join(filepath.Dir(cfg.DatabasePath), "plugins")
 	legacyExportProxyConfig := filepath.Join(pluginRoot, exportproxy.ReservedID, "data", "configs.json")
@@ -638,6 +618,31 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 	})
 	if err != nil {
 		return err
+	}
+	// The SIP trunk lets a PBX route calls through a SIM's IMS registration.
+	// It stays off unless an address is configured, because it authorises by
+	// source address rather than credentials and so is only safe on an
+	// interface the operator has chosen deliberately. It starts after the API
+	// server because the gateway that places its calls is the same call
+	// controller the web UI drives.
+	if address := strings.TrimSpace(cfg.SIPTrunkAddress); address != "" {
+		gateway := handler.SIPTrunkGateway()
+		trunk, trunkErr := siptrunk.Listen(siptrunk.Options{
+			Address: address,
+			Peers:   cfg.SIPTrunkPeers,
+			Logger:  logger,
+			Gateway: gateway,
+		})
+		if trunkErr != nil {
+			return fmt.Errorf("start SIP trunk: %w", trunkErr)
+		}
+		defer trunk.Close()
+		logger.Info("SIP trunk listening",
+			"category", "siptrunk",
+			"address", trunk.LocalAddr().String(),
+			"peers", cfg.SIPTrunkPeers,
+			"calls", gateway != nil,
+		)
 	}
 	onIncomingCall = func(ctx context.Context, call ims.ReceivedCall) error {
 		deviceConfig, _ := database.Device(ctx, call.DeviceID)

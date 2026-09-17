@@ -1,6 +1,7 @@
 package siptrunk
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -9,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -26,6 +28,11 @@ type Options struct {
 	// CIDR prefixes; an empty list accepts nothing.
 	Peers  []string
 	Logger *slog.Logger
+	// Gateway places the calls the trunk accepts. Leaving it nil keeps the
+	// listener as a reachable peer that answers OPTIONS and refuses calls,
+	// which is what a deployment without VoWiFi-capable devices should look
+	// like from the PBX.
+	Gateway Gateway
 }
 
 // Server answers SIP on behalf of VoCat's SIM-backed calling.
@@ -33,9 +40,13 @@ type Server struct {
 	conn    *net.UDPConn
 	peers   []netip.Prefix
 	logger  *slog.Logger
+	gateway Gateway
 	wg      sync.WaitGroup
 	closing chan struct{}
 	once    sync.Once
+
+	mu      sync.Mutex
+	dialogs map[string]*dialog
 }
 
 // ParsePeers converts textual peer entries into prefixes. A bare address
@@ -84,7 +95,14 @@ func Listen(options Options) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("siptrunk: listen on %q: %w", options.Address, err)
 	}
-	server := &Server{conn: conn, peers: peers, logger: options.Logger, closing: make(chan struct{})}
+	server := &Server{
+		conn:    conn,
+		peers:   peers,
+		logger:  options.Logger,
+		gateway: options.Gateway,
+		closing: make(chan struct{}),
+		dialogs: make(map[string]*dialog),
+	}
 	server.wg.Add(1)
 	go server.serve()
 	return server, nil
@@ -96,14 +114,29 @@ func (s *Server) LocalAddr() *net.UDPAddr {
 	return s.conn.LocalAddr().(*net.UDPAddr)
 }
 
-// Close stops the listener and waits for the read loop to finish.
+// Close stops the listener and waits for the read loop to finish. Calls in
+// progress are ended first: a bridge whose process is going away should hang
+// up rather than leave the PBX holding a dialog and the SIM holding a call.
 func (s *Server) Close() error {
 	s.once.Do(func() {
 		close(s.closing)
+		for _, current := range s.activeDialogs() {
+			current.teardown(true)
+		}
 		_ = s.conn.Close()
 	})
 	s.wg.Wait()
 	return nil
+}
+
+func (s *Server) activeDialogs() []*dialog {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current := make([]*dialog, 0, len(s.dialogs))
+	for _, entry := range s.dialogs {
+		current = append(current, entry)
+	}
+	return current
 }
 
 func (s *Server) serve() {
@@ -150,9 +183,18 @@ func (s *Server) handle(_ context.Context, packet []byte, from *net.UDPAddr) {
 		s.log("siptrunk rejected an untrusted peer", "peer", from.String())
 		return
 	}
+	if bytes.HasPrefix(packet, []byte("SIP/")) {
+		// A response, which only arrives for a request the trunk itself sent
+		// (its BYE). Nothing here retransmits, so there is nothing to do with
+		// one, and logging it as malformed would be wrong.
+		return
+	}
 	request, err := ParseRequest(packet)
 	if err != nil {
 		s.log("siptrunk rejected a malformed request", "peer", from.String(), "error", err)
+		return
+	}
+	if s.dispatch(request, from) {
 		return
 	}
 	status, reason := s.route(request)
@@ -169,20 +211,53 @@ func (s *Server) handle(_ context.Context, packet []byte, from *net.UDPAddr) {
 		"peer", from.String(), "method", request.Method, "status", status)
 }
 
-// route decides the status for a request. Call handling arrives in a later
-// change; for now the trunk exists so a PBX can see it as a reachable peer,
-// which is what OPTIONS answers.
+// route decides the status for a request dispatch did not take: OPTIONS, and
+// the call methods when no gateway is configured or the trunk does not
+// implement them. Answering 501 rather than staying silent tells the peer the
+// trunk is alive but cannot do this, instead of making it wait for a timeout.
 func (s *Server) route(request *Request) (int, string) {
 	switch request.Method {
 	case "OPTIONS":
 		return 200, "OK"
 	case "INVITE", "ACK", "BYE", "CANCEL", "UPDATE", "INFO":
-		// Honest about the gap: the peer learns the trunk is alive but cannot
-		// yet place a call through it, instead of timing out on silence.
 		return 501, "Not Implemented"
 	default:
 		return 405, "Method Not Allowed"
 	}
+}
+
+// mediaAddress picks the local address for the RTP leg toward the PBX. The
+// listening address is used when it names an interface; when the trunk is
+// bound to a wildcard it is the route to the peer that decides, which an
+// unconnected socket reports without sending anything.
+func (s *Server) mediaAddress(peer *net.UDPAddr) net.IP {
+	if local := s.LocalAddr(); local.IP != nil && !local.IP.IsUnspecified() {
+		return local.IP
+	}
+	probe, err := net.DialUDP("udp", nil, peer)
+	if err != nil {
+		return nil
+	}
+	defer probe.Close()
+	return probe.LocalAddr().(*net.UDPAddr).IP
+}
+
+// viaHost is the host:port the trunk puts in a Via and a Contact, so responses
+// and in-dialog requests come back to this listener.
+func (s *Server) viaHost(peer *net.UDPAddr) string {
+	local := s.LocalAddr()
+	host := local.IP
+	if host == nil || host.IsUnspecified() {
+		host = s.mediaAddress(peer)
+	}
+	if host == nil {
+		return fmt.Sprintf("127.0.0.1:%d", local.Port)
+	}
+	return net.JoinHostPort(host.String(), strconv.Itoa(local.Port))
+}
+
+func (s *Server) contactURI(peer *net.UDPAddr) string {
+	return "sip:vocat@" + s.viaHost(peer)
 }
 
 func (s *Server) log(message string, args ...any) {
