@@ -207,6 +207,14 @@ func (s *Server) handle(_ context.Context, packet []byte, from *net.UDPAddr) {
 		s.log("siptrunk could not send a response", "peer", from.String(), "error", err)
 		return
 	}
+	if request.Method == "OPTIONS" {
+		// A PBX qualifies its peers on a timer, so these arrive for ever. At
+		// info level they would bury the handful of lines that describe an
+		// actual call.
+		s.logDebug("siptrunk handled a request",
+			"peer", from.String(), "method", request.Method, "status", status)
+		return
+	}
 	s.log("siptrunk handled a request",
 		"peer", from.String(), "method", request.Method, "status", status)
 }
@@ -265,6 +273,15 @@ func (s *Server) log(message string, args ...any) {
 		return
 	}
 	s.logger.Info(message, append([]any{"category", "siptrunk"}, args...)...)
+}
+
+// logDebug is for the traffic a healthy trunk generates on a timer, which is
+// worth having available but not worth reading every minute.
+func (s *Server) logDebug(message string, args ...any) {
+	if s.logger == nil {
+		return
+	}
+	s.logger.Debug(message, append([]any{"category", "siptrunk"}, args...)...)
 }
 
 func newTag() string {

@@ -303,13 +303,18 @@ The endpoint should read **Avail**. That means Asterisk's `OPTIONS` reached
 VoCat, was accepted from a trusted address, and was answered — the signalling
 path, before any call uses it.
 
-VoCat logs each handled request:
+`qualify_frequency=60` on the `vocat` AOR is what makes this work: Asterisk
+only learns a peer is reachable by sending it OPTIONS, and without it the
+contact reads `NonQual` for ever no matter how healthy the trunk is.
+
+VoCat logs those at **debug**, since a keepalive every minute would otherwise
+bury the handful of lines that describe an actual call:
 
 ```
 siptrunk handled a request  peer=127.0.0.1:5060 method=OPTIONS status=200
 ```
 
-and says why it dropped one:
+It says at info level why it dropped a request:
 
 ```
 siptrunk rejected an untrusted peer  peer=192.168.1.50:5060
