@@ -1,16 +1,24 @@
 # Asterisk for the VoCat SIP trunk.
 #
-# Ubuntu 24.04 rather than Debian: Asterisk was dropped from Debian before
-# bookworm released, so `apt-get install asterisk` there fails outright.
-# Noble carries 20.6.0 -- an upstream LTS release -- and is itself an LTS
-# base. It is a distribution package rather than an image from a registry
-# because a PBX with a SIM's call charges behind it is not somewhere to run
-# something nobody is patching.
+# Ubuntu 26.04 LTS, which carries Asterisk 22.5 -- the current upstream LTS.
 #
-# Caveat worth knowing: asterisk is in universe, which is community-maintained
-# for security rather than covered by Canonical's main support (Ubuntu Pro
-# extends to universe if you have it).
-FROM ubuntu:24.04
+# Not 24.04: its Asterisk 20 leaves full upstream support on 2026-10-19 and
+# drops to security-only fixes for a year after that. Starting a new
+# deployment one month before that line makes no sense when the next LTS is
+# already out.
+#
+# Not Debian: Asterisk was dropped before bookworm released, so
+# `apt-get install asterisk` there fails outright.
+#
+# A distribution package rather than an image from a registry, because a PBX
+# with a SIM's call charges behind it is not somewhere to run something nobody
+# is patching. Caveat worth knowing: asterisk is in universe, which is
+# community-maintained for security rather than covered by Canonical's main
+# support (Ubuntu Pro extends to universe if you have it).
+#
+# If this base ever needs rolling back, ubuntu:24.04 and Asterisk 20.6 worked
+# with these same configs -- but see modules.conf, which matters again there.
+FROM ubuntu:26.04
 
 # universe is enabled in this image's default sources, so no extra repository
 # setup is needed.

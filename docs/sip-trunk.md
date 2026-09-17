@@ -149,12 +149,12 @@ default here.
 
 | Path | |
 | --- | --- |
-| `Dockerfile` | Ubuntu 24.04 plus the packaged Asterisk 20.6 (an upstream LTS release) — a distribution package rather than a registry image, since a SIM's call charges sit behind this. Debian is not usable here: Asterisk was dropped before bookworm released. Note `asterisk` is in universe, so its security updates are community-maintained rather than Canonical-supported |
+| `Dockerfile` | Ubuntu 26.04 LTS plus the packaged Asterisk 22.5, the current upstream LTS — a distribution package rather than a registry image, since a SIM's call charges sit behind this. Not 24.04, whose Asterisk 20 leaves full upstream support on 2026-10-19; not Debian, which dropped Asterisk before bookworm released. Note `asterisk` is in universe, so its security updates are community-maintained rather than Canonical-supported |
 | `entrypoint.sh` | Renders the templates into `/etc/asterisk`, then runs Asterisk in the foreground |
 | `templates/pjsip.conf` | The trunk endpoint and one softphone account |
 | `templates/extensions.conf` | Outbound dial plan, `[from-vocat]` ready for inbound |
 | `templates/rtp.conf` | Ports 10000-10200 |
-| `templates/modules.conf` | `noload => chan_sip.so`, so PJSIP owns port 5060 |
+| `templates/modules.conf` | `noload => chan_sip.so` — a no-op on Asterisk 22, which removed it; kept for a rebase onto an older base |
 
 The configs are rendered rather than mounted so the SIP password stays in the
 environment and never reaches a git-tracked file. `envsubst` is given an
@@ -354,6 +354,10 @@ chan_sip.c:29060 handle_request_register: Registration from 'sip:1001@...'
 failed for '...' - Wrong password
 ```
 
+This cannot happen on the shipped image any more — Asterisk 21 removed
+chan_sip and this image is on 22 — but it is exactly what an older base or an
+existing Asterisk 20 install will do.
+
 **`chan_sip.c` is the tell, and the message is a lie.** This setup is
 PJSIP-only, so a registration answered by `chan_sip` was answered by a driver
 that has never heard of extension 1001. chan_sip's `alwaysauthreject` default
@@ -400,7 +404,7 @@ that actually answered:
 
 ```
 Server: Asterisk PBX 16.2.1~dfsg-2ubuntu1     <- a host install
-Server: Asterisk PBX 20.6.0                   <- this container
+Server: Asterisk PBX 22.5.2                   <- this container
 ```
 
 Find and remove the other one:
@@ -416,6 +420,9 @@ Verify the container is what answers:
 ```sh
 docker compose exec asterisk asterisk -rx "core show version"
 ```
+
+Upgrading the host install rather than removing it does not help: two SIP
+servers cannot share port 5060, whatever versions they are. Pick one.
 
 ## The trunk and the Calls page together
 
