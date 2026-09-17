@@ -1,10 +1,20 @@
 # Asterisk in front of VoCat's SIP trunk.
 #
-# This is an overlay, not a replacement. Both files, every time:
-#   docker compose -f docker-compose.yml -f docker-compose.asterisk.yml up -d --build
+# This is an overlay, not a replacement -- Compose needs both files, every
+# time. Set COMPOSE_FILE in .env and it picks up both with no -f flags:
 #
-# Set the password first:
 #   cp .env.example .env && ${EDITOR:-nano} .env
+#     ASTERISK_SIP_PASSWORD=...
+#     COMPOSE_FILE=docker-compose.yml:docker-compose.asterisk.yml
+#   ./scripts/docker-build.sh
+#
+# docker-build.sh builds BOTH services and derives VOCAT_TAG from git, which
+# is also the version compiled into the VoCat binary. A bare
+# `docker compose up -d --build` builds both too, but tags the image :latest
+# and reports 0.1.0-dev in Settings > System Info.
+#
+# Editing a config template needs no rebuild -- they are bind-mounted and
+# rendered at every start, so `docker compose restart asterisk` is enough.
 #
 # Then point a softphone (Linphone, Zoiper, a desk phone) at this host:
 #   server    <this host's LAN IP>

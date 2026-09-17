@@ -49,25 +49,47 @@ scanner cannot confirm anything is listening.
 
 There is a ready-made setup in this repo: `asterisk/` (image and config
 templates) plus `docker-compose.asterisk.yml`, an overlay on the main compose
-file. Three commands:
+file.
 
 ```sh
 cp .env.example .env
-${EDITOR:-nano} .env                     # set ASTERISK_SIP_PASSWORD
-docker compose -f docker-compose.yml -f docker-compose.asterisk.yml up -d --build
+${EDITOR:-nano} .env     # set ASTERISK_SIP_PASSWORD, uncomment COMPOSE_FILE
+./scripts/docker-build.sh
 ```
 
-Pass both `-f` files on every later `compose` command too, or the second one
-will not know the Asterisk service exists — including `scripts/docker-build.sh`,
-which runs a plain `docker compose up`. Easier: put this in `.env` and every
-`docker compose` command picks up both files with no flags at all.
+`COMPOSE_FILE` in `.env` is what makes every `docker compose` command in this
+directory load both files with no `-f` flags — including `docker-build.sh`,
+which runs a plain `docker compose up`:
 
 ```sh
 COMPOSE_FILE=docker-compose.yml:docker-compose.asterisk.yml
 ```
 
+Without it, pass `-f docker-compose.yml -f docker-compose.asterisk.yml` on
+every later command, or Compose will not know the Asterisk service exists.
+
+Use `docker-build.sh` rather than `docker compose up -d --build` by hand. Both
+build both services — `--build` rebuilds everything with a `build:` section —
+but the script derives `VOCAT_TAG` and `VOCAT_BUILD_TIME` from git, and those
+become the image tag *and* the version compiled into the binary. Building
+by hand tags the image `:latest` over your previous build and reports
+`0.1.0-dev` in Settings > System Info.
+
 The overlay also sets `VOCAT_SIP_TRUNK_ADDR` and `VOCAT_SIP_TRUNK_PEERS` on the
 VoCat service, so enabling the trunk and starting the PBX are one step.
+
+### Changing the Asterisk config afterwards
+
+The templates are bind-mounted and rendered at every start, so an edit needs
+no rebuild:
+
+```sh
+${EDITOR:-nano} asterisk/templates/extensions.conf
+docker compose restart asterisk
+```
+
+A rebuild (`docker compose build asterisk`) is only for changes to
+`asterisk/Dockerfile` or `asterisk/entrypoint.sh`.
 
 Then point a softphone at the host:
 

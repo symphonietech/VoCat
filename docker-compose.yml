@@ -25,9 +25,10 @@
 #   git pull && ./scripts/docker-build.sh
 #
 # Asterisk: to run a PBX in front of VoCat's SIP trunk, add the overlay --
-#   cp .env.example .env   # set ASTERISK_SIP_PASSWORD
-#   docker compose -f docker-compose.yml -f docker-compose.asterisk.yml up -d --build
-# Pass both -f files on every later compose command. See docs/sip-trunk.md.
+#   cp .env.example .env   # set ASTERISK_SIP_PASSWORD, uncomment COMPOSE_FILE
+#   ./scripts/docker-build.sh
+# COMPOSE_FILE in .env is what makes every compose command load both files.
+# See docs/sip-trunk.md.
 #
 # Environment variables this file reads (all optional):
 #   VOCAT_TAG         image tag AND the version compiled into the binary
