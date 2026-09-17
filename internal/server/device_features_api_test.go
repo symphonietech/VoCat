@@ -1213,3 +1213,62 @@ func TestPhysicalMatchesConfigKeepsReadersAndModemsApart(t *testing.T) {
 		t.Fatal("a reader matched a modem configuration")
 	}
 }
+
+// multiEntryController serves several discovered devices, so a lookup by
+// configuration ID can return a device that is not the configuration's own.
+type multiEntryController struct {
+	fakeDeviceController
+	entries []device.Device
+}
+
+func (c *multiEntryController) List() []device.Device { return c.entries }
+func (c *multiEntryController) Get(id string) (device.Device, error) {
+	for _, entry := range c.entries {
+		if entry.ID == id {
+			return entry, nil
+		}
+	}
+	return device.Device{}, device.ErrNotFound
+}
+
+// physicalForConfig looked the manager up by configuration ID before consulting
+// physicalMatchesConfig. Because that key is USB topology, a configuration
+// whose modem had moved was served whatever modem inherited its old socket —
+// so the UI showed the other SIM's carrier, and renaming the configuration to
+// an ID no device could mint was the only way to get the right one.
+func TestPhysicalForConfigRejectsAnIDLookupBelongingToAnotherModem(t *testing.T) {
+	const (
+		ownIMEI   = "866069051699286"
+		otherIMEI = "861529040829604"
+	)
+	config := store.Device{
+		ID:        "usb-2c7c-0125-3-4-5",
+		USBPath:   "/sys/bus/usb/devices/3-4.2",
+		ModemIMEI: ownIMEI,
+	}
+	// Shares the configuration's ID because it now occupies 3-4.5.
+	squatter := device.Device{
+		ID:         "usb-2c7c-0125-3-4-5",
+		Discovered: true,
+		Candidate:  modem.Candidate{USBPath: "/sys/bus/usb/devices/3-4.5"},
+		Snapshot:   &device.Snapshot{IMEI: otherIMEI},
+	}
+	owner := device.Device{
+		ID:         "usb-2c7c-0125-3-4-2",
+		Discovered: true,
+		Candidate:  modem.Candidate{USBPath: "/sys/bus/usb/devices/3-4.2"},
+		Snapshot:   &device.Snapshot{IMEI: ownIMEI},
+	}
+	server := &Server{devices: &multiEntryController{entries: []device.Device{squatter, owner}}}
+
+	entry, physicalID, present := server.physicalForConfig(config)
+	if !present {
+		t.Fatal("the configured modem should still resolve")
+	}
+	if physicalID != owner.ID {
+		t.Fatalf("resolved physical device %q, want %q", physicalID, owner.ID)
+	}
+	if entry.Snapshot == nil || entry.Snapshot.IMEI != ownIMEI {
+		t.Fatalf("resolved a device reporting IMEI %v, want %s", entry.Snapshot, ownIMEI)
+	}
+}

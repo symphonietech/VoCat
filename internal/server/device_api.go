@@ -1920,7 +1920,15 @@ func (s *Server) physicalForConfig(config store.Device) (device.Device, string, 
 	if s.devices == nil {
 		return device.Device{ID: config.ID}, "", false
 	}
-	if entry, err := s.devices.Get(config.ID); err == nil && entry.Discovered {
+	// The manager is keyed by discovery ID, which encodes USB topology, so this
+	// lookup answers "what is plugged into the position this configuration was
+	// created from" rather than "where is this configuration's device". Confirm
+	// the hit really belongs to the configuration before taking it: otherwise a
+	// modem that inherited another one's socket is served as that device, and
+	// every caller of this function -- SMS, calls, automatic tasks, the
+	// Telegram bot -- reports the wrong SIM.
+	if entry, err := s.devices.Get(config.ID); err == nil && entry.Discovered &&
+		physicalMatchesConfig(entry, config) {
 		return entry, entry.ID, true
 	}
 	for _, entry := range s.devices.List() {
