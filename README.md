@@ -41,7 +41,8 @@ The backend is written in Go, the interface is built with React and TypeScript, 
 | Radio and network | Registration status, operator, signal metrics, RSRP/RSRQ/SINR, network mode, band, channel, operator scanning, and automatic or manual network selection. |
 | AT and USSD | Interactive AT terminal, command history, raw modem responses, USSD start/continue/cancel flows, and clear modem error reporting. |
 | SMS | Direct cellular and IMS SMS transmission, inbound synchronization, multipart handling, delivery reports, conversation history, unread state, timestamps, and per-message delivery status. |
-| WiFi Calling | IKEv2/ePDG tunnel setup, EAP-AKA authentication, IMS registration, IMS SMS, reconnect controls, status diagnostics, and per-device routing. |
+| WiFi Calling | IKEv2/ePDG tunnel setup, EAP-AKA authentication, IMS registration, IMS SMS, IMS voice calls with browser audio, reconnect controls, status diagnostics, and per-device routing. |
+| SIP trunk | Outbound calls from a PBX over a SIM's IMS registration, G.711 media bridging, source-address peer authorisation, and a ready-made Asterisk container. |
 | eSIM and eUICC | eUICC discovery, EID and production information, certificate metadata, multi-eUICC inventory, installed profile listing, enable/disable/switch operations, download, rename, and delete operations when supported by the card. |
 | Card policy | ICCID-based WiFi Calling and flight-mode behavior with immediate policy application. |
 | Proxy routing | Upstream SOCKS routing, device bindings, country rules, TCP reachability checks, and UDP Associate checks for WiFi Calling data paths. |
@@ -201,6 +202,109 @@ The GHCR image is published for `linux/amd64` and `linux/arm64`.
 > On NAS operating systems like QNAP QTS / QuTS hero (Container Station), custom non-root administrator accounts and volume isolation mechanisms may cause Docker named volumes (e.g. `-v vocat-data:/opt/vocat/data`) to resolve to different isolated paths between the one-off `bootstrap-admin` initialization and the daemon service container, leading to "Incorrect password" errors during Web login.
 > For NAS environments, it is strongly recommended to replace named volumes with a host absolute path bind mount (e.g. `-v /share/Container/vocat/data:/opt/vocat/data` on QNAP) for both initialization and runtime to guarantee consistent SQLite database persistence.
 
+### Docker Compose
+
+This branch ships a `docker-compose.yml` that builds from the checkout rather
+than pulling a published image, which is what you want while running code that
+is not in a release yet.
+
+From a checkout of this branch:
+
+```bash
+./scripts/docker-build.sh
+```
+
+Then open `http://<server-address>:7676` and sign in. On a fresh database this
+branch auto-provisions `admin` / `admin123` on first start and logs a warning —
+change it immediately from Settings on anything reachable beyond your own
+machine. To choose the password up front, initialise the database before the
+first start (it is read from stdin, never from argv or the environment):
+
+```bash
+read -rsp "Admin password: " P; echo
+printf '%s\n' "$P" | docker compose run --rm -T \
+  --entrypoint /opt/vocat/bin/vocat vocat bootstrap-admin
+unset P
+```
+
+Use `scripts/docker-build.sh` rather than `docker compose up -d --build` by
+hand. The script derives `VOCAT_TAG` and `VOCAT_BUILD_TIME` from the current
+git state, and those become both the image tag and the version compiled into
+the binary. Building by hand tags the image `:latest` over your previous build
+and reports `0.1.0-dev` in **Settings → System Info**.
+
+The compose file differs from the `docker run` flow above in two ways worth
+knowing: it listens on **7676** rather than 7575 (override with `VOCAT_PORT`),
+and it bind-mounts `./carrier-profiles.d` over the profile directory inside the
+data volume, so carrier overrides can be edited with a normal editor and
+tracked in git.
+
+| Path | Kind | Holds |
+| --- | --- | --- |
+| `vocat-data` | named volume | SQLite database, plugins, TLS material — everything persistent |
+| `./carrier-profiles.d` | bind mount | Carrier profile overrides, loaded once at startup |
+
+Two sharp edges on that bind mount are documented in the compose file itself:
+it shadows any `carrier-profiles.d` already inside the named volume, and a
+malformed `.json` aborts startup rather than being skipped — which, with
+`restart: unless-stopped`, becomes a restart loop. Validate before restarting:
+
+```bash
+python3 -m json.tool < carrier-profiles.d/your-file.json
+```
+
+In-container binary self-update is deliberately disabled (`VOCAT_CONTAINER=docker`
+makes the server return `409` on the apply endpoint), because a replaced binary
+would not survive the next recreate. Update by rebuilding:
+
+```bash
+git pull && ./scripts/docker-build.sh
+```
+
+`docker compose down` stops and removes the containers but keeps named volumes,
+so the database survives. `docker compose down -v` deletes them, database
+included.
+
+### SIP trunk and Asterisk
+
+VoCat can expose its SIM-backed calling as an ordinary SIP trunk, so a PBX
+handles registration, softphones and dial plans while VoCat stays a gateway
+between SIP and a modem's IMS registration. A softphone such as Linphone then
+places calls over the SIM.
+
+It is **off unless an address is configured**, and it authorises peers by
+source address rather than credentials — so bind it to loopback, a container
+network or a WireGuard address, never an interface reachable from the
+internet.
+
+A ready-made Asterisk container is included:
+
+```bash
+cp -n .env.example .env
+printf 'ASTERISK_SIP_PASSWORD=%s\n' "$(openssl rand -base64 24)" >> .env
+echo 'COMPOSE_FILE=docker-compose.yml:docker-compose.asterisk.yml' >> .env
+./scripts/docker-build.sh
+```
+
+`COMPOSE_FILE` is what makes every later `docker compose` command in that
+directory load both files; without it, Compose sees no `asterisk` service.
+`.env` is gitignored, so this is a one-time setup per machine.
+
+Both containers run on host networking. That is forced rather than chosen:
+VoCat uses `network_mode: host` for the export-proxy's `SO_BINDTODEVICE`, so
+its trunk on `127.0.0.1:5062` is the *host's* loopback and a bridged container
+cannot reach it at all.
+
+Outbound calls work today — the PBX sends an `INVITE`, VoCat places the call
+over the SIM and bridges the audio. Inbound (a call arriving on the SIM being
+offered to the PBX) is not implemented yet; those are still answered from
+VoCat's own Calls page. The Calls page and the trunk work at the same time,
+with one exception: a single call's audio cannot be bridged to both, so
+connecting browser audio to a call the trunk is carrying returns `409`.
+
+Full setup, dial plan, multi-SIM selection and the status table the PBX sees:
+[docs/sip-trunk.md](docs/sip-trunk.md).
+
 ### USB SIM readers
 
 USB SIM readers use the Linux PC/SC service. The one-click installer installs
@@ -230,14 +334,27 @@ Vocat reads an optional JSON configuration file from `VOCAT_CONFIG`, then applie
 
 | Environment variable | Default | Description |
 | --- | --- | --- |
-| `VOCAT_ADDR` | `0.0.0.0:7575` | HTTP listen address. |
+| `VOCAT_CONFIG` | empty | Path to an optional strict JSON configuration file, read before the variables below. |
+| `VOCAT_ADDR` | `0.0.0.0:7575` | HTTP listen address. The bundled compose file sets `0.0.0.0:7676`. |
 | `VOCAT_DATABASE_PATH` | `./data/vocat.db` | SQLite database path. |
 | `VOCAT_SESSION_TTL` | `24h` | Authentication session lifetime. |
 | `VOCAT_SECURE_COOKIES` | `false` | Marks session cookies as secure when HTTPS is used. |
 | `VOCAT_SHUTDOWN_TIMEOUT` | `10s` | Graceful shutdown timeout. |
 | `VOCAT_MAX_REQUEST_BODY_BYTES` | `1048576` | Maximum API request body size. |
+| `VOCAT_SIP_TRUNK_ADDR` | empty | UDP address for the SIP trunk. Empty keeps the trunk off entirely. |
+| `VOCAT_SIP_TRUNK_PEERS` | empty | Addresses or CIDR prefixes allowed to use the trunk, comma or space separated. Startup fails if an address is set with no peers. |
 | `VOCAT_REPO` | `MengMengCode/VoCat` | Trusted GitHub repository used by the self-updater, in `owner/name` form. |
 | `GITHUB_TOKEN` | empty | Optional GitHub token for private repositories or higher API limits. |
+
+The JSON file uses snake_case keys for the same settings, for example:
+
+```json
+{
+  "address": "0.0.0.0:7676",
+  "sip_trunk_address": "127.0.0.1:5062",
+  "sip_trunk_peers": ["127.0.0.1"]
+}
+```
 
 User-supplied Apple carrier bundles can be converted into reviewable,
 allow-listed carrier profiles with `vocat carrier import-ipcc`; see
@@ -314,6 +431,13 @@ docker pull ghcr.io/mengmengcode/vocat:latest
 
 Recreate the container after pulling the new image.
 
+For the Docker Compose deployment, which builds from the checkout rather than
+pulling, rebuild instead:
+
+```bash
+git pull && ./scripts/docker-build.sh
+```
+
 ## Development
 
 Requirements:
@@ -371,9 +495,12 @@ internal/device/            Modem discovery and device control
 internal/modem/             AT session and response handling
 internal/server/            HTTP API, notifications, and embedded web server
 internal/store/             SQLite persistence
+internal/siptrunk/          SIP trunk toward a PBX, and its RTP bridge
 internal/update/            GitHub Release self-updater
 internal/vowifi/            IKE, EAP-AKA, IMS, and WiFi Calling runtime
+asterisk/                   Asterisk container image and config templates
 scripts/install.sh          Linux installer and updater
+scripts/docker-build.sh     Compose build with a git-derived version
 web/src/                    React and TypeScript frontend
 .github/workflows/          Binary and Docker release automation
 ```
