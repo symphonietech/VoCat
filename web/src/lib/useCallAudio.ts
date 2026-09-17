@@ -96,6 +96,20 @@ export function useCallAudio(
         fetch(callMediaProbeURL(deviceId, callId), { credentials: "include" })
           .then(async (response) => {
             const body = await response.json().catch(() => null);
+            // 426 means the probe itself was rejected for not being a
+            // WebSocket handshake -- which tells us the endpoint accepted
+            // everything before the upgrade: the device is on an IMS call, the
+            // call id resolves, and its media exists. So the failure is in the
+            // upgrade or the transport carrying it, not in the call.
+            if (response.status === 426) {
+              fail(
+                "the call and its media are fine, but the WebSocket upgrade " +
+                  "failed. Check for a proxy or tunnel between the browser and " +
+                  "VoCat that does not forward Upgrade requests, and the " +
+                  "browser console for a blocked connection.",
+              );
+              return;
+            }
             const detail = body?.error?.message || body?.message || "";
             fail(
               detail
