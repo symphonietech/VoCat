@@ -5,6 +5,7 @@
  * 富文本片段（嵌套链接/代码块的说明框）不走字典，在组件里按语言分支渲染。
  */
 export const EN_DICT: Record<string, string> = {
+  "当前页面不是安全上下文，浏览器不会提供麦克风，通话将只能接收。请改用 HTTPS（设置中可开启自签名证书）或通过 http://localhost 访问。": "This page is not a secure context, so the browser withholds the microphone and the call can only receive. Use HTTPS (Settings can enable a self-signed certificate) or reach VoCat over http://localhost.",
   // --- Voice calls (CallsPage) ---
   "语音通话": "Voice calls",
   "通过 VoWiFi IMS 拨打电话，并把通话音频桥接到浏览器": "Place calls over VoWiFi IMS and bridge the audio into the browser",

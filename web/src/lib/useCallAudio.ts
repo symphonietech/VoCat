@@ -119,14 +119,34 @@ export function useCallAudio(
         playCursor += buffer.duration;
       };
 
-      // Uplink is best-effort: a denied microphone still leaves downlink audio
-      // working, which is enough to prove the receive path.
+      // Uplink is best-effort: without a microphone the downlink still plays,
+      // so the call stays half-usable rather than failing outright.
+      //
+      // getUserMedia is gated on a secure context, and on an insecure origin
+      // navigator.mediaDevices is not merely restricted but absent — so the
+      // call below would throw a TypeError that reads like a missing device.
+      // Name the real cause instead: this is the single most likely reason for
+      // a working downlink with no uplink, and it is a deployment setting
+      // rather than anything wrong with the call.
+      if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
+        fail(
+          "microphone blocked: the page is not a secure context, so the browser " +
+            "withholds it. Reach VoCat over HTTPS (Settings turns on a self-signed " +
+            "certificate) or through http://localhost, which counts as secure. " +
+            "Received audio keeps working.",
+        );
+        return;
+      }
       try {
         stream = await navigator.mediaDevices.getUserMedia({
           audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
         });
-      } catch {
-        fail("microphone unavailable — receive-only");
+      } catch (error) {
+        // A denial, a device in use by another application, or no input at all.
+        fail(
+          "microphone unavailable, so nothing is sent: " +
+            (error instanceof Error ? error.message : String(error)),
+        );
         return;
       }
       if (disposed) return;

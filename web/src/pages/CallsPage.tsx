@@ -64,6 +64,11 @@ function LevelMeter({ label, level, muted }: { label: string; level: number; mut
   );
 }
 
+// getUserMedia is gated on a secure context, so an http:// origin other than
+// localhost can never send audio. Read once: it cannot change while mounted.
+const secureContext =
+  typeof window !== "undefined" && window.isSecureContext && !!navigator.mediaDevices?.getUserMedia;
+
 export default function CallsPage() {
   const { t } = useI18n();
   const [devices, setDevices] = useState<DeviceListItem[]>([]);
@@ -271,6 +276,16 @@ export default function CallsPage() {
                 {!mediaReady ? (
                   <p className="mt-2 text-xs text-gray-400">
                     {t("媒体尚未协商，收到带 SDP 的响应后即可连接音频。")}
+                  </p>
+                ) : null}
+
+                {/* Worth saying before the call rather than after: on an
+                    insecure origin the browser withholds the microphone
+                    entirely, so the call is receive-only however healthy it
+                    otherwise looks. */}
+                {!secureContext ? (
+                  <p className="mt-2 rounded-lg bg-amber-50 p-2 text-xs text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">
+                    {t("当前页面不是安全上下文，浏览器不会提供麦克风，通话将只能接收。请改用 HTTPS（设置中可开启自签名证书）或通过 http://localhost 访问。")}
                   </p>
                 ) : null}
 
