@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"strconv"
 	"strings"
@@ -40,13 +41,15 @@ type rtpMedia struct {
 	timestamp uint32
 	ssrc      uint32
 
-	downlink chan []int16
-	closed   chan struct{}
-	close    sync.Once
-	pump     sync.Once
+	downlink    chan []int16
+	closed      chan struct{}
+	close       sync.Once
+	pump        sync.Once
+	sendErrOnce sync.Once
+	logger      *slog.Logger
 }
 
-func newRTPMedia(local net.IP) (*rtpMedia, error) {
+func newRTPMedia(local net.IP, logger *slog.Logger) (*rtpMedia, error) {
 	address := &net.UDPAddr{IP: local, Port: 0}
 	connection, err := net.ListenUDP("udp", address)
 	if err != nil {
@@ -61,6 +64,7 @@ func newRTPMedia(local net.IP) (*rtpMedia, error) {
 		conn: connection, sequence: binary.BigEndian.Uint16(seed[:2]),
 		timestamp: binary.BigEndian.Uint32(seed[2:6]), ssrc: binary.BigEndian.Uint32(seed[6:]),
 		downlink: make(chan []int16, 64), closed: make(chan struct{}),
+		logger: logger,
 	}
 	go media.receive()
 	return media, nil
@@ -300,8 +304,27 @@ func (media *rtpMedia) transmit() {
 		}
 		// A transient send error must not end the uplink for the rest of the
 		// call; a permanently closed socket is caught by the select above.
-		_ = media.sendFrame(frame)
+		// Report the first one though: silently dropping every uplink packet
+		// looks exactly like a network-side problem from the outside.
+		if err := media.sendFrame(frame); err != nil {
+			media.reportSendError(err)
+		}
 	}
+}
+
+// reportSendError logs the first uplink failure of a call, once, so a
+// persistently unwritable socket is visible without flooding the log at the
+// packet rate.
+func (media *rtpMedia) reportSendError(err error) {
+	media.sendErrOnce.Do(func() {
+		if media.logger == nil {
+			return
+		}
+		media.logger.Warn("IMS RTP uplink send failed",
+			"category", "call",
+			"error", err,
+		)
+	})
 }
 
 // sendFrame encodes and transmits exactly one packet. The sequence number and

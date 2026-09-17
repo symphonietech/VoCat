@@ -135,7 +135,16 @@ export function useCallAudio(
       if (disposed) return;
 
       source = context.createMediaStreamSource(stream);
-      capture = new AudioWorkletNode(context, "pcm-capture", { numberOfOutputs: 0 });
+      // The worklet must have an output and a path to the destination: a node
+      // that cannot reach the destination is not guaranteed to be pulled by the
+      // rendering graph, and a capture node with numberOfOutputs: 0 never can.
+      // It writes nothing to that output, and the gain below is zero, so
+      // nothing of the microphone is played back locally.
+      capture = new AudioWorkletNode(context, "pcm-capture", {
+        numberOfInputs: 1,
+        numberOfOutputs: 1,
+        outputChannelCount: [1],
+      });
       capture.port.onmessage = (event) => {
         const frame = event.data as Int16Array;
         if (!micRef.current || !socket || socket.readyState !== WebSocket.OPEN) return;
@@ -149,13 +158,11 @@ export function useCallAudio(
         if (peak > counters.txPeak) counters.txPeak = peak;
         socket.send(frame.buffer);
       };
-      source.connect(capture);
-      // A worklet with no outputs is still pulled by the graph only while it
-      // has a path to the destination, so route it through a silent gain node.
       sink = context.createGain();
       sink.gain.value = 0;
       sink.connect(context.destination);
-      source.connect(sink);
+      source.connect(capture);
+      capture.connect(sink);
     };
 
     start().catch((error: unknown) => fail(error instanceof Error ? error.message : String(error)));

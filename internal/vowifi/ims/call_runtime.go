@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"sort"
 	"strconv"
@@ -85,7 +86,7 @@ func (session *Session) DialCall(ctx context.Context, number string) (vowifi.Cal
 	securityHeaders := runtimeSecurityHeaders(session.securityActive, session.securityAgreement.verifyValue)
 	fromIdentity, preferredIdentity, identitySource := session.callOriginatingIdentitiesLocked(carrierProfile)
 	session.mu.Unlock()
-	media, err := newRTPMedia(session.localMediaIP())
+	media, err := newRTPMedia(session.localMediaIP(), session.mediaLogger())
 	if err != nil {
 		return vowifi.Call{}, err
 	}
@@ -349,7 +350,7 @@ func (session *Session) handleCallRequest(request *sipRequest, respond func([]by
 		if target == "" {
 			target = request.URI
 		}
-		media, err := newRTPMedia(session.localMediaIP())
+		media, err := newRTPMedia(session.localMediaIP(), session.mediaLogger())
 		if err != nil {
 			if response, buildErr := buildSIPResponseWithBody(request, 488, session.fromTag, nil); buildErr == nil {
 				_ = respond(response)
@@ -1012,3 +1013,12 @@ func reverseStrings(values []string) []string {
 
 var _ vowifi.CallController = (*Session)(nil)
 var _ vowifi.CallMediaController = (*Session)(nil)
+
+// mediaLogger returns the provider's logger when one is configured, so RTP can
+// report a failing uplink without holding a reference to the session.
+func (session *Session) mediaLogger() *slog.Logger {
+	if session == nil || session.provider == nil {
+		return nil
+	}
+	return session.provider.config.Logger
+}

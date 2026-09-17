@@ -9,12 +9,12 @@ import (
 )
 
 func TestRTPMediaCarriesPCMOverPCMA(t *testing.T) {
-	left, err := newRTPMedia(net.IPv4(127, 0, 0, 1))
+	left, err := newRTPMedia(net.IPv4(127, 0, 0, 1), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer left.Close()
-	right, err := newRTPMedia(net.IPv4(127, 0, 0, 1))
+	right, err := newRTPMedia(net.IPv4(127, 0, 0, 1), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,12 +77,12 @@ func readVoicedFrame(ctx context.Context, media *rtpMedia) ([]int16, error) {
 // queued. Before the transmit pump existed, WritePCM was the only thing that
 // ever sent a packet and an unattended call went silent on the wire.
 func TestRTPMediaSendsSilenceWithoutQueuedAudio(t *testing.T) {
-	sender, err := newRTPMedia(net.IPv4(127, 0, 0, 1))
+	sender, err := newRTPMedia(net.IPv4(127, 0, 0, 1), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer sender.Close()
-	receiver, err := newRTPMedia(net.IPv4(127, 0, 0, 1))
+	receiver, err := newRTPMedia(net.IPv4(127, 0, 0, 1), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
