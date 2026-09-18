@@ -9,6 +9,26 @@ export const EN_DICT: Record<string, string> = {
   "接通时间": "Answered at",
   "未接通": "not answered",
   "当前页面不是安全上下文，浏览器不会提供麦克风，通话将只能接收。请改用 HTTPS（设置中可开启自签名证书）或通过 http://localhost 访问。": "This page is not a secure context, so the browser withholds the microphone and the call can only receive. Use HTTPS (Settings can enable a self-signed certificate) or reach VoCat over http://localhost.",
+  // --- Asterisk (AsteriskPage) ---
+  "查看前置 PBX 的实时状态：分机注册情况与中继可达性":
+    "Live status of the PBX in front: which extensions are registered, and whether the trunk is reachable",
+  "未配置 Asterisk 管理接口": "Asterisk manager interface is not configured",
+  "设置 ASTERISK_AMI_SECRET 后重建容器即可启用。未配置时 VoCat 完全正常工作，只是无法读取 PBX 状态。":
+    "Set ASTERISK_AMI_SECRET and rebuild the containers to enable it. VoCat works normally without it; it just cannot read PBX status.",
+  "无法连接到 Asterisk": "Cannot reach Asterisk",
+  "进行中通话": "Calls in progress",
+  "最近一次重载": "Last reload",
+  "中继（VoCat）": "Trunk (VoCat)",
+  "Asterisk 中没有名为 vocat 的中继端点": "Asterisk has no endpoint named vocat",
+  "分机": "Extensions",
+  "没有分机": "No extensions",
+  "无法读取注册信息": "Could not read registrations",
+  "已注册": "Registered",
+  "未注册": "Not registered",
+  "通道": "Channels",
+  "原始字段": "Raw fields",
+  "收起": "Collapse",
+
   // --- Voice calls (CallsPage) ---
   "语音通话": "Voice calls",
   "通过 VoWiFi IMS 拨打电话，并把通话音频桥接到浏览器": "Place calls over VoWiFi IMS and bridge the audio into the browser",

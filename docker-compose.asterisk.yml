@@ -40,6 +40,12 @@ services:
       # operator has not chosen deliberately.
       VOCAT_SIP_TRUNK_ADDR: 127.0.0.1:5062
       VOCAT_SIP_TRUNK_PEERS: 127.0.0.1
+      # The other direction: VoCat reading Asterisk's live state. Loopback
+      # only -- both containers share the host network namespace, and an AMI
+      # password crosses a plain connection in the clear.
+      VOCAT_ASTERISK_AMI_ADDR: ${ASTERISK_AMI_SECRET:+127.0.0.1:5038}
+      VOCAT_ASTERISK_AMI_USER: ${ASTERISK_AMI_USER:-vocat}
+      VOCAT_ASTERISK_AMI_SECRET: ${ASTERISK_AMI_SECRET:-}
 
   asterisk:
     build:
@@ -63,6 +69,11 @@ services:
       # Which SIM places outbound calls. Leave empty while one device is
       # IMS-registered; name one (device ID or name) once a second is.
       VOCAT_DEVICE: ${VOCAT_DEVICE:-}
+      # Manager interface, which VoCat reads live PBX status from. Empty
+      # leaves AMI disabled entirely rather than exposing an account nothing
+      # uses.
+      ASTERISK_AMI_USER: ${ASTERISK_AMI_USER:-vocat}
+      ASTERISK_AMI_SECRET: ${ASTERISK_AMI_SECRET:-}
 
     volumes:
       # Rendered into /etc/asterisk at start, on top of the package defaults.

@@ -46,6 +46,8 @@ func (s *Server) routeGeneralAPI(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	}
 	switch cleanPath {
+	case "asterisk/status":
+		s.handleAsteriskStatus(w, r)
 	case "logs/history":
 		s.handleLogHistory(w, r)
 	case "logs/stream":

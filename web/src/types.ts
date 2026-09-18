@@ -582,3 +582,40 @@ export interface CallsResponse {
   transport: string;
   calls: Call[];
 }
+
+// --- Asterisk (AsteriskPage) ---
+
+// One raw AMI field, kept as a name/value pair so the API client's camelCase
+// transform cannot rewrite the wire names this exists to show.
+export type AsteriskField = { name: string; value: string };
+
+export type AsteriskContact = {
+  uri?: string;
+  status?: string;
+  roundtripMs?: number;
+  expires?: string;
+  fields?: AsteriskField[];
+};
+
+export type AsteriskEndpoint = {
+  name: string;
+  state?: string;
+  activeChannels?: string;
+  transport?: string;
+  contacts: AsteriskContact[];
+  registered: boolean;
+  fields?: AsteriskField[];
+};
+
+export type AsteriskStatus = {
+  // configured false means no manager address is set at all, which is the
+  // normal state for a VoCat with no PBX in front of it -- not an error.
+  configured: boolean;
+  reachable?: boolean;
+  address?: string;
+  version?: string;
+  error?: string;
+  contactsError?: string;
+  core?: { startupTime?: string; reloadTime?: string; calls?: string };
+  endpoints: AsteriskEndpoint[];
+};

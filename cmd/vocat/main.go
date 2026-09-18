@@ -22,6 +22,7 @@ import (
 
 	"golang.org/x/term"
 
+	"vocat/internal/ami"
 	"vocat/internal/auth"
 	"vocat/internal/buildinfo"
 	"vocat/internal/config"
@@ -627,6 +628,11 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 		UpdateRepository:    strings.TrimSpace(os.Getenv("VOCAT_REPO")),
 		UpdateToken:         strings.TrimSpace(os.Getenv("GITHUB_TOKEN")),
 		HTTPS:               httpsManager,
+		AsteriskAMI: ami.Options{
+			Address:  strings.TrimSpace(cfg.AsteriskAMIAddress),
+			Username: strings.TrimSpace(cfg.AsteriskAMIUsername),
+			Secret:   cfg.AsteriskAMISecret,
+		},
 	})
 	if err != nil {
 		return err

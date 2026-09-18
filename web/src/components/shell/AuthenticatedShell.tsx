@@ -11,6 +11,7 @@ import {
   RouterRegular,
   SendRegular,
   CallRegular,
+  ServerRegular,
   SettingsRegular,
   SignOutRegular,
 } from "@fluentui/react-icons";
@@ -35,6 +36,7 @@ const NAV = [
   { to: "/sms", label: "短信检测", icon: MailRegular },
   { to: "/smstest", label: "短信测试", icon: SendRegular },
   { to: "/calls", label: "语音通话", icon: CallRegular },
+  { to: "/asterisk", label: "Asterisk", icon: ServerRegular },
   { to: "/automatic-tasks", label: "自动任务", icon: SendClockRegular },
   { to: "/logs", label: "实时日志", icon: DocumentTextRegular },
   { to: "/settings", label: "系统设置", icon: SettingsRegular },

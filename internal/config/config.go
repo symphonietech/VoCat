@@ -33,6 +33,16 @@ type Config struct {
 	// trunk. No default: an operator naming the listen address must also say
 	// who may reach it.
 	SIPTrunkPeers []string
+	// AsteriskAMI* reach the PBX's manager interface, which VoCat reads live
+	// status from. Empty address disables it: VoCat runs perfectly well with
+	// no PBX in front, and a status page that cannot connect should say
+	// "not configured" rather than "unreachable".
+	//
+	// Bind it to loopback. AMI is privileged and its password crosses a plain
+	// connection in the clear.
+	AsteriskAMIAddress  string
+	AsteriskAMIUsername string
+	AsteriskAMISecret   string
 }
 
 type fileConfig struct {
@@ -49,6 +59,9 @@ type fileConfig struct {
 	MaxRequestBodyBytes *int64   `json:"max_request_body_bytes"`
 	SIPTrunkAddress     *string  `json:"sip_trunk_address"`
 	SIPTrunkPeers       []string `json:"sip_trunk_peers"`
+	AsteriskAMIAddress  *string  `json:"asterisk_ami_address"`
+	AsteriskAMIUsername *string  `json:"asterisk_ami_username"`
+	AsteriskAMISecret   *string  `json:"asterisk_ami_secret"`
 }
 
 // Default returns the non-secret process configuration. Administrator
@@ -129,6 +142,15 @@ func applyFile(cfg *Config, values fileConfig) error {
 	if values.SIPTrunkAddress != nil {
 		cfg.SIPTrunkAddress = *values.SIPTrunkAddress
 	}
+	if values.AsteriskAMIAddress != nil {
+		cfg.AsteriskAMIAddress = *values.AsteriskAMIAddress
+	}
+	if values.AsteriskAMIUsername != nil {
+		cfg.AsteriskAMIUsername = *values.AsteriskAMIUsername
+	}
+	if values.AsteriskAMISecret != nil {
+		cfg.AsteriskAMISecret = *values.AsteriskAMISecret
+	}
 	if values.SIPTrunkPeers != nil {
 		cfg.SIPTrunkPeers = append([]string(nil), values.SIPTrunkPeers...)
 	}
@@ -165,6 +187,9 @@ func applyEnvironment(cfg *Config) error {
 	applyString("VOCAT_ADDR", &cfg.Address)
 	applyString("VOCAT_DATABASE_PATH", &cfg.DatabasePath)
 	applyString("VOCAT_SIP_TRUNK_ADDR", &cfg.SIPTrunkAddress)
+	applyString("VOCAT_ASTERISK_AMI_ADDR", &cfg.AsteriskAMIAddress)
+	applyString("VOCAT_ASTERISK_AMI_USER", &cfg.AsteriskAMIUsername)
+	applyString("VOCAT_ASTERISK_AMI_SECRET", &cfg.AsteriskAMISecret)
 	if value, ok := os.LookupEnv("VOCAT_SIP_TRUNK_PEERS"); ok {
 		cfg.SIPTrunkPeers = splitList(value)
 	}

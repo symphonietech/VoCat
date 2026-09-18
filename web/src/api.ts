@@ -1,5 +1,6 @@
 import type {
   ApiErrorBody,
+  AsteriskStatus,
   Call,
   CallsResponse,
   LoggingSettings,
@@ -216,6 +217,13 @@ export function updateLoggingSettings(settings: {
   days: number;
 }) {
   return api<LoggingSettings>("/settings/logging", { method: "PUT", body: settings });
+}
+
+// Live PBX state read over AMI. Never throws for an unreachable PBX: the
+// payload carries the reason, because "Asterisk is down" is the answer this
+// page exists to give rather than a request failure.
+export function getAsteriskStatus() {
+  return api<AsteriskStatus>("/asterisk/status");
 }
 
 export function listCalls(deviceId: string) {

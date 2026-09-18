@@ -536,6 +536,51 @@ docker compose exec asterisk asterisk -rx "core show version"
 Upgrading the host install rather than removing it does not help: two SIP
 servers cannot share port 5060, whatever versions they are. Pick one.
 
+## The Asterisk page in VoCat
+
+VoCat can show live PBX state — which extensions are registered, whether the
+trunk is reachable, how many calls are up — on its own **Asterisk** page, next
+to Voice calls. It reads this over Asterisk's manager interface (AMI).
+
+It is **off unless a secret is set**, and the page says "not configured"
+rather than pretending something is broken:
+
+```sh
+sed -i "s|^#*ASTERISK_AMI_SECRET=.*|ASTERISK_AMI_SECRET=$(openssl rand -base64 24)|" .env
+./scripts/docker-build.sh
+```
+
+The same secret enables AMI in Asterisk and points VoCat at it, so there is
+one value to set rather than two to keep in step.
+
+### Why AMI rather than a shell
+
+VoCat runs in its own container. Reading `asterisk -rx` output would mean
+either a Docker socket in VoCat (root on the host, for a container that is
+already privileged and host-networked) or a shell between containers. AMI is
+a normal TCP interface designed for this, and it stays on loopback because
+both containers share the host network namespace.
+
+Three deliberate restrictions:
+
+- **`bindaddr = 127.0.0.1`.** An AMI password crosses a plain connection in
+  the clear, and AMI is privileged.
+- **No `command` permission** on the manager account. `Command` runs arbitrary
+  CLI inside the Asterisk container, which is shell-equivalent; the account
+  gets `system,reporting`, which covers status and reloads.
+- **No manager account at all when the secret is unset.** The entrypoint
+  replaces `manager.conf` with `enabled = no` rather than leaving an inert
+  account declared.
+
+### If the page shows raw field names you do not recognise
+
+Each endpoint has a **Raw fields** toggle showing exactly what AMI returned.
+Asterisk has renamed manager fields between versions, so VoCat reads each
+value through a list of candidate names and passes the whole message through
+untouched — a field it does not recognise is still visible rather than
+silently dropped. If something useful is showing only in there, say so and it
+can be promoted to a labelled row.
+
 ## The trunk and the Calls page together
 
 Both work at once, and neither has to be off for the other to run. The Calls

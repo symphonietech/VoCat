@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"vocat/internal/ami"
 	"vocat/internal/auth"
 	"vocat/internal/device"
 	"vocat/internal/exportproxy"
@@ -52,6 +53,10 @@ type Options struct {
 	UpdateToken         string
 	HTTPS               *httpsmode.Manager
 	SMSTest             *smstest.Scheduler
+	// AsteriskAMI reaches the PBX in front of the SIP trunk. A zero value
+	// disables the Asterisk page, which is the normal state for a VoCat with
+	// no PBX.
+	AsteriskAMI ami.Options
 }
 
 // Server is the single HTTP handler for the JSON API and embedded SPA.
@@ -103,6 +108,7 @@ type Server struct {
 	trunkMu                   sync.Mutex
 	trunkCalls                map[string]bool
 	trunkRotation             uint64
+	asteriskAMI               ami.Options
 }
 
 func New(options Options) (*Server, error) {
@@ -152,6 +158,7 @@ func New(options Options) (*Server, error) {
 		updateToken:         strings.TrimSpace(options.UpdateToken),
 		https:               options.HTTPS,
 		smsTest:             options.SMSTest,
+		asteriskAMI:         options.AsteriskAMI,
 		netTraffic:          newLiveNetTracker(),
 		hostStats:           newHostStatsSampler(),
 		publicIPs:           make(map[string]cachedPublicIP),

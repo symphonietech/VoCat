@@ -11,6 +11,8 @@ set -eu
 : "${ASTERISK_SIP_USER:=1001}"
 : "${VOCAT_TRUNK_HOST:=127.0.0.1:5062}"
 : "${VOCAT_DEVICE:=}"
+: "${ASTERISK_AMI_USER:=vocat}"
+: "${ASTERISK_AMI_SECRET:=}"
 
 if [ ${#ASTERISK_SIP_PASSWORD} -lt 12 ]; then
 	# SIP registrars are scanned constantly and a weak one becomes someone
@@ -27,8 +29,21 @@ fi
 # valid.
 VOCAT_DEVICE=$(printf '%s' "$VOCAT_DEVICE" | tr ',' ' ')
 
+# AMI is off unless a secret is set, so a deployment that does not use the
+# Asterisk status page never exposes a manager account at all.
+ASTERISK_AMI_ENABLED=no
+if [ -n "$ASTERISK_AMI_SECRET" ]; then
+	if [ ${#ASTERISK_AMI_SECRET} -lt 12 ]; then
+		echo "entrypoint: ASTERISK_AMI_SECRET must be at least 12 characters" >&2
+		exit 1
+	fi
+	ASTERISK_AMI_ENABLED=yes
+fi
+
 export ASTERISK_SIP_PASSWORD ASTERISK_SIP_USER VOCAT_TRUNK_HOST VOCAT_DEVICE
+export ASTERISK_AMI_USER ASTERISK_AMI_SECRET ASTERISK_AMI_ENABLED
 substitute='$ASTERISK_SIP_PASSWORD $ASTERISK_SIP_USER $VOCAT_TRUNK_HOST $VOCAT_DEVICE'
+substitute="$substitute"' $ASTERISK_AMI_USER $ASTERISK_AMI_SECRET $ASTERISK_AMI_ENABLED'
 
 for template in /etc/asterisk/templates/*.conf; do
 	[ -e "$template" ] || continue
@@ -61,7 +76,14 @@ if [ -n "$occupied" ]; then
 	exit 1
 fi
 
+# With no secret the rendered manager.conf would still declare an account,
+# inert but present. Replacing the file outright leaves nothing to reach.
+if [ "$ASTERISK_AMI_ENABLED" != "yes" ]; then
+	printf '[general]\nenabled = no\n' > /etc/asterisk/manager.conf
+fi
+
 echo "entrypoint: trunk=$VOCAT_TRUNK_HOST device=${VOCAT_DEVICE:-<auto>} extension=$ASTERISK_SIP_USER"
+echo "entrypoint: manager interface (AMI) enabled=$ASTERISK_AMI_ENABLED"
 echo "entrypoint: PJSIP is the only SIP driver here; chan_sip is noloaded."
 echo "entrypoint: if a softphone gets 'Wrong password', check that res_pjsip"
 echo "entrypoint: loaded and bound 5060 -- run: asterisk -rx 'pjsip show endpoints'"

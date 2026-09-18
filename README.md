@@ -345,6 +345,9 @@ Vocat reads an optional JSON configuration file from `VOCAT_CONFIG`, then applie
 | `VOCAT_MAX_REQUEST_BODY_BYTES` | `1048576` | Maximum API request body size. |
 | `VOCAT_SIP_TRUNK_ADDR` | empty | UDP address for the SIP trunk. Empty keeps the trunk off entirely. |
 | `VOCAT_SIP_TRUNK_PEERS` | empty | Addresses or CIDR prefixes allowed to use the trunk, comma or space separated. Startup fails if an address is set with no peers. |
+| `VOCAT_ASTERISK_AMI_ADDR` | empty | Asterisk manager interface to read live PBX status from, normally `127.0.0.1:5038`. Empty disables the Asterisk page. |
+| `VOCAT_ASTERISK_AMI_USER` | empty | Manager account name. |
+| `VOCAT_ASTERISK_AMI_SECRET` | empty | Manager account secret. Bind AMI to loopback: it crosses a plain connection in the clear. |
 | `VOCAT_REPO` | `MengMengCode/VoCat` | Trusted GitHub repository used by the self-updater, in `owner/name` form. |
 | `GITHUB_TOKEN` | empty | Optional GitHub token for private repositories or higher API limits. |
 
