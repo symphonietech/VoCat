@@ -457,6 +457,37 @@ load at all and `docker compose logs asterisk` will say why.
 A genuine wrong password from PJSIP looks different — it names the endpoint
 and comes from `res_pjsip`, not `chan_sip`.
 
+### Is this container even running the build you think it is?
+
+Every start logs it, as the first line:
+
+```sh
+docker compose logs vocat | grep "VoCat starting"
+```
+
+```
+"msg":"VoCat starting","version":"v1.0.0.0-20-gd3809c2","build_time":"..."
+```
+
+`version: 0.1.0-dev` means the binary was built without `VOCAT_TAG`, which
+`scripts/docker-build.sh` sets from git — so it is almost certainly not the
+build you just made.
+
+This matters more than it sounds. `docker compose up -d` **without `--build`**
+resolves `image: ghcr.io/mengmengcode/vocat:${VOCAT_TAG:-latest}`, and with no
+`VOCAT_TAG` in the environment that is `:latest` — whatever image happens to
+be lying around under that tag, which may be days old. The container comes up
+clean and reproduces bugs that were fixed long ago. Use
+`scripts/docker-build.sh`, which sets `VOCAT_TAG` from `git describe` and
+passes `--build`.
+
+A trunk symptom with a known signature: a burst of `ACK` → `501 Not
+Implemented` between Asterisk and port 5062, thousands per second. Answering
+an ACK at all was a bug fixed in `8f8607c`; seeing it now means the binary
+predates that. Current builds take every ACK silently, and also cap outbound
+packets per peer, so a loop stops on its own and logs `siptrunk is dropping
+packets to a peer`.
+
 ### Another SIP server already owns port 5060
 
 If the container's log is **completely empty** while the phone reports a

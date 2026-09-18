@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -22,6 +23,7 @@ import (
 	"golang.org/x/term"
 
 	"vocat/internal/auth"
+	"vocat/internal/buildinfo"
 	"vocat/internal/config"
 	"vocat/internal/developer"
 	"vocat/internal/device"
@@ -422,6 +424,16 @@ func splitSubcommand(args []string) (string, []string) {
 }
 
 func run(logger *slog.Logger, logs *loghub.Hub) error {
+	// First line of every run. A container is easy to recreate from a stale
+	// image -- `docker compose up -d` without --build resolves whatever
+	// :latest points at -- and a binary that predates a fix reproduces bugs
+	// that were fixed days ago. Answering "which build is this?" from the log
+	// costs one line here and saves a round of debugging the wrong thing.
+	logger.Info("VoCat starting",
+		"version", buildinfo.Version,
+		"build_time", buildinfo.BuildTime,
+		"go", runtime.Version(),
+	)
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("load configuration: %w", err)
