@@ -620,6 +620,9 @@ export type AsteriskStatus = {
   version?: string;
   error?: string;
   contactsError?: string;
+  // Contacts Asterisk returned that matched no endpoint. Normally absent;
+  // present means a pairing gap, which is worth seeing rather than hiding.
+  unpairedContacts?: AsteriskContact[];
   core?: { startupTime?: string; reloadTime?: string; calls?: string };
   endpoints: AsteriskEndpoint[];
 };

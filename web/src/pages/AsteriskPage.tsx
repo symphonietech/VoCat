@@ -147,6 +147,23 @@ export default function AsteriskPage() {
             )}
           </Section>
 
+          {status.unpairedContacts?.length ? (
+            <Section title={t("未匹配到端点的联系地址")}>
+              {status.unpairedContacts.map((contact, index) => (
+                <div
+                  key={contact.uri ?? index}
+                  className="flex flex-wrap items-center gap-2 p-3 text-xs text-slate-500 dark:text-slate-400"
+                >
+                  <StatusDot tone={contactTone(contact.status)} />
+                  <span className="break-all" title={contact.uri}>
+                    {shortURI(contact.uri)}
+                  </span>
+                  {contact.status ? <span>{contact.status}</span> : null}
+                </div>
+              ))}
+            </Section>
+          ) : null}
+
           {status.contactsError ? (
             <p className="mt-3 text-xs text-amber-600 dark:text-amber-400">
               {t("无法读取注册信息")}: {status.contactsError}

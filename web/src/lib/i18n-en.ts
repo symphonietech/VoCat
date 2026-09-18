@@ -22,6 +22,7 @@ export const EN_DICT: Record<string, string> = {
   "Asterisk 中没有名为 vocat 的中继端点": "Asterisk has no endpoint named vocat",
   "分机": "Extensions",
   "没有分机": "No extensions",
+  "未匹配到端点的联系地址": "Contacts not matched to an endpoint",
   "无法读取注册信息": "Could not read registrations",
   "可达": "Reachable",
   "未验证可达性": "Not qualified",

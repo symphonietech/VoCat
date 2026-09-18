@@ -25,7 +25,7 @@ func TestBuildAsteriskEndpointsPairsContactsByEndpointName(t *testing.T) {
 			"UserAgent": "LinphoneiOS/6.2.2", "ViaAddr": "192.168.31.110",
 			"ExpirationTime": "1789699918"},
 	}
-	result := buildAsteriskEndpoints(endpoints, contacts)
+	result, _ := buildAsteriskEndpoints(endpoints, contacts)
 	if len(result) != 2 {
 		t.Fatalf("got %d endpoints", len(result))
 	}
@@ -59,7 +59,7 @@ func TestBuildAsteriskEndpointsFallsBackToTheAOR(t *testing.T) {
 		{"Event": "ContactList", "Aor": "1001/sip:1001@192.168.31.110", "Uri": "sip:a@b", "Status": "Reachable"},
 		{"Event": "ContactList", "ObjectName": "1001/abcdef", "Uri": "sip:a@b", "Status": "Reachable"},
 	} {
-		result := buildAsteriskEndpoints(endpoints, []ami.Message{aorField})
+		result, _ := buildAsteriskEndpoints(endpoints, []ami.Message{aorField})
 		if len(result) != 1 || len(result[0].Contacts) != 1 {
 			t.Fatalf("contact %v was not paired: %+v", aorField, result)
 		}
@@ -69,7 +69,7 @@ func TestBuildAsteriskEndpointsFallsBackToTheAOR(t *testing.T) {
 // A field VoCat does not know must still reach the API, or a renamed key
 // becomes invisible instead of merely unlabelled.
 func TestBuildAsteriskEndpointsKeepsRawFields(t *testing.T) {
-	result := buildAsteriskEndpoints(
+	result, _ := buildAsteriskEndpoints(
 		[]ami.Message{{"ObjectName": "vocat", "SomethingNew": "42"}}, nil)
 	found := ""
 	for _, field := range result[0].Fields {
@@ -86,13 +86,13 @@ func TestBuildAsteriskEndpointsKeepsRawFields(t *testing.T) {
 // "not registered" would be wrong -- the phone is there, Asterisk just has
 // not probed it.
 func TestBuildAsteriskEndpointsTreatsUnknownStatusAsRegistered(t *testing.T) {
-	result := buildAsteriskEndpoints(
+	result, _ := buildAsteriskEndpoints(
 		[]ami.Message{{"ObjectName": "1001"}},
 		[]ami.Message{{"Event": "ContactList", "EndpointName": "1001", "Uri": "sip:a@b"}})
 	if !result[0].Registered {
 		t.Fatal("a contact with no status was reported as not registered")
 	}
-	result = buildAsteriskEndpoints(
+	result, _ = buildAsteriskEndpoints(
 		[]ami.Message{{"ObjectName": "1001"}},
 		[]ami.Message{{"Event": "ContactList", "EndpointName": "1001", "Status": "Unreachable"}})
 	if result[0].Registered {
@@ -103,7 +103,7 @@ func TestBuildAsteriskEndpointsTreatsUnknownStatusAsRegistered(t *testing.T) {
 // A contact for an endpoint that is not in the listing must not panic or
 // invent one.
 func TestBuildAsteriskEndpointsIgnoresOrphanContacts(t *testing.T) {
-	result := buildAsteriskEndpoints(
+	result, _ := buildAsteriskEndpoints(
 		[]ami.Message{{"ObjectName": "1001"}},
 		[]ami.Message{{"Event": "ContactList", "EndpointName": "ghost", "Uri": "sip:a@b"}})
 	if len(result) != 1 || len(result[0].Contacts) != 0 {
@@ -121,7 +121,7 @@ func TestBuildAsteriskEndpointsPairsByTheEndpointsOwnAOR(t *testing.T) {
 	contacts := []ami.Message{
 		{"Event": "ContactList", "ObjectName": "desk-phone-7/sip:x@y", "Uri": "sip:x@y", "Status": "Reachable"},
 	}
-	result := buildAsteriskEndpoints(endpoints, contacts)
+	result, _ := buildAsteriskEndpoints(endpoints, contacts)
 	if len(result[0].Contacts) != 1 || !result[0].Registered {
 		t.Fatalf("contact not paired through the endpoint AOR: %+v", result[0])
 	}
@@ -140,7 +140,7 @@ func TestBuildAsteriskEndpointsPrefersTheEndpointName(t *testing.T) {
 	contacts := []ami.Message{
 		{"Event": "ContactList", "Endpoint": "1001", "Uri": "sip:x@y", "Status": "Reachable"},
 	}
-	result := buildAsteriskEndpoints(endpoints, contacts)
+	result, _ := buildAsteriskEndpoints(endpoints, contacts)
 	for _, endpoint := range result {
 		if endpoint.Name == "1001" && len(endpoint.Contacts) != 1 {
 			t.Fatalf("1001 did not get its own contact: %+v", endpoint)
@@ -206,7 +206,7 @@ func TestBuildAsteriskEndpointsShowsAStaticallyConfiguredContact(t *testing.T) {
 		"DeviceState": "Not in use", "ActiveChannels": "0",
 		"Contacts": "vocat/sip:vocat@127.0.0.1:5062,",
 	}}
-	result := buildAsteriskEndpoints(endpoints, nil)
+	result, _ := buildAsteriskEndpoints(endpoints, nil)
 	if len(result) != 1 {
 		t.Fatalf("got %d endpoints", len(result))
 	}
@@ -233,7 +233,7 @@ func TestBuildAsteriskEndpointsDoesNotDuplicateADeclaredContact(t *testing.T) {
 		"Event": "ContactList", "ObjectName": "vocat;@1b2c3d",
 		"Uri": "sip:vocat@127.0.0.1:5062", "Status": "Reachable", "RoundtripUsec": "900",
 	}}
-	result := buildAsteriskEndpoints(endpoints, contacts)
+	result, _ := buildAsteriskEndpoints(endpoints, contacts)
 	if len(result[0].Contacts) != 1 {
 		t.Fatalf("contact duplicated: %+v", result[0].Contacts)
 	}
@@ -245,7 +245,7 @@ func TestBuildAsteriskEndpointsDoesNotDuplicateADeclaredContact(t *testing.T) {
 // Reachable is a stronger claim than Registered and must not be asserted from
 // a contact that has never been qualified.
 func TestBuildAsteriskEndpointsSeparatesReachableFromRegistered(t *testing.T) {
-	result := buildAsteriskEndpoints(
+	result, _ := buildAsteriskEndpoints(
 		[]ami.Message{{"ObjectName": "1001"}},
 		[]ami.Message{{"Event": "ContactList", "Endpoint": "1001", "Uri": "sip:a@b"}})
 	if !result[0].Registered {
@@ -253,5 +253,17 @@ func TestBuildAsteriskEndpointsSeparatesReachableFromRegistered(t *testing.T) {
 	}
 	if result[0].Reachable {
 		t.Fatal("an unqualified contact was reported reachable")
+	}
+}
+
+// A contact matching no endpoint used to vanish. It is the difference
+// between "Asterisk never reported this contact" and "VoCat failed to pair
+// it", which is not answerable once it is dropped.
+func TestBuildAsteriskEndpointsReturnsUnpairedContacts(t *testing.T) {
+	_, unpaired := buildAsteriskEndpoints(
+		[]ami.Message{{"ObjectName": "1001"}},
+		[]ami.Message{{"Event": "ContactList", "Endpoint": "ghost", "Uri": "sip:ghost@nowhere"}})
+	if len(unpaired) != 1 || unpaired[0].URI != "sip:ghost@nowhere" {
+		t.Fatalf("unpaired = %+v", unpaired)
 	}
 }

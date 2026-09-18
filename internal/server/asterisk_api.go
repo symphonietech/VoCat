@@ -127,12 +127,18 @@ func (s *Server) handleAsteriskStatus(w http.ResponseWriter, r *http.Request) {
 	if contactsErr != nil {
 		payload["contacts_error"] = contactsErr.Error()
 	}
-	payload["endpoints"] = buildAsteriskEndpoints(endpoints, contacts)
+	built, unpaired := buildAsteriskEndpoints(endpoints, contacts)
+	payload["endpoints"] = built
+	if len(unpaired) > 0 {
+		payload["unpaired_contacts"] = unpaired
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"data": payload})
 }
 
-// buildAsteriskEndpoints pairs contacts to the endpoints that own them.
-func buildAsteriskEndpoints(endpointEvents, contactEvents []ami.Message) []asteriskEndpoint {
+// buildAsteriskEndpoints pairs contacts to the endpoints that own them, and
+// returns any contact it could not place so the caller can show it rather
+// than drop it.
+func buildAsteriskEndpoints(endpointEvents, contactEvents []ami.Message) ([]asteriskEndpoint, []asteriskContact) {
 	result := make([]asteriskEndpoint, 0, len(endpointEvents))
 	// byAOR is the fallback pairing. Contacts name their endpoint directly in
 	// most versions, but where they do not, an AOR has the endpoint's name by
@@ -189,6 +195,7 @@ func buildAsteriskEndpoints(endpointEvents, contactEvents []ami.Message) []aster
 		})
 	}
 	seen := map[string]bool{}
+	unpaired := []asteriskContact{}
 	for _, event := range contactEvents {
 		contact := asteriskContact{
 			URI:        event.First("Uri", "URI"),
@@ -215,6 +222,11 @@ func buildAsteriskEndpoints(endpointEvents, contactEvents []ami.Message) []aster
 			index, ok = byURI[contact.URI]
 		}
 		if !ok {
+			// A contact Asterisk returned that belongs to no endpoint VoCat
+			// listed. Dropping it silently is how "why has this endpoint no
+			// status" becomes unanswerable; surfacing it says whether the
+			// contact was missing or merely mispaired.
+			unpaired = append(unpaired, contact)
 			continue
 		}
 		result[index].Contacts = append(result[index].Contacts, contact)
@@ -245,5 +257,5 @@ func buildAsteriskEndpoints(endpointEvents, contactEvents []ami.Message) []aster
 	sort.Slice(result, func(first, second int) bool {
 		return strings.ToLower(result[first].Name) < strings.ToLower(result[second].Name)
 	})
-	return result
+	return result, unpaired
 }
