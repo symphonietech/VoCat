@@ -9,14 +9,150 @@ This is deliberately **not** a registrar. There are no user accounts and no
 digest authentication: peers are authorised by source address. Identity is the
 PBX's job.
 
-> **Status.** Outbound works, verified end to end: a Linphone softphone through
-> Asterisk, out over a SIM's IMS registration to the PSTN, two minutes of
-> two-way audio, torn down by the far end's `BYE`. Multi-SIM selection by
+> **Status.** Outbound is verified end to end on hardware: a Linphone softphone
+> through Asterisk, out over a SIM's IMS registration to the PSTN, two minutes
+> of two-way audio, torn down by the far end's `BYE`. Multi-SIM selection by
 > `X-VoCat-Device` is proven on the same path.
 >
-> The inbound direction — a call arriving on the SIM being offered to the PBX —
-> is **not implemented**. Nothing reaches the `[from-vocat]` context yet, so
-> incoming calls are still answered from VoCat's own Calls page.
+> Inbound — a call arriving on a SIM offered to the PBX — is implemented and
+> covered by tests, but has not had the same hardware run. Hold, keypad digits
+> and call records are likewise tested but not hardware-proven.
+
+## Reading this
+
+Front to back is the intended order, and the sections build on each other:
+
+1. **[How it works](#how-it-works)** — the mental model. Read this first; the
+   rest assumes it.
+2. **[Configuration reference](#configuration-reference)** — every setting in
+   one table, with what breaks if each is wrong.
+3. **[Enabling it](#enabling-it)** and **[Running Asterisk in a
+   container](#running-asterisk-in-a-container)** — getting it up.
+4. **[Asterisk side](#asterisk-side)** — what the shipped config does.
+5. **Configuring:** [outbound routes](#managing-outbound-routes-from-the-web-ui),
+   [extensions](#extensions-in-the-web-ui), [inbound
+   routing](#inbound-routing), [which SIM places a
+   call](#choosing-which-sim-places-a-call).
+6. **What calls do:** [outbound](#what-the-pbx-sees),
+   [inbound](#inbound-a-call-on-the-sim-offered-to-the-pbx), [hold and
+   resume](#hold-and-resume), [keypad digits](#keypad-digits), [call
+   records](#call-records).
+7. **Operating:** [the Asterisk page](#the-asterisk-page-in-vocat),
+   [verifying](#verifying), [troubleshooting](#troubleshooting).
+
+## How it works
+
+Three processes, two of them containers, all on the host's network namespace:
+
+```
+  softphone  ──SIP/RTP──▶  Asterisk  ──SIP/RTP──▶  VoCat  ──IMS/IPsec──▶  carrier
+  (LAN, :5060)             (:5060)     (loopback    (:5062)    (SIM)
+                                        :5062)
+```
+
+**Asterisk owns identity.** Registration, passwords, which handset is which.
+VoCat has no user accounts at all — the trunk authorises by source address,
+which is why it must never be bound to an interface reachable from the
+internet.
+
+**VoCat owns the SIM.** It turns a SIP call into an IMS call over a modem's
+VoWiFi registration, and bridges the audio between the two legs. It picks
+which SIM from a header Asterisk sets, or refuses to guess.
+
+The two directions are separate code paths and it is worth keeping them apart
+in your head:
+
+| | Who sends the INVITE | VoCat's role |
+| --- | --- | --- |
+| **Outbound** — softphone to PSTN | Asterisk → VoCat | UAS: answers, then dials the SIM |
+| **Inbound** — PSTN to softphone | VoCat → Asterisk | UAC: offers the call, answers the SIM last |
+
+### The three places configuration lives
+
+This is the part that most often confuses people, because the same thing can
+be set in more than one place and only one of them wins.
+
+| Where | What it sets | When it applies |
+| --- | --- | --- |
+| `.env` | Whether the containers exist at all, the AMI secret, and **seed values** used once | Container creation. `docker compose restart` does **not** re-read it |
+| VoCat's web UI | Routes, extensions, inbound mode — the day-to-day configuration | Save writes a file; **Apply** reloads Asterisk |
+| `asterisk/templates/*.conf` | The fixed scaffolding: transports, the trunk endpoint, which contexts exist | Rendered at every container start (`docker compose restart asterisk`) |
+
+The seed values are the trap. `VOCAT_DEVICE` and `ASTERISK_SIP_USER` /
+`ASTERISK_SIP_PASSWORD` write a default configuration **only when the
+corresponding file does not exist**. Once anything is saved in the web UI,
+those `.env` values do nothing — see [VOCAT_DEVICE once routes are
+configured](#vocat_device-once-routes-are-configured) and [Replacing the
+seeded account](#replacing-the-seeded-account).
+
+### The four generated files
+
+VoCat writes these into `VOCAT_ASTERISK_DIALPLAN_DIR`, a volume both
+containers share (`/opt/vocat/dialplan` in VoCat, `/etc/asterisk/vocat` in
+Asterisk). The shipped config `#include`s all four unconditionally, so each is
+seeded by the entrypoint on first start and the include always resolves.
+
+| File | Contains | Generated from | Reloaded by |
+| --- | --- | --- | --- |
+| `routes.conf` | `[vocat-routes]` — which dialled numbers leave through which SIMs | The route editor | `pbx_config` |
+| `endpoints.conf` | The PJSIP endpoint, auth and AOR per softphone account. Holds passwords in the clear, so it is written `0600` | The extension editor | `res_pjsip` |
+| `internal.conf` | `[vocat-internal]` — extension-to-extension dialling | The same extension list | `pbx_config` |
+| `inbound.conf` | `[vocat-inbound]` — where a call arriving on a SIM rings | The extension list plus the inbound mode | `pbx_config` |
+
+Saving an extension touches three of them and reloads **both** modules,
+because one edit changes an account list *and* a dialplan.
+
+### How a call finds its way
+
+Outbound, a softphone dialling `12125551234`:
+
+1. Asterisk places the call in `[from-internal]`, which is nothing but
+   includes: `vocat-internal` first, then `vocat-routes`. Asterisk takes the
+   **first include that matches**, not the best match across them all — so an
+   exact extension wins over a route pattern.
+2. No internal extension matches, so `[vocat-routes]` does:
+   `Set(__VOCATDEV=...)` then `Dial(PJSIP/${EXTEN}@vocat,...)`.
+3. The `b()` pre-dial handler adds `X-VoCat-Device` on the **outbound** leg.
+4. VoCat reads that header, picks the SIM, dials, and bridges the audio.
+
+Inbound, a call arriving on a SIM:
+
+1. VoCat sends an INVITE to Asterisk with the **dialled** number (the SIM's
+   own) as the request URI and the caller as the From.
+2. `[vocat] type=identify match=127.0.0.1` puts it in `[from-vocat]`, which
+   includes `vocat-inbound`.
+3. That context rings whatever the inbound mode says.
+4. Only when a handset answers does VoCat answer the carrier's call.
+
+## Configuration reference
+
+Every setting that affects the trunk or the PBX, in one place. `VOCAT_*` are
+read by VoCat; the rest are read by the Asterisk container's entrypoint.
+
+| Variable | Default | What it does, and what happens if it is wrong |
+| --- | --- | --- |
+| `VOCAT_SIP_TRUNK_ADDR` | empty | UDP address the trunk listens on. Empty keeps the trunk off entirely. Bind it privately: authorisation is by source address, so a publicly reachable interface exposes SIM-backed calling and its charges to anyone who can spoof a packet |
+| `VOCAT_SIP_TRUNK_PEERS` | empty | Addresses or CIDR prefixes allowed to use the trunk, comma or space separated. **Startup fails** if an address is set with no peers, rather than running a listener that drops every packet. A request from elsewhere is dropped with no reply, so a scanner learns nothing |
+| `VOCAT_SIP_TRUNK_PBX` | empty | Where an incoming call on a SIM is offered, normally `127.0.0.1:5060`. Empty leaves inbound off and such calls are answered only from VoCat's Calls page |
+| `VOCAT_ASTERISK_AMI_ADDR` | empty | Asterisk's manager interface. Empty disables the whole Asterisk page: status, routes, extensions, channels and registration history all become unavailable, and Apply returns `501`. VoCat itself is unaffected |
+| `VOCAT_ASTERISK_AMI_USER` | empty | Manager account name. Must match `ASTERISK_AMI_USER` |
+| `VOCAT_ASTERISK_AMI_SECRET` | empty | Manager account secret. Must match `ASTERISK_AMI_SECRET`. AMI crosses a plain connection in the clear, so bind it to loopback |
+| `VOCAT_ASTERISK_DIALPLAN_DIR` | empty | The shared volume VoCat writes generated config into. With it unset, the editors still save to VoCat's database but write nothing for Asterisk to read — the UI works and the PBX never changes |
+| `ASTERISK_SIP_PASSWORD` | — | **Required**; the entrypoint refuses to start without it, and refuses one under 12 characters. Seeds the first softphone account |
+| `ASTERISK_SIP_USER` | `1001` | Name of that seeded account. Seeds `endpoints.conf`, `internal.conf` and `inbound.conf` **once**, on first start only |
+| `ASTERISK_AMI_USER` | `vocat` | Manager account the entrypoint creates |
+| `ASTERISK_AMI_SECRET` | empty | Empty replaces `manager.conf` with `enabled = no` outright, so no account exists at all rather than an inert one being declared. Minimum 12 characters when set |
+| `VOCAT_TRUNK_HOST` | `127.0.0.1:5062` | Where Asterisk's `vocat` endpoint sends calls. Must match `VOCAT_SIP_TRUNK_ADDR` |
+| `VOCAT_DEVICE` | empty | Which SIM the **seeded** `routes.conf` dials out through. Does nothing once routes are saved in the web UI |
+| `COMPOSE_FILE` | unset | Set to `docker-compose.yml:docker-compose.asterisk.yml` so every `docker compose` command loads both files. Without it, Compose sees no `asterisk` service at all |
+
+Two traps worth repeating:
+
+- **Environment is fixed when a container is created.** `docker compose
+  restart` does not re-read `.env`; `./scripts/docker-build.sh` recreates.
+- **Editing `.env` with `sed s/.../.../` silently does nothing when the key is
+  absent**, which is what an `.env` copied from an older `.env.example` looks
+  like. Use the `setenv` helper shown throughout this document.
 
 ## Enabling it
 
@@ -407,150 +543,6 @@ the preceding `siptrunk call failed` line carries the reason. No `placed` line
 at all means the INVITE was refused before dialling — the status table above
 says which case that was.
 
-### Asterisk answers 404 before VoCat sees anything
-
-A capture shows the INVITE reaching Asterisk, a `100 Trying`, then:
-
-```
-SIP/2.0 404 Not Found
-Reason: Q.850;cause=3
-```
-
-and **no INVITE to port 5062 at all**. That is Asterisk's own "no matching
-extension" — the call never got as far as the trunk, so nothing in VoCat is
-at fault.
-
-Ask Asterisk directly whether the number matches:
-
-```sh
-docker compose exec asterisk asterisk -rx "dialplan show from-internal"
-docker compose exec asterisk asterisk -rx "dialplan show +18133659364@from-internal"
-```
-
-The usual cause is a pattern that does not cover the leading `+` of an E.164
-number, which is why the shipped dialplan matches `_.` rather than trying to
-enumerate first characters. If `dialplan show from-internal` prints nothing at
-all, `extensions.conf` did not load and `docker compose logs asterisk` will
-say why.
-
-### Softphone cannot register
-
-```
-chan_sip.c:29060 handle_request_register: Registration from 'sip:1001@...'
-failed for '...' - Wrong password
-```
-
-This cannot happen on the shipped image any more — Asterisk 21 removed
-chan_sip and this image is on 22 — but it is exactly what an older base or an
-existing Asterisk 20 install will do.
-
-**`chan_sip.c` is the tell, and the message is a lie.** This setup is
-PJSIP-only, so a registration answered by `chan_sip` was answered by a driver
-that has never heard of extension 1001. chan_sip's `alwaysauthreject` default
-challenges an unknown peer and then reports "Wrong password" rather than "no
-such peer" — deliberate, so a scanner cannot enumerate valid extensions, but
-it sends anyone debugging their own setup after a credential problem that does
-not exist.
-
-Asterisk 20 still ships chan_sip, and the packaged `sip.conf` has it bind
-5060 — the port the PJSIP transport wants. Whichever driver loads first takes
-it. `templates/modules.conf` noloads chan_sip for exactly this reason; if you
-see the message above, that file is not in effect. Check:
-
-```sh
-docker compose exec asterisk asterisk -rx "module show like chan_sip"
-docker compose exec asterisk asterisk -rx "pjsip show endpoints"
-```
-
-The first should list nothing, the second should show `vocat` and your
-softphone extension. If `pjsip show endpoints` errors, `res_pjsip` did not
-load at all and `docker compose logs asterisk` will say why.
-
-A genuine wrong password from PJSIP looks different — it names the endpoint
-and comes from `res_pjsip`, not `chan_sip`.
-
-### Is this container even running the build you think it is?
-
-Every start logs it, as the first line:
-
-```sh
-docker compose logs vocat | grep "VoCat starting"
-```
-
-```
-"msg":"VoCat starting","version":"v1.0.0.0-20-gd3809c2","build_time":"..."
-```
-
-`version: 0.1.0-dev` means the binary was built without `VOCAT_TAG`, which
-`scripts/docker-build.sh` sets from git — so it is almost certainly not the
-build you just made.
-
-This matters more than it sounds. `docker compose up -d` **without `--build`**
-resolves `image: ghcr.io/mengmengcode/vocat:${VOCAT_TAG:-latest}`, and with no
-`VOCAT_TAG` in the environment that is `:latest` — whatever image happens to
-be lying around under that tag, which may be days old. The container comes up
-clean and reproduces bugs that were fixed long ago. Use
-`scripts/docker-build.sh`, which sets `VOCAT_TAG` from `git describe` and
-passes `--build`.
-
-A trunk symptom with a known signature: a burst of `ACK` → `501 Not
-Implemented` between Asterisk and port 5062, thousands per second. Answering
-an ACK at all was a bug fixed in `8f8607c`; seeing it now means the binary
-predates that. Current builds take every ACK silently, and also cap outbound
-packets per peer, so a loop stops on its own and logs `siptrunk is dropping
-packets to a peer`.
-
-### "Could not read registrations: No Contacts found"
-
-Not an error, and no longer reported as one. Asterisk answers an empty
-listing with `Response: Error` and a message of that shape rather than an
-empty success, so a PBX whose softphones have all unregistered looked broken.
-
-A phone going `Unavailable` on its own is usually a mobile client that has
-backgrounded: Linphone on iOS unregisters and relies on push, so it appears
-only while the app is in the foreground or a call is up.
-
-### Another SIP server already owns port 5060
-
-If the container's log is **completely empty** while the phone reports a
-credential failure, the packet is very likely being answered by something
-else. This container uses host networking, so 5060 is the host's port: an
-Asterisk installed on the host, or any other PBX, wins the bind, and this
-container then runs with no SIP transport at all. `pjsip show endpoints` still
-lists everything, which makes it look healthy.
-
-The entrypoint now refuses to start in that situation and says so, but on an
-older image, prove it with a capture rather than a log:
-
-```sh
-sudo timeout 30 tcpdump -ni any port 5060 -vv
-```
-
-The `Server:` header in the response is the giveaway — it names the version
-that actually answered:
-
-```
-Server: Asterisk PBX 16.2.1~dfsg-2ubuntu1     <- a host install
-Server: Asterisk PBX 22.5.2                   <- this container
-```
-
-Find and remove the other one:
-
-```sh
-sudo ss -lunp | grep :5060
-sudo systemctl disable --now asterisk
-docker compose up -d asterisk
-```
-
-Verify the container is what answers:
-
-```sh
-docker compose exec asterisk asterisk -rx "core show version"
-```
-
-Upgrading the host install rather than removing it does not help: two SIP
-servers cannot share port 5060, whatever versions they are. Pick one.
-
 ## Managing outbound routes from the web UI
 
 The **Asterisk** page has an outbound route table: a match pattern, the SIMs
@@ -863,10 +855,10 @@ registering at its next attempt, some minutes later, with nothing in the UI
 that points at the cause. Saving a list that has accounts in it replaces the
 seeded one without asking — typing an account in is already the decision.
 
-`ASTERISK_SIP_USER` still names the extension the inbound context rings
-(`[from-vocat]` in `extensions.conf`), which is unused today because the
-trunk does not offer inbound calls yet. If you rename the account here, that
-line needs the same edit.
+`ASTERISK_SIP_USER` also seeds `inbound.conf`, so a fresh deployment rings
+that account for an incoming call. Once anything is saved here, [inbound
+routing](#inbound-routing) decides instead and the `.env` value stops
+mattering for that too.
 
 ### Names that are refused
 
@@ -1153,9 +1145,11 @@ rather than a record.
 ## The trunk and the Calls page together
 
 Both work at once, and neither has to be off for the other to run. The Calls
-page places and answers calls exactly as before; the trunk is inert unless
-`VOCAT_SIP_TRUNK_ADDR` is set, and even then it only touches calls a PBX
-placed through it.
+page places and answers calls exactly as before. The trunk is inert unless
+`VOCAT_SIP_TRUNK_ADDR` is set; with it set, the trunk carries calls a PBX
+placed through it, and — if `VOCAT_SIP_TRUNK_PBX` is also set — offers
+incoming calls to the PBX as well. An incoming call rings in both places at
+once and whichever side answers first takes it.
 
 The one thing that cannot be shared is a single call's **audio**. An IMS call
 has one RTP bridge and its downlink is a single channel, so a second reader
@@ -1180,3 +1174,149 @@ Putting registration in Asterisk keeps the security-sensitive part in software
 that has had twenty years of attack on it, and keeps VoCat's side to what it
 uniquely does: driving a SIM. It also means anything that speaks SIP — a
 softphone, a desk phone, a WebRTC page — works without further work here.
+
+## Troubleshooting
+
+### Asterisk answers 404 before VoCat sees anything
+
+A capture shows the INVITE reaching Asterisk, a `100 Trying`, then:
+
+```
+SIP/2.0 404 Not Found
+Reason: Q.850;cause=3
+```
+
+and **no INVITE to port 5062 at all**. That is Asterisk's own "no matching
+extension" — the call never got as far as the trunk, so nothing in VoCat is
+at fault.
+
+Ask Asterisk directly whether the number matches:
+
+```sh
+docker compose exec asterisk asterisk -rx "dialplan show from-internal"
+docker compose exec asterisk asterisk -rx "dialplan show +18133659364@from-internal"
+```
+
+The usual cause is a pattern that does not cover the leading `+` of an E.164
+number, which is why the shipped dialplan matches `_.` rather than trying to
+enumerate first characters. If `dialplan show from-internal` prints nothing at
+all, `extensions.conf` did not load and `docker compose logs asterisk` will
+say why.
+
+### Softphone cannot register
+
+```
+chan_sip.c:29060 handle_request_register: Registration from 'sip:1001@...'
+failed for '...' - Wrong password
+```
+
+This cannot happen on the shipped image any more — Asterisk 21 removed
+chan_sip and this image is on 22 — but it is exactly what an older base or an
+existing Asterisk 20 install will do.
+
+**`chan_sip.c` is the tell, and the message is a lie.** This setup is
+PJSIP-only, so a registration answered by `chan_sip` was answered by a driver
+that has never heard of extension 1001. chan_sip's `alwaysauthreject` default
+challenges an unknown peer and then reports "Wrong password" rather than "no
+such peer" — deliberate, so a scanner cannot enumerate valid extensions, but
+it sends anyone debugging their own setup after a credential problem that does
+not exist.
+
+Asterisk 20 still ships chan_sip, and the packaged `sip.conf` has it bind
+5060 — the port the PJSIP transport wants. Whichever driver loads first takes
+it. `templates/modules.conf` noloads chan_sip for exactly this reason; if you
+see the message above, that file is not in effect. Check:
+
+```sh
+docker compose exec asterisk asterisk -rx "module show like chan_sip"
+docker compose exec asterisk asterisk -rx "pjsip show endpoints"
+```
+
+The first should list nothing, the second should show `vocat` and your
+softphone extension. If `pjsip show endpoints` errors, `res_pjsip` did not
+load at all and `docker compose logs asterisk` will say why.
+
+A genuine wrong password from PJSIP looks different — it names the endpoint
+and comes from `res_pjsip`, not `chan_sip`.
+
+### Is this container even running the build you think it is?
+
+Every start logs it, as the first line:
+
+```sh
+docker compose logs vocat | grep "VoCat starting"
+```
+
+```
+"msg":"VoCat starting","version":"v1.0.0.0-20-gd3809c2","build_time":"..."
+```
+
+`version: 0.1.0-dev` means the binary was built without `VOCAT_TAG`, which
+`scripts/docker-build.sh` sets from git — so it is almost certainly not the
+build you just made.
+
+This matters more than it sounds. `docker compose up -d` **without `--build`**
+resolves `image: ghcr.io/mengmengcode/vocat:${VOCAT_TAG:-latest}`, and with no
+`VOCAT_TAG` in the environment that is `:latest` — whatever image happens to
+be lying around under that tag, which may be days old. The container comes up
+clean and reproduces bugs that were fixed long ago. Use
+`scripts/docker-build.sh`, which sets `VOCAT_TAG` from `git describe` and
+passes `--build`.
+
+A trunk symptom with a known signature: a burst of `ACK` → `501 Not
+Implemented` between Asterisk and port 5062, thousands per second. Answering
+an ACK at all was a bug fixed in `8f8607c`; seeing it now means the binary
+predates that. Current builds take every ACK silently, and also cap outbound
+packets per peer, so a loop stops on its own and logs `siptrunk is dropping
+packets to a peer`.
+
+### "Could not read registrations: No Contacts found"
+
+Not an error, and no longer reported as one. Asterisk answers an empty
+listing with `Response: Error` and a message of that shape rather than an
+empty success, so a PBX whose softphones have all unregistered looked broken.
+
+A phone going `Unavailable` on its own is usually a mobile client that has
+backgrounded: Linphone on iOS unregisters and relies on push, so it appears
+only while the app is in the foreground or a call is up.
+
+### Another SIP server already owns port 5060
+
+If the container's log is **completely empty** while the phone reports a
+credential failure, the packet is very likely being answered by something
+else. This container uses host networking, so 5060 is the host's port: an
+Asterisk installed on the host, or any other PBX, wins the bind, and this
+container then runs with no SIP transport at all. `pjsip show endpoints` still
+lists everything, which makes it look healthy.
+
+The entrypoint now refuses to start in that situation and says so, but on an
+older image, prove it with a capture rather than a log:
+
+```sh
+sudo timeout 30 tcpdump -ni any port 5060 -vv
+```
+
+The `Server:` header in the response is the giveaway — it names the version
+that actually answered:
+
+```
+Server: Asterisk PBX 16.2.1~dfsg-2ubuntu1     <- a host install
+Server: Asterisk PBX 22.5.2                   <- this container
+```
+
+Find and remove the other one:
+
+```sh
+sudo ss -lunp | grep :5060
+sudo systemctl disable --now asterisk
+docker compose up -d asterisk
+```
+
+Verify the container is what answers:
+
+```sh
+docker compose exec asterisk asterisk -rx "core show version"
+```
+
+Upgrading the host install rather than removing it does not help: two SIP
+servers cannot share port 5060, whatever versions they are. Pick one.

@@ -301,6 +301,7 @@ smsip`.
 | POST | `/api/devices/{id}/calls/dial` | Dial. Body: `{"number":"+1...", "duration_seconds": 0}` (0 = no automatic hang-up, else 1–600s auto-hangup timer). `400 invalid_number` / `400 invalid_duration` on bad input. `202 Accepted`, `data: {accepted:true, action:"dial", number, call_id?, duration_seconds, transport, call?}` |
 | POST | `/api/devices/{id}/calls/answer` | Answer a ringing call. Body: `{"call_id": "string, optional — auto-resolved to a ringing call if omitted"}`. |
 | POST | `/api/devices/{id}/calls/hangup` | Hang up. Body: `{"call_id": "string, optional — resolved to any active call if omitted"}`. |
+| POST | `/api/devices/{id}/calls/dtmf` | Send keypad digits into a live call as RFC 4733 telephone events. Body: `{"call_id": "string, optional — resolved to the active call if omitted", "digits": "*123#"}`. Digits are `0-9`, `*`, `#`, `A-D` (max 64); anything else is `400 invalid_digits`. `409 dtmf_failed` means the carrier declined `telephone-event` in its SDP answer, so this call cannot carry digits at all. `501 dtmf_unavailable` means the call is on the modem's circuit-switched path rather than IMS, where there is no RTP stream to put events on. Tones are never sent as audio — see [docs/sip-trunk.md](sip-trunk.md#keypad-digits). `data: {sent:true, digits, call_id}` |
 | GET | `/api/devices/{id}/calls/media` | **WebSocket upgrade**, not a normal HTTP response. Query param `call_id` (required). Only available for an active VoWiFi IMS call (else `501 call_media_unavailable`). Bridges raw PCM audio: each WS binary message is little-endian signed 16-bit, 8 kHz, mono samples in both directions — the browser sends microphone audio and receives the call's downlink audio. |
 
 ### eSIM (`/api/devices/{id}/esim/...`)
@@ -495,6 +496,113 @@ updated_at`.
 
 ---
 
+## Call records
+
+`internal/server/call_records_api.go`. Every call is recorded — placed from
+the browser, through the SIP trunk, or by an automatic task — by sampling
+live IMS call state every two seconds rather than by the code that dials,
+answers or hangs up. See [docs/sip-trunk.md](sip-trunk.md#call-records) for
+why.
+
+Read-only by design: a history that could be edited would be a claim rather
+than a record. Records are pruned after 90 days.
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/calls/records` | List call history, newest first. Query: `device_id`, `direction` (`outgoing`/`incoming`), `disposition` (`answered`/`no_answer`/`busy`/`cancelled`/`failed`), `search` (substring of the peer number), `limit` (1–200, default 50), `offset`. `data: {records: [...], total, limit, offset}` |
+
+Each record: `{id, call_id, device_id, device_name, direction, source, peer_number, started_at, answered_at?, ended_at?, duration_seconds, disposition, sip_code?, reason?}`.
+
+- `source` is `browser` or `trunk` — who drove the call.
+- `duration_seconds` counts from the **answer**, not the first packet, so a
+  call that rang for a minute and was never picked up is `0`.
+- `disposition` is empty while a call is still in progress: the field means
+  how a call finished, not how it looked at the last sample.
+
+---
+
+## Asterisk (PBX integration)
+
+`internal/server/asterisk_*.go`. These endpoints read and configure the
+Asterisk container in front of VoCat over its manager interface (AMI). They
+are **not** related to the "Extensions / Plugins" section below — here an
+*extension* is a SIP account on the PBX.
+
+Everything requires `VOCAT_ASTERISK_AMI_ADDR` (and the matching user and
+secret). Without it, reads report `configured:false` and writes that need a
+reload return `501 ami_not_configured` — VoCat still runs normally, it just
+cannot see or drive the PBX. Configuration is written to
+`VOCAT_ASTERISK_DIALPLAN_DIR`, a directory both containers share; with that
+unset, settings still save to VoCat's database but nothing is written for
+Asterisk to read.
+
+Full narrative documentation, including what each generated file contains and
+what a wrong setting does: [docs/sip-trunk.md](sip-trunk.md).
+
+### Status, channels and history
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/asterisk/status` | Live PBX state over AMI. Never fails for an unreachable PBX — "Asterisk is down" is the answer this exists to give, not a request failure. `data: {configured, reachable?, address?, version?, error?, contacts_error?, channels_error?, core: {startup_time, reload_time, calls}, endpoints: [...], channels: [...], unpaired_contacts?: [...]}` |
+| POST | `/api/asterisk/channels/hangup` | End one live channel. Body: `{"channel": "PJSIP/1001-0000000a", "cause": 16}` (`cause` optional, Q.850 1–127, default 16 "normal clearing"). The name is matched against the live channel list rather than passed through, because AMI's `Hangup` treats a value wrapped in slashes as a **regular expression** — `404 channel_not_found` is also the answer for one. `data: {hungup:true, channel, cause}` |
+| GET | `/api/asterisk/registrations` | Endpoint contact state changes over time, newest first — one row per **change**, not per poll. Query: `endpoint`, `limit` (1–500, default 50). `data: {registrations: [{endpoint, contact_uri, status, previous_status, user_agent, via_address, roundtrip_ms, changed_at}], recording}`. `recording:false` means no manager address is configured, so an empty list means "off" rather than "quiet". |
+
+Each endpoint in `status`: `{name, aor, state, active_channels, transport, contacts: [{uri, status, roundtrip_ms, expires, user_agent, via_address, fields}], registered, reachable, fields}`. `fields` on both is the raw AMI message, so a key that moved between Asterisk versions stays visible rather than blanking a row.
+
+### Outbound routes
+
+Which dialled numbers leave through which SIMs. Rendered to `routes.conf`.
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/asterisk/routes` | `data: {routes: [...], preview, pending, path, writable, can_apply, unknown_devices?, error?}`. `pending` means the file on disk no longer matches what is stored, which is what Apply resolves. `unknown_devices` names devices a route uses that no longer exist — the dialplan is still valid and Apply still succeeds, so this is the only place that mistake is visible before a caller hears it. |
+| PUT | `/api/asterisk/routes` | Replace the route list. Body: `{"routes":[{"pattern":"_1NXXNXXXXXX","devices":["usb-...","usb-..."],"timeout_seconds":60,"comment":""}]}`. Rendered before it is stored, so a rejected route is never saved: `400 invalid_route` names the offending rule. Patterns must start with `_`; several devices rotate. |
+| POST | `/api/asterisk/routes/apply` | Rewrite the file and reload `pbx_config` over AMI. Calls in progress are unaffected. `502 reload_failed` / `502 ami_unreachable` on failure. |
+
+### Extensions (SIP accounts)
+
+Softphone accounts. Rendered to `endpoints.conf` (PJSIP), `internal.conf`
+(extension-to-extension dialling) and `inbound.conf` (where a call arriving
+on a SIM rings) — all three from the same list, so an account cannot exist
+without being dialable.
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/asterisk/extensions` | `data: {extensions: [...], preview, internal_preview, inbound_preview, inbound, pending, seeded?, path, can_apply, min_password_length, error?}`. **Passwords are never returned** — each entry carries `has_password` instead, and `preview` renders `password=<hidden>`. `seeded:true` means the file Asterisk is using came from the container entrypoint (the account in `.env`), not from VoCat. |
+| PUT | `/api/asterisk/extensions` | Replace the account list. Body: `{"extensions":[{"name":"1001","password":"...","caller_id":"Front Desk","max_contacts":2,"comment":""}], "replace_seeded": false}`. An entry sent **with no password keeps the stored one** — the browser never had it, so every edit would otherwise wipe the credential it never saw. A new account with no password is `400 password_required`. Saving an *empty* list over a seeded file is `409 seeded_extensions` unless `replace_seeded` is set: every softphone would stop registering, and the symptom appears minutes later with nothing pointing at the cause. |
+| GET | `/api/asterisk/extensions/candidates` | SIM numbers VoCat has learned from IMS registration, offered as accounts to create. `data: {candidates: [{number, device_id, device_name, iccid, exists}]}`. `number` is reduced to digits so it can be a PJSIP section name; one that already has an extension is listed and marked rather than hidden. |
+| POST | `/api/asterisk/extensions/apply` | Rewrite all three files and reload **both** `res_pjsip` and `pbx_config` — one save touches an account list and a dialplan, and reloading only the first leaves a new account registering perfectly and unreachable from every handset. |
+
+Refused names: `vocat`, `transport-udp`, `transport-tcp`, `global`, `system`,
+`general` (already section names in the shipped `pjsip.conf` — a duplicate
+object makes Asterisk refuse both) and the emergency numbers `911`, `933`,
+`112`, `999`, `000`, `110`, `119` (internal dialling is consulted before the
+outbound routes, so such an account would shadow the route that reaches
+emergency services). Passwords are printable ASCII, no spaces, no `;`, at
+least 12 characters — a `;` starts a comment in an Asterisk config file, so
+one would be silently truncated and the phone could never register.
+
+### Inbound routing
+
+Where a call arriving on a SIM rings. Rendered to `inbound.conf`.
+
+| Method | Path | Description |
+|---|---|---|
+| PUT | `/api/asterisk/inbound` | Body: `{"mode":"did"\|"ring_all"\|"hunt", "extensions":["1001","1002"], "ring_seconds":30, "hunt_seconds":15}`. Validated against the configured extensions: a ring group naming an account that does not exist rings nothing, and a caller who reaches no one is the only other signal (`400 invalid_inbound` names it). `data: {saved:true, written, inbound, inbound_preview}` |
+
+- `did` rings the extension **named after the dialled number**. No mapping
+  table: VoCat puts the dialled number in the request URI, so the extension
+  name is the map. Both the bare and `+E.164` forms are matched.
+- `ring_all` ignores the DID. An empty `extensions` list means *every*
+  configured extension, so a handset added later joins without a second edit.
+- `hunt` rings `extensions` in order, moving on when one does not answer.
+  The list is required.
+
+The current plan is returned by `GET /api/asterisk/extensions` under
+`inbound`, since the two are always edited against the same account list.
+
+---
+
 ## Extensions / Plugins
 
 `internal/server/extensions_api.go`. Third-party plugins with an optional
@@ -571,4 +679,5 @@ No endpoints were found or skipped due to genuine ambiguity beyond the
 above — every route reachable from `handleAPI` (via `routeDeviceAPI` and
 `routeGeneralAPI`, transitively including `routeSettingsAPI`,
 `routeSMSAPI`, `routeProxyAPI`, `routeExportProxyAPI`,
-`routeAutomaticTasksAPI`, `routeExtensionAPI`) is documented above.
+`routeAutomaticTasksAPI`, `routeExtensionAPI`, `routeAsteriskRoutesAPI`
+and `routeAsteriskExtensionsAPI`) is documented above.

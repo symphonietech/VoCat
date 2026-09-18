@@ -335,8 +335,11 @@ dialplan is generated from the same account list.
 `ASTERISK_SIP_USER` and `ASTERISK_SIP_PASSWORD` seed the first account once,
 on first start; after that the web UI owns it.
 
-Full setup, dial plan, multi-SIM selection and the status table the PBX sees:
-[docs/sip-trunk.md](docs/sip-trunk.md).
+**[docs/sip-trunk.md](docs/sip-trunk.md) is the manual for all of this** — how
+the pieces fit together, every setting and what breaks when each is wrong,
+both call directions, and troubleshooting. Read it front to back if you are
+new to this part. The HTTP endpoints behind the pages are in
+[docs/API.md](docs/API.md).
 
 ### USB SIM readers
 
@@ -534,6 +537,10 @@ internal/modem/             AT session and response handling
 internal/server/            HTTP API, notifications, and embedded web server
 internal/store/             SQLite persistence
 internal/siptrunk/          SIP trunk toward a PBX, and its RTP bridge
+internal/ami/               Asterisk Manager Interface client
+internal/asteriskconf/      Generates Asterisk dialplan and PJSIP config
+internal/dtmf/              RFC 4733 telephone events, shared by both RTP paths
+internal/g711/              A-law and mu-law, shared by both RTP paths
 internal/update/            GitHub Release self-updater
 internal/vowifi/            IKE, EAP-AKA, IMS, and WiFi Calling runtime
 asterisk/                   Asterisk container image and config templates
