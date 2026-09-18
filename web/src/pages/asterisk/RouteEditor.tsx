@@ -100,6 +100,12 @@ export function RouteEditor() {
         </div>
       </div>
 
+      {state?.unknownDevices?.length ? (
+        <p className="mb-2 rounded-lg bg-amber-50 p-2 text-xs text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">
+          {t("这些设备已不存在，使用它们的路由在拨号时会失败")}: {state.unknownDevices.join(", ")}
+        </p>
+      ) : null}
+
       {state && !state.canApply ? (
         <p className="mb-2 rounded-lg bg-amber-50 p-2 text-xs text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">
           {t("未配置管理接口，保存后需手动重启 Asterisk 容器才能生效")}

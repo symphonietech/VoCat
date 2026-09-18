@@ -69,6 +69,8 @@ export const EN_DICT: Record<string, string> = {
   "还没有分机": "No extensions yet",
   "生成的来电拨号方案": "Generated inbound dialplan",
   "进行中的通道": "Live channels",
+  "这些设备已不存在，使用它们的路由在拨号时会失败":
+    "These devices no longer exist, so routes using them fail at dial time",
   "注册变更记录": "Registration history",
   "未记录": "Not recording",
   "还没有注册变更。只有状态改变时才会记录，稳定的分机不会产生记录。":

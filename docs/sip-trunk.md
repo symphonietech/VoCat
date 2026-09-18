@@ -606,6 +606,21 @@ already.
 Duplicate patterns are refused too: Asterisk keeps one priority 1 per
 extension, so the second would silently never run.
 
+### Routes naming a SIM that is gone
+
+Remove a device and any route still naming it keeps rendering a perfectly
+valid dialplan. Apply succeeds, `dialplan show` looks right, and the call
+fails at dial time with an error only the caller hears.
+
+So the routes page reports device names that match no configured device,
+checked the same way the gateway matches at dial time — by ID or by name,
+case-insensitively on the name — rather than as a second opinion that could
+disagree with it. `*` is not a name and is skipped: it means whatever is
+registered at the time.
+
+Nothing is removed automatically. A device that is unplugged today may be back
+tomorrow, and deleting the route would lose a rule that was deliberate.
+
 ## The Asterisk page in VoCat
 
 VoCat can show live PBX state — which extensions are registered, whether the

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -97,6 +98,12 @@ func (s *Server) handleGetAsteriskRoutes(w http.ResponseWriter, r *http.Request)
 		"path":      s.asteriskRoutesPath(),
 		"writable":  s.asteriskRoutesPath() != "",
 		"can_apply": strings.TrimSpace(s.asteriskAMI.Address) != "",
+	}
+	// A route naming a SIM that has been removed is the one failure this page
+	// cannot otherwise show: the dialplan is valid, Apply succeeds, and the
+	// call fails at dial time with an error only the caller hears.
+	if unknown := s.unknownRouteDevices(r.Context(), routes); len(unknown) > 0 {
+		payload["unknown_devices"] = unknown
 	}
 	// The preview is what would be written. Showing it means a syntax
 	// question can be answered without shelling into the container.
@@ -246,4 +253,52 @@ func (s *Server) handleApplyAsteriskRoutes(w http.ResponseWriter, r *http.Reques
 		"message": response.First("Message"),
 		"at":      time.Now().UTC().Format(time.RFC3339),
 	}})
+}
+
+// unknownRouteDevices reports device names a route uses that match no
+// configured device.
+//
+// Matched the same way the trunk gateway matches at dial time -- by ID or by
+// name, case-insensitively on the name -- so this says exactly what a real
+// call would find, rather than a second opinion that can disagree with it.
+func (s *Server) unknownRouteDevices(ctx context.Context, routes []asteriskRoute) []string {
+	if len(routes) == 0 {
+		return nil
+	}
+	configs, err := s.store.ListDevices(ctx)
+	if err != nil {
+		// Reporting every device as unknown because the listing failed would
+		// be worse than reporting none: the page would cry wolf about a
+		// configuration that is fine.
+		return nil
+	}
+	known := make(map[string]bool, len(configs)*2)
+	for _, config := range configs {
+		known[strings.ToLower(config.ID)] = true
+		if name := strings.ToLower(strings.TrimSpace(config.Name)); name != "" {
+			known[name] = true
+		}
+	}
+	seen := map[string]bool{}
+	unknown := []string{}
+	for _, route := range routes {
+		for _, device := range route.Devices {
+			device = strings.TrimSpace(device)
+			// "*" is every device rather than a name, and resolves to
+			// whatever is registered at the time.
+			if device == "" || device == "*" {
+				continue
+			}
+			if known[strings.ToLower(device)] || seen[device] {
+				continue
+			}
+			seen[device] = true
+			unknown = append(unknown, device)
+		}
+	}
+	sort.Strings(unknown)
+	if len(unknown) == 0 {
+		return nil
+	}
+	return unknown
 }

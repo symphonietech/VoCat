@@ -760,5 +760,9 @@ export type AsteriskRoutes = {
   path?: string;
   writable?: boolean;
   canApply?: boolean;
+  // Device names a route uses that match no configured device. The dialplan
+  // is still valid and Apply still succeeds, so this is the only place the
+  // mistake is visible before a caller hears it.
+  unknownDevices?: string[];
   error?: string;
 };

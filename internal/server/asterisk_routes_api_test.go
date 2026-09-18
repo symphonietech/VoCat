@@ -1,10 +1,13 @@
 package server
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"vocat/internal/store"
 )
 
 // Writing must be atomic: Asterisk can read this file at any moment, and a
@@ -67,5 +70,50 @@ func TestAsteriskRoutesPathEmptyWithoutADirectory(t *testing.T) {
 	}
 	if server.asteriskRoutesDiffer("anything") {
 		t.Fatal("pending reported with nowhere to write")
+	}
+}
+
+// A route naming a SIM that has been removed is the one failure the routes
+// page cannot otherwise show: the dialplan is valid, Apply succeeds, and the
+// call fails at dial time with an error only the caller hears.
+func TestUnknownRouteDevicesNamesWhatIsGone(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	if err := database.UpsertDevice(ctx, store.Device{
+		ID: "usb-2c7c-0125-3-4-4", Name: "SLOT1-1", DeviceType: store.DeviceTypePCIeEC20EC25,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{store: database, logger: regionTestLogger()}
+
+	unknown := server.unknownRouteDevices(ctx, []asteriskRoute{
+		// By ID, by name, and one that is gone.
+		{Pattern: "_1NXXNXXXXXX", Devices: []string{"usb-2c7c-0125-3-4-4", "slot1-1", "usb-2c7c-0125-3-4-9"}},
+		// "*" is every device rather than a name.
+		{Pattern: "_011.", Devices: []string{"*"}},
+	})
+	if len(unknown) != 1 || unknown[0] != "usb-2c7c-0125-3-4-9" {
+		t.Fatalf("unknown = %v; want only the removed device", unknown)
+	}
+
+	// Nothing to report when every device resolves, so the page stays quiet
+	// on a configuration that is fine.
+	if got := server.unknownRouteDevices(ctx, []asteriskRoute{
+		{Pattern: "_.", Devices: []string{"SLOT1-1"}},
+	}); got != nil {
+		t.Fatalf("a valid route reported %v", got)
+	}
+}
+
+// Crying wolf because the device listing failed would be worse than saying
+// nothing: the routes may be perfectly fine.
+func TestUnknownRouteDevicesStaysQuietWithNoRoutes(t *testing.T) {
+	server := &Server{logger: regionTestLogger()}
+	if got := server.unknownRouteDevices(context.Background(), nil); got != nil {
+		t.Fatalf("an empty route list reported %v", got)
 	}
 }
