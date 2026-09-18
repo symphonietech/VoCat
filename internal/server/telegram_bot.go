@@ -1737,7 +1737,7 @@ func (bot *telegramBot) executeTimedCellularCall(
 		current, found := telegramFindOutgoingCellularCall(calls, action.Argument)
 		if found {
 			seenCall = true
-			lastState = telegramCellularCallInt(current, "state")
+			lastState = telegramCellularCallInt(current, "state_code")
 			if lastState == 0 || lastState == 1 || lastState == 3 {
 				confirmed = true
 			}
@@ -1782,7 +1782,7 @@ func telegramFindOutgoingCellularCall(calls []map[string]any, number string) (ma
 	cleanNumber := strings.TrimPrefix(strings.TrimSpace(number), "+")
 	var fallback map[string]any
 	for _, call := range calls {
-		if telegramCellularCallInt(call, "direction") != 0 {
+		if telegramCellularCallInt(call, "direction_code") != 0 {
 			continue
 		}
 		if fallback == nil {
@@ -1952,7 +1952,7 @@ func (bot *telegramBot) executeSimpleCellularCallAction(ctx context.Context, phy
 				return "", queryErr
 			}
 			for _, call := range calls {
-				if telegramCellularCallInt(call, "direction") == 1 && telegramCellularCallInt(call, "state") == 0 {
+				if telegramCellularCallInt(call, "direction_code") == 1 && telegramCellularCallInt(call, "state_code") == 0 {
 					return "📞 基站来电已接通。", nil
 				}
 			}
@@ -1993,12 +1993,12 @@ func formatTelegramCellularCalls(calls []map[string]any) string {
 	}
 	lines := []string{"基站直连通话："}
 	for _, call := range calls {
-		direction := map[bool]string{true: "来电", false: "去电"}[telegramCellularCallInt(call, "direction") == 1]
+		direction := map[bool]string{true: "来电", false: "去电"}[telegramCellularCallInt(call, "direction_code") == 1]
 		number := strings.TrimSpace(fmt.Sprint(call["number"]))
 		if number == "" || number == "<nil>" {
 			number = "未知号码"
 		}
-		lines = append(lines, fmt.Sprintf("• #%d · %s · %s · %s", telegramCellularCallInt(call, "index"), number, direction, telegramCLCCStateLabel(telegramCellularCallInt(call, "state"))))
+		lines = append(lines, fmt.Sprintf("• #%d · %s · %s · %s", telegramCellularCallInt(call, "index"), number, direction, telegramCLCCStateLabel(telegramCellularCallInt(call, "state_code"))))
 	}
 	return strings.Join(lines, "\n")
 }

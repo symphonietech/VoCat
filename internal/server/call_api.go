@@ -252,6 +252,47 @@ func validDialNumber(value string) bool {
 	return true
 }
 
+// clccStates maps the call state 3GPP TS 27.007 gives +CLCC onto the names the
+// VoWiFi path already reports, because the web UI reads one vocabulary.
+//
+// There is no "ended": a finished call simply stops being listed, which is why
+// a cellular call never carries an ended_at and why a call the modem still
+// lists is, by definition, still up.
+var clccStates = map[int]string{
+	0: "active",
+	1: "held",
+	2: "dialing",
+	3: "ringing",
+	4: "ringing",
+	5: "waiting",
+}
+
+// nonVoiceCLCCModes are the +CLCC call modes that are not a voice call.
+//
+// EC20/EC25 firmware lists an active packet-data session as a CLCC record, so
+// a modem with mobile data up reports a "call" for as long as data is
+// connected. That record used to reach the Calls page, where it read as a call
+// in progress and replaced the Dial button with Hang up -- making it look as
+// though a cellular SIM could not place a call at all.
+//
+// A deny list rather than an allow list: the voice modes are 0 and 3-5, but
+// firmware puts values outside the standard here, and hiding a real voice call
+// because its mode was unfamiliar is the worse mistake.
+var nonVoiceCLCCModes = map[int]bool{
+	1: true, // data
+	2: true, // fax
+	6: true, // voice followed by data, data part
+	7: true, // alternating voice/data, data part
+	8: true, // alternating voice/fax, fax part
+}
+
+// parseCLCC turns +CLCC lines into the same shape the VoWiFi call list has.
+//
+// It used to return the raw integers under their 27.007 names, which the page
+// then rendered as-is: the state showed as "2", an incoming call never matched
+// the check that offers an Answer button, and every row looked like a call in
+// progress. The raw line is kept alongside, because a modem listing a call
+// that is not there is exactly the problem someone needs to see.
 func parseCLCC(response modem.Response) []map[string]any {
 	result := make([]map[string]any, 0)
 	for _, line := range response.Lines {
@@ -267,9 +308,33 @@ func parseCLCC(response modem.Response) []map[string]any {
 			value, _ := strconv.Atoi(strings.TrimSpace(fields[index]))
 			return value
 		}
+		index, direction, state := integer(0), integer(1), integer(2)
+		if mode := integer(3); nonVoiceCLCCModes[mode] {
+			continue
+		}
+		name, known := clccStates[state]
+		if !known {
+			// Rather than an empty state, which would read as "no call".
+			name = "unknown"
+		}
 		call := map[string]any{
-			"index": integer(0), "direction": integer(1), "state": integer(2),
-			"mode": integer(3), "multiparty": integer(4), "raw": line,
+			// The call index is the only identifier a modem gives, and it is
+			// what AT+CHLD would act on.
+			"id":        strconv.Itoa(index),
+			"index":     index,
+			"direction": "outgoing",
+			"state":     name,
+			// The raw 27.007 codes, kept under their own names: the web UI
+			// reads the words, and anything that has to act on the modem --
+			// or explain what it said -- needs the number.
+			"direction_code": direction,
+			"state_code":     state,
+			"mode":           integer(3),
+			"multiparty":     integer(4),
+			"raw":            line,
+		}
+		if direction == 1 {
+			call["direction"] = "incoming"
 		}
 		if len(fields) > 5 {
 			call["number"] = strings.Trim(strings.TrimSpace(fields[5]), `"`)

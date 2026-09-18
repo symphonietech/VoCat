@@ -8,13 +8,43 @@ import (
 	"vocat/internal/vowifi"
 )
 
-func TestParseCLCC(t *testing.T) {
+// The web UI reads one vocabulary for calls whatever carried them, so the
+// cellular path reports the same words the VoWiFi one does. It used to hand
+// over the raw 27.007 integers, which the page rendered as "4" and never
+// matched against "incoming" -- so a cellular call got no Answer button and
+// an unreadable state.
+func TestParseCLCCSpeaksTheSameVocabularyAsVoWiFi(t *testing.T) {
 	calls := parseCLCC(modem.Response{Lines: []string{
 		`+CLCC: 1,1,4,0,0,"+447700900000",145`,
 		`+CLCC: 2,0,0,0,0,"12345",129`,
 	}})
-	if len(calls) != 2 || calls[0]["number"] != "+447700900000" || calls[1]["state"] != 0 {
+	if len(calls) != 2 {
 		t.Fatalf("parseCLCC = %#v", calls)
+	}
+	if calls[0]["number"] != "+447700900000" ||
+		calls[0]["direction"] != "incoming" || calls[0]["state"] != "ringing" {
+		t.Errorf("incoming call = %#v", calls[0])
+	}
+	if calls[1]["direction"] != "outgoing" || calls[1]["state"] != "active" {
+		t.Errorf("outgoing call = %#v", calls[1])
+	}
+	// An id, because the page keys rows by it and hang-up sends it back.
+	if calls[0]["id"] != "1" || calls[1]["id"] != "2" {
+		t.Errorf("ids = %v, %v", calls[0]["id"], calls[1]["id"])
+	}
+	// The raw codes survive under their own names: anything that acts on the
+	// modem, or explains what it said, needs the number rather than the word.
+	if calls[0]["state_code"] != 4 || calls[0]["direction_code"] != 1 {
+		t.Errorf("raw codes lost: %#v", calls[0])
+	}
+}
+
+// A mode outside the standard is kept rather than dropped: hiding a real
+// voice call because its mode was unfamiliar is the worse mistake.
+func TestParseCLCCKeepsAnUnfamiliarMode(t *testing.T) {
+	calls := parseCLCC(modem.Response{Lines: []string{`+CLCC: 1,0,0,9,0,"12345",129`}})
+	if len(calls) != 1 {
+		t.Fatalf("an unfamiliar call mode was dropped: %#v", calls)
 	}
 }
 

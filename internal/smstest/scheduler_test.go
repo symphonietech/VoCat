@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -360,4 +361,41 @@ func containsRune(alphabet string, char rune) bool {
 		}
 	}
 	return false
+}
+
+// The gateway password must not come back out through a result row. A gateway
+// that takes credentials in the query string puts them in the URL, and Go's
+// transport errors quote that URL back -- so a failed send would write the
+// password into a record the results page returns.
+func TestRedactSecretRemovesTheGatewayPassword(t *testing.T) {
+	secret := "s3cret-gateway-pass"
+	body := `Post "https://gw.example/send?user=bob&pass=` + secret + `&to=1": dial tcp: refused`
+	got := redactSecret(body, secret)
+	if strings.Contains(got, secret) {
+		t.Fatalf("the password survived redaction: %s", got)
+	}
+	if !strings.Contains(got, secretMask) {
+		t.Fatalf("nothing was redacted: %s", got)
+	}
+	// Every occurrence, because a gateway may echo the request as well as
+	// the transport quoting it.
+	twice := redactSecret(secret+" and "+secret, secret)
+	if strings.Contains(twice, secret) {
+		t.Fatalf("only the first occurrence was redacted: %s", twice)
+	}
+}
+
+// Blanking every occurrence of a two-character password would mangle the
+// response into something unreadable while protecting a secret that is not
+// one.
+func TestRedactSecretLeavesShortAndEmptyValuesAlone(t *testing.T) {
+	if got := redactSecret("no secret here", ""); got != "no secret here" {
+		t.Errorf("an empty secret changed the text: %q", got)
+	}
+	if got := redactSecret("a as in apple", "a"); got != "a as in apple" {
+		t.Errorf("a one-character secret mangled the text: %q", got)
+	}
+	if got := redactSecret("", "longenough"); got != "" {
+		t.Errorf("empty text became %q", got)
+	}
 }

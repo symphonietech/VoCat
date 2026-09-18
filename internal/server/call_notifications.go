@@ -348,12 +348,19 @@ func (s *Server) pollCellularCalls(ctx context.Context) {
 	}
 }
 
+// isIncomingVoiceCLCC reports whether a parsed +CLCC record is an incoming
+// voice call worth notifying about. parseCLCC has already dropped the
+// packet-data sessions some firmware lists here, so this only has to decide
+// direction and state.
 func isIncomingVoiceCLCC(call map[string]any) bool {
-	direction, _ := call["direction"].(int)
-	state, _ := call["state"].(int)
-	mode, _ := call["mode"].(int)
-	// direction 1 = incoming (Mobile Terminated)
-	// mode 0 = voice; some modems also expose packet-data sessions as CLCC mode 1
-	// state 4 = incoming/ringing, 5 = waiting, 0 = active, 3 = alerting
-	return direction == 1 && mode == 0 && (state == 4 || state == 5 || state == 0 || state == 3)
+	direction, _ := call["direction"].(string)
+	state, _ := call["state"].(string)
+	if direction != "incoming" {
+		return false
+	}
+	switch state {
+	case "ringing", "waiting", "active":
+		return true
+	}
+	return false
 }

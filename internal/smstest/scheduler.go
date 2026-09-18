@@ -278,11 +278,18 @@ func (s *Scheduler) RunSchedule(ctx context.Context, schedule store.SMSTestSched
 	}
 
 	result, err := s.store.CreateSMSTestResult(ctx, store.SMSTestResult{
-		ScheduleID:   schedule.ID,
-		SentAt:       sentAt,
-		Code:         code,
-		Status:       status,
-		SendResponse: truncate(response, responseLimit),
+		ScheduleID: schedule.ID,
+		SentAt:     sentAt,
+		Code:       code,
+		Status:     status,
+		// Redacted before it is stored, not before it is shown: the result
+		// row is returned by the API and is the one place the gateway
+		// password could come back out. A gateway that takes credentials in
+		// the query string puts them in the URL, and Go's own transport
+		// errors quote that URL back -- so a failed send would otherwise
+		// write the password into a record anyone with the page open can
+		// read.
+		SendResponse: truncate(redactSecret(response, endpoint.Password), responseLimit),
 	})
 	if err != nil {
 		return store.SMSTestResult{}, fmt.Errorf("record result: %w", err)
@@ -379,6 +386,25 @@ func decodeKeyValues(raw string) []keyValue {
 
 func isInbound(direction string) bool {
 	return direction == "inbound" || direction == "received"
+}
+
+// secretMask is what replaces a credential in anything stored or returned.
+const secretMask = "<redacted>"
+
+// redactSecret removes a secret from text that will be persisted. It is
+// deliberately a blunt substring replacement: the secret can reach a response
+// body by being echoed, quoted in an error, or reflected in a redirect URL,
+// and guessing which of those happened is less reliable than removing it
+// wherever it appears.
+//
+// A very short secret is left alone. Blanking every occurrence of a two-
+// character password would mangle the response into something unreadable
+// while protecting a secret that is not one.
+func redactSecret(value, secret string) string {
+	if len(secret) < 4 || value == "" {
+		return value
+	}
+	return strings.ReplaceAll(value, secret, secretMask)
 }
 
 func truncate(value string, limit int) string {

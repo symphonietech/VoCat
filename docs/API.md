@@ -297,7 +297,7 @@ smsip`.
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/api/devices/{id}/calls` | List current calls. Uses the active VoWiFi IMS call list when IMS is registered (`transport:"vowifi"`), else `AT+CLCC` (`transport:"cellular"`). `data: {device_id, transport, calls: [...], raw?}` (`raw` present only for the cellular path — raw `AT+CLCC` text) |
+| GET | `/api/devices/{id}/calls` | List current calls. Uses the active VoWiFi IMS call list when IMS is registered (`transport:"vowifi"`), else `AT+CLCC` (`transport:"cellular"`). `data: {device_id, transport, calls: [...], raw?}` (`raw` present only for the cellular path — raw `AT+CLCC` text). Both transports report the same vocabulary: `direction` is `incoming`/`outgoing` and `state` is `active`/`held`/`dialing`/`ringing`/`waiting`. The cellular path also carries `state_code`, `direction_code`, `mode`, `index` and `raw` from 27.007, and **drops non-voice records** — EC20/EC25 firmware lists an active packet-data session as a call, which otherwise reads as a call in progress for as long as mobile data is connected |
 | POST | `/api/devices/{id}/calls/dial` | Dial. Body: `{"number":"+1...", "duration_seconds": 0}` (0 = no automatic hang-up, else 1–600s auto-hangup timer). `400 invalid_number` / `400 invalid_duration` on bad input. `202 Accepted`, `data: {accepted:true, action:"dial", number, call_id?, duration_seconds, transport, call?}` |
 | POST | `/api/devices/{id}/calls/answer` | Answer a ringing call. Body: `{"call_id": "string, optional — auto-resolved to a ringing call if omitted"}`. |
 | POST | `/api/devices/{id}/calls/hangup` | Hang up. Body: `{"call_id": "string, optional — resolved to any active call if omitted"}`. |

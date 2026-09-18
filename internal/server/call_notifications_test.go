@@ -71,22 +71,22 @@ func TestIncomingVoiceCLCCIgnoresDataSessions(t *testing.T) {
 	}{
 		{
 			name: "incoming voice ringing",
-			call: map[string]any{"direction": 1, "state": 4, "mode": 0},
+			call: map[string]any{"direction": "incoming", "state": "ringing"},
 			want: true,
 		},
 		{
 			name: "incoming voice active",
-			call: map[string]any{"direction": 1, "state": 0, "mode": 0},
+			call: map[string]any{"direction": "incoming", "state": "active"},
 			want: true,
 		},
 		{
-			name: "incoming packet data active",
-			call: map[string]any{"direction": 1, "state": 0, "mode": 1},
+			name: "outgoing voice alerting",
+			call: map[string]any{"direction": "outgoing", "state": "ringing"},
 			want: false,
 		},
 		{
-			name: "outgoing voice alerting",
-			call: map[string]any{"direction": 0, "state": 3, "mode": 0},
+			name: "incoming but already gone",
+			call: map[string]any{"direction": "incoming", "state": "unknown"},
 			want: false,
 		},
 	}
@@ -99,17 +99,16 @@ func TestIncomingVoiceCLCCIgnoresDataSessions(t *testing.T) {
 		})
 	}
 
-	// EC20/EC25 firmware may expose an active packet-data session in CLCC.
-	// It must not be treated as an incoming voice call.
+	// EC20/EC25 firmware lists an active packet-data session in CLCC. It is
+	// dropped at the parse now rather than filtered by each reader: the Calls
+	// page read one as a call in progress and replaced Dial with Hang up, so
+	// a cellular SIM with mobile data up could not place a call at all.
 	dataCalls := parseCLCC(modem.Response{
 		Lines: []string{`+CLCC: 1,1,0,1,0,"",128`},
 		Final: "OK",
 	})
-	if len(dataCalls) != 1 {
-		t.Fatalf("parseCLCC() returned %d data calls, want 1", len(dataCalls))
-	}
-	if isIncomingVoiceCLCC(dataCalls[0]) {
-		t.Fatal("active packet-data CLCC record was treated as an incoming voice call")
+	if len(dataCalls) != 0 {
+		t.Fatalf("a packet-data session was listed as a call: %#v", dataCalls)
 	}
 }
 

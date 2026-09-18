@@ -77,7 +77,7 @@ function Keypad({
   const { t } = useI18n();
   return (
     <div className="mt-3 border-t border-gray-100 pt-3 dark:border-white/10">
-      <div className="mb-2 flex items-center gap-2">
+      <div className="mx-auto mb-2 flex max-w-[19rem] items-center gap-2">
         <span className="text-xs text-gray-400">
           {mode === "dtmf" ? t("按键音") : t("拨号键盘")}
         </span>
@@ -90,13 +90,16 @@ function Keypad({
           <span className="text-xs text-gray-400">{t("通话接通后可发送按键音")}</span>
         ) : null}
       </div>
-      <div className="grid max-w-[15rem] grid-cols-3 gap-1">
+      {/* Centred and finger-sized. A keypad is aimed at rather than read, so
+          the keys are wide enough to hit without looking and the block sits
+          under the middle of the number box rather than hard against the
+          left edge. */}
+      <div className="mx-auto grid max-w-[19rem] grid-cols-3 gap-2">
         {KEYPAD.map((digit) => (
           <Button
             key={digit}
-            size="small"
             disabled={disabled}
-            className="font-mono text-base"
+            className="h-12 font-mono text-lg"
             onClick={() => onPress(digit)}
           >
             {digit}
@@ -106,12 +109,11 @@ function Keypad({
             Neither is a keypad digit, so neither exists once a call is up. */}
         {mode === "dial" ? (
           <>
-            <Button size="small" className="font-mono text-base" onClick={() => onPress("+")}>
+            <Button className="h-12 font-mono text-lg" onClick={() => onPress("+")}>
               +
             </Button>
             <Button
-              size="small"
-              className="col-span-2 font-mono text-base"
+              className="col-span-2 h-12 font-mono text-base"
               icon={<BackspaceRegular />}
               onClick={onBackspace}
             >
