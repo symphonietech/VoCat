@@ -82,6 +82,28 @@ if [ "$ASTERISK_AMI_ENABLED" != "yes" ]; then
 	printf '[general]\nenabled = no\n' > /etc/asterisk/manager.conf
 fi
 
+# The dialplan's routes come from a file VoCat generates into the directory
+# both containers share. extensions.conf includes it unconditionally, so it
+# has to exist before Asterisk parses anything -- a missing include leaves
+# [vocat-routes] undefined, from-internal matching nothing, and every call
+# answered 404.
+#
+# Written only when absent: VoCat owns it afterwards, and overwriting on every
+# restart would silently discard whatever was configured in the web UI.
+mkdir -p /etc/asterisk/vocat
+if [ ! -f /etc/asterisk/vocat/routes.conf ]; then
+	echo "entrypoint: writing the default route (everything out through the SIM)"
+	{
+		echo "; Default written by entrypoint.sh because no routes were configured."
+		echo "; VoCat replaces this file when routes are saved in the web UI."
+		echo ""
+		echo "[vocat-routes]"
+		echo "exten => _.,1,Set(__VOCATDEV=$VOCAT_DEVICE)"
+		echo " same => n,Dial(PJSIP/\${EXTEN}@vocat,60,b(vocat-predial^s^1))"
+		echo " same => n,Hangup()"
+	} > /etc/asterisk/vocat/routes.conf
+fi
+
 echo "entrypoint: trunk=$VOCAT_TRUNK_HOST device=${VOCAT_DEVICE:-<auto>} extension=$ASTERISK_SIP_USER"
 echo "entrypoint: manager interface (AMI) enabled=$ASTERISK_AMI_ENABLED"
 echo "entrypoint: PJSIP is the only SIP driver here; chan_sip is noloaded."

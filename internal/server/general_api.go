@@ -45,6 +45,9 @@ func (s *Server) routeGeneralAPI(w http.ResponseWriter, r *http.Request) bool {
 	if s.routeSettingsAPI(w, r, cleanPath) {
 		return true
 	}
+	if s.routeAsteriskRoutesAPI(w, r, cleanPath) {
+		return true
+	}
 	switch cleanPath {
 	case "asterisk/status":
 		s.handleAsteriskStatus(w, r)

@@ -43,6 +43,10 @@ type Config struct {
 	AsteriskAMIAddress  string
 	AsteriskAMIUsername string
 	AsteriskAMISecret   string
+	// AsteriskDialplanDir is where VoCat writes generated dialplan for the
+	// PBX to include. Empty derives it from the database directory, matching
+	// how carrier-profiles.d is placed.
+	AsteriskDialplanDir string
 }
 
 type fileConfig struct {
@@ -62,6 +66,7 @@ type fileConfig struct {
 	AsteriskAMIAddress  *string  `json:"asterisk_ami_address"`
 	AsteriskAMIUsername *string  `json:"asterisk_ami_username"`
 	AsteriskAMISecret   *string  `json:"asterisk_ami_secret"`
+	AsteriskDialplanDir *string  `json:"asterisk_dialplan_dir"`
 }
 
 // Default returns the non-secret process configuration. Administrator
@@ -151,6 +156,9 @@ func applyFile(cfg *Config, values fileConfig) error {
 	if values.AsteriskAMISecret != nil {
 		cfg.AsteriskAMISecret = *values.AsteriskAMISecret
 	}
+	if values.AsteriskDialplanDir != nil {
+		cfg.AsteriskDialplanDir = *values.AsteriskDialplanDir
+	}
 	if values.SIPTrunkPeers != nil {
 		cfg.SIPTrunkPeers = append([]string(nil), values.SIPTrunkPeers...)
 	}
@@ -190,6 +198,7 @@ func applyEnvironment(cfg *Config) error {
 	applyString("VOCAT_ASTERISK_AMI_ADDR", &cfg.AsteriskAMIAddress)
 	applyString("VOCAT_ASTERISK_AMI_USER", &cfg.AsteriskAMIUsername)
 	applyString("VOCAT_ASTERISK_AMI_SECRET", &cfg.AsteriskAMISecret)
+	applyString("VOCAT_ASTERISK_DIALPLAN_DIR", &cfg.AsteriskDialplanDir)
 	if value, ok := os.LookupEnv("VOCAT_SIP_TRUNK_PEERS"); ok {
 		cfg.SIPTrunkPeers = splitList(value)
 	}

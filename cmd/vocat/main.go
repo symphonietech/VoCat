@@ -440,6 +440,12 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 		return fmt.Errorf("load configuration: %w", err)
 	}
 	carrierProfileDir := filepath.Join(filepath.Dir(cfg.DatabasePath), "carrier-profiles.d")
+	// Generated dialplan sits beside the database by default, the same way
+	// carrier profiles do, so one volume carries all of VoCat's state.
+	asteriskDialplanDir := strings.TrimSpace(cfg.AsteriskDialplanDir)
+	if asteriskDialplanDir == "" {
+		asteriskDialplanDir = filepath.Join(filepath.Dir(cfg.DatabasePath), "asterisk")
+	}
 	if err := vowifi.LoadCarrierProfileDirectory(carrierProfileDir); err != nil {
 		return fmt.Errorf("load installed carrier profiles: %w", err)
 	}
@@ -628,6 +634,7 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 		UpdateRepository:    strings.TrimSpace(os.Getenv("VOCAT_REPO")),
 		UpdateToken:         strings.TrimSpace(os.Getenv("GITHUB_TOKEN")),
 		HTTPS:               httpsManager,
+		AsteriskDialplanDir: asteriskDialplanDir,
 		AsteriskAMI: ami.Options{
 			Address:  strings.TrimSpace(cfg.AsteriskAMIAddress),
 			Username: strings.TrimSpace(cfg.AsteriskAMIUsername),

@@ -57,6 +57,9 @@ type Options struct {
 	// disables the Asterisk page, which is the normal state for a VoCat with
 	// no PBX.
 	AsteriskAMI ami.Options
+	// AsteriskDialplanDir is the directory VoCat writes generated dialplan
+	// into, shared with the Asterisk container. Empty disables editing.
+	AsteriskDialplanDir string
 }
 
 // Server is the single HTTP handler for the JSON API and embedded SPA.
@@ -109,6 +112,7 @@ type Server struct {
 	trunkCalls                map[string]bool
 	trunkRotation             uint64
 	asteriskAMI               ami.Options
+	asteriskDialplanDir       string
 }
 
 func New(options Options) (*Server, error) {
@@ -159,6 +163,7 @@ func New(options Options) (*Server, error) {
 		https:               options.HTTPS,
 		smsTest:             options.SMSTest,
 		asteriskAMI:         options.AsteriskAMI,
+		asteriskDialplanDir: options.AsteriskDialplanDir,
 		netTraffic:          newLiveNetTracker(),
 		hostStats:           newHostStatsSampler(),
 		publicIPs:           make(map[string]cachedPublicIP),

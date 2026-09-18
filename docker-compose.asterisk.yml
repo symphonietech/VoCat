@@ -34,6 +34,8 @@
 
 services:
   vocat:
+    volumes:
+      - vocat-dialplan:/opt/vocat/dialplan
     environment:
       # Enables the trunk. Loopback only: authorisation here is by source
       # address, so the listener must not be reachable from anywhere the
@@ -46,6 +48,9 @@ services:
       VOCAT_ASTERISK_AMI_ADDR: ${ASTERISK_AMI_SECRET:+127.0.0.1:5038}
       VOCAT_ASTERISK_AMI_USER: ${ASTERISK_AMI_USER:-vocat}
       VOCAT_ASTERISK_AMI_SECRET: ${ASTERISK_AMI_SECRET:-}
+      # Where VoCat writes the generated dialplan. The same volume Asterisk
+      # reads it from, so Apply needs no shell between the containers.
+      VOCAT_ASTERISK_DIALPLAN_DIR: /opt/vocat/dialplan
 
   asterisk:
     build:
@@ -78,8 +83,13 @@ services:
     volumes:
       # Rendered into /etc/asterisk at start, on top of the package defaults.
       - ./asterisk/templates:/etc/asterisk/templates:ro
+      # Dialplan VoCat generates. It writes, Asterisk reads; extensions.conf
+      # includes routes.conf from here. Not read-only, because the entrypoint
+      # seeds a default on first start so the include always resolves.
+      - vocat-dialplan:/etc/asterisk/vocat
       # Voicemail and recordings, which should survive a recreate.
       - asterisk-spool:/var/spool/asterisk
 
 volumes:
   asterisk-spool:
+  vocat-dialplan:
