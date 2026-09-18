@@ -6,6 +6,7 @@ import type {
   AsteriskRoutes,
   AsteriskStatus,
   Call,
+  CallRecordsResponse,
   CallsResponse,
   LoggingSettings,
   LoginResponse,
@@ -278,6 +279,28 @@ export function sendCallDTMF(deviceId: string, callId: string, digits: string) {
     `/devices/${encodeURIComponent(deviceId)}/calls/dtmf`,
     { method: "POST", body: { callId, digits } },
   );
+}
+
+// Call history. Read-only by design: records are written by observing calls,
+// and an API that could edit them would make the history a claim rather than
+// a record.
+export function listCallRecords(params: {
+  deviceId?: string;
+  direction?: string;
+  disposition?: string;
+  search?: string;
+  limit?: number;
+  offset?: number;
+} = {}) {
+  const query = new URLSearchParams();
+  if (params.deviceId) query.set("device_id", params.deviceId);
+  if (params.direction) query.set("direction", params.direction);
+  if (params.disposition) query.set("disposition", params.disposition);
+  if (params.search) query.set("search", params.search);
+  if (params.limit) query.set("limit", String(params.limit));
+  if (params.offset) query.set("offset", String(params.offset));
+  const suffix = query.toString();
+  return api<CallRecordsResponse>(`/calls/records${suffix ? `?${suffix}` : ""}`);
 }
 
 export function listCalls(deviceId: string) {

@@ -87,9 +87,9 @@ func (s *Server) handleE911Websheet(
 	embedURL := fmt.Sprintf("/websheets/%s?token=%s", session.id, session.token)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"data": map[string]any{
-			"id":        session.id,
-			"token":     session.token,
-			"embed_url": embedURL,
+			"id":         session.id,
+			"token":      session.token,
+			"embed_url":  embedURL,
 			"expires_at": session.expiresAt,
 		},
 	})

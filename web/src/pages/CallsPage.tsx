@@ -7,6 +7,7 @@ import {
   SpeakerMuteRegular,
 } from "@fluentui/react-icons";
 import { apiMessage, api, dialCall, hangupCall, answerCall, listCalls, sendCallDTMF } from "../api";
+import { CallHistory } from "./calls/CallHistory";
 import type { Call, DeviceListItem } from "../types";
 import {
   Button,
@@ -410,6 +411,8 @@ export default function CallsPage() {
           </table>
         </div>
       ) : null}
+
+      {deviceId ? <CallHistory deviceId={deviceId} /> : null}
     </div>
   );
 }

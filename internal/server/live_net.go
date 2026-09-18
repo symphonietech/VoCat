@@ -71,7 +71,7 @@ func (t *liveNetTracker) sample(deviceID, iface string, now time.Time) liveNetRe
 	}
 	rxRate, txRate, minuteRx, minuteTx, status := t.record(deviceID, rxCum, txCum, now)
 	return liveNetResult{
-		ipv4: ipv4,
+		ipv4:   ipv4,
 		rxRate: rxRate, txRate: txRate,
 		minuteRx: minuteRx, minuteTx: minuteTx,
 		status: status,

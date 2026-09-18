@@ -309,6 +309,10 @@ Set `VOCAT_SIP_TRUNK_PBX` to empty to keep inbound calls off the PBX
 entirely. The one thing that cannot be shared is a single call's audio, so
 connecting browser audio to a call the trunk is carrying returns `409`.
 
+Every call is recorded — browser, trunk or automatic task alike — with its
+direction, numbers, SIM, timings, duration and outcome. History is on the
+Calls page, filterable by number and outcome, and pruned after 90 days.
+
 Keypad digits work in both places: the Calls page has a keypad on an answered
 call, and a digit pressed on a softphone crosses the trunk to the SIM. They
 travel as RFC 4733 telephone events rather than tones, because the speech

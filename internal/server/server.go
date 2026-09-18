@@ -113,6 +113,13 @@ type Server struct {
 	trunkRotation             uint64
 	asteriskAMI               ami.Options
 	asteriskDialplanDir       string
+	// callOrigin remembers which IMS calls the SIP trunk drove, so the call
+	// recorder can say where a call came from. Separate from trunkCalls above,
+	// which is released the moment the trunk hangs up: the recorder sees the
+	// finished call afterwards and would otherwise label every trunk call as
+	// the browser's.
+	callOriginMu sync.Mutex
+	callOrigin   map[string]time.Time
 }
 
 func New(options Options) (*Server, error) {

@@ -489,6 +489,39 @@ func migrationStatements(version int) []string {
 			`CREATE INDEX IF NOT EXISTS smstest_results_status_idx
 				ON smstest_results(status, sent_at)`,
 		}
+	case 26:
+		return []string{
+			// Call detail records. Written by observing live call state, so a
+			// call placed from the browser, through the SIP trunk or by an
+			// automatic task all land here the same way.
+			//
+			// Unique on (device_id, call_id) because the recorder sees one
+			// call several times as it progresses and has to update the row
+			// it already wrote rather than append another.
+			`CREATE TABLE IF NOT EXISTS call_records (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				call_id TEXT NOT NULL,
+				device_id TEXT NOT NULL,
+				device_name TEXT NOT NULL DEFAULT '',
+				direction TEXT NOT NULL DEFAULT '',
+				source TEXT NOT NULL DEFAULT '',
+				peer_number TEXT NOT NULL DEFAULT '',
+				started_at INTEGER NOT NULL,
+				answered_at INTEGER,
+				ended_at INTEGER,
+				duration_seconds INTEGER NOT NULL DEFAULT 0 CHECK (duration_seconds >= 0),
+				disposition TEXT NOT NULL DEFAULT '',
+				sip_code INTEGER NOT NULL DEFAULT 0,
+				reason TEXT NOT NULL DEFAULT '',
+				created_at INTEGER NOT NULL,
+				updated_at INTEGER NOT NULL,
+				UNIQUE (device_id, call_id)
+			)`,
+			`CREATE INDEX IF NOT EXISTS call_records_started_idx
+				ON call_records(started_at DESC, id DESC)`,
+			`CREATE INDEX IF NOT EXISTS call_records_device_idx
+				ON call_records(device_id, started_at DESC)`,
+		}
 	default:
 		return nil
 	}

@@ -16,8 +16,8 @@ const accessSettingKey = "security.access"
 
 // accessConfig is the persisted network access policy.
 type accessConfig struct {
-	Mode              string   `json:"mode"`               // "internal" (default) or "public"
-	AllowedCIDRs      []string `json:"allowed_cidrs"`      // extra CIDRs always allowed
+	Mode              string   `json:"mode"`                // "internal" (default) or "public"
+	AllowedCIDRs      []string `json:"allowed_cidrs"`       // extra CIDRs always allowed
 	TrustProxyHeaders bool     `json:"trust_proxy_headers"` // honor X-Forwarded-For
 }
 

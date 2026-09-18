@@ -583,6 +583,35 @@ export interface CallsResponse {
   calls: Call[];
 }
 
+// One completed or in-progress call. Written by observing live call state, so
+// a call placed from the browser, through the SIP trunk or by an automatic
+// task all appear the same way.
+export type CallRecord = {
+  id: number;
+  callId: string;
+  deviceId: string;
+  deviceName?: string;
+  direction?: string;
+  // source is "browser" or "trunk": who drove the call.
+  source?: string;
+  peerNumber?: string;
+  startedAt: string;
+  answeredAt?: string;
+  endedAt?: string;
+  // durationSeconds counts from the answer, so a call that only rang is zero.
+  durationSeconds: number;
+  disposition?: string;
+  sipCode?: number;
+  reason?: string;
+};
+
+export type CallRecordsResponse = {
+  records: CallRecord[];
+  total: number;
+  limit: number;
+  offset: number;
+};
+
 // --- Asterisk (AsteriskPage) ---
 
 // One raw AMI field, kept as a name/value pair so the API client's camelCase

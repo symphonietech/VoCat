@@ -917,6 +917,39 @@ call cannot carry digits at all. `501` means the call is on the modem's
 circuit-switched path rather than IMS, where VoCat has no RTP stream to put
 events on.
 
+## Call records
+
+Every call lands in `call_records`, whoever placed it: VoCat's own Calls page,
+a softphone through the trunk, or an automatic task. The history is on the
+Calls page, filterable by number and outcome.
+
+They are written by **observing** live call state, not by the code that dials,
+answers or hangs up. Each of those knows one moment and none of them sees a
+call the far end ended, one that failed while ringing, or one the PBX placed.
+The IMS session already tracks all of it and keeps a finished call in its list
+for thirty seconds, so sampling that every two seconds is the one place that
+catches everything — including a rejection that never rang.
+
+A few decisions worth knowing:
+
+- **Duration counts from the answer**, not from the first packet. A call that
+  rang for a minute and was never picked up lasted zero seconds, which is what
+  a carrier bills and what the list shows as a dash.
+- **A call in progress has no disposition.** The column means how a call
+  finished, not how it looked at the last poll, so a live call is blank rather
+  than provisionally "no answer".
+- **Later writes never erase earlier ones.** One call is seen several times as
+  it progresses, and a poll catching it mid-teardown can report less than the
+  one before. Without that rule a completed call ends up a blank row.
+- **The source says who drove it.** The trunk notes the IMS calls it places
+  and answers, and that note deliberately outlives the hang-up — the recorder
+  sees the finished call afterwards, and the trunk's own claim on the call is
+  released the moment it hangs up.
+
+Records are pruned after 90 days. The API is read-only
+(`GET /api/calls/records`): a history that could be edited would be a claim
+rather than a record.
+
 ## The trunk and the Calls page together
 
 Both work at once, and neither has to be off for the other to run. The Calls

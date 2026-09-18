@@ -186,6 +186,9 @@ func (g *sipTrunkGateway) Dial(ctx context.Context, deviceID, number string) (st
 		return "", errors.New("the IMS session returned a call with no identifier")
 	}
 	g.server.recordAudit(ctx, "siptrunk", "call.dial", "device", deviceID, "success", "vowifi")
+	// Noted for the call recorder, which sees the call only through the IMS
+	// session and has no other way to tell a trunk call from a browser one.
+	g.server.noteTrunkCall(deviceID, call.ID)
 	return call.ID, nil
 }
 
@@ -201,6 +204,7 @@ func (g *sipTrunkGateway) Answer(ctx context.Context, deviceID, callID string) e
 		return err
 	}
 	g.server.recordAudit(ctx, "siptrunk", "call.answer", "device", deviceID, "success", "vowifi")
+	g.server.noteTrunkCall(deviceID, callID)
 	// The IMS side reports media a moment after the answer, the same way it
 	// does for a call placed from the browser. Bridging before then would
 	// drop the first frames in both directions.
