@@ -626,3 +626,24 @@ export type AsteriskStatus = {
   core?: { startupTime?: string; reloadTime?: string; calls?: string };
   endpoints: AsteriskEndpoint[];
 };
+
+export type AsteriskRoute = {
+  pattern: string;
+  devices: string[];
+  timeoutSeconds: number;
+  comment?: string;
+};
+
+export type AsteriskRoutes = {
+  routes: AsteriskRoute[];
+  // preview is the dialplan these routes render to, so a syntax question can
+  // be answered without shelling into the container.
+  preview?: string;
+  // pending means the file on disk no longer matches the stored routes, which
+  // is exactly what Apply resolves.
+  pending?: boolean;
+  path?: string;
+  writable?: boolean;
+  canApply?: boolean;
+  error?: string;
+};

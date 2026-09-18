@@ -1,5 +1,7 @@
 import type {
   ApiErrorBody,
+  AsteriskRoute,
+  AsteriskRoutes,
   AsteriskStatus,
   Call,
   CallsResponse,
@@ -224,6 +226,24 @@ export function updateLoggingSettings(settings: {
 // page exists to give rather than a request failure.
 export function getAsteriskStatus() {
   return api<AsteriskStatus>("/asterisk/status");
+}
+
+export function getAsteriskRoutes() {
+  return api<AsteriskRoutes>("/asterisk/routes");
+}
+
+export function saveAsteriskRoutes(routes: AsteriskRoute[]) {
+  return api<{ saved: boolean; written: boolean; preview: string }>("/asterisk/routes", {
+    method: "PUT",
+    body: { routes },
+  });
+}
+
+// Applying reloads only pbx_config, so calls in progress are unaffected.
+export function applyAsteriskRoutes() {
+  return api<{ applied: boolean; message?: string; at: string }>("/asterisk/routes/apply", {
+    method: "POST",
+  });
 }
 
 export function listCalls(deviceId: string) {

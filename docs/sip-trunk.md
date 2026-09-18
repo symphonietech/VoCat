@@ -536,6 +536,61 @@ docker compose exec asterisk asterisk -rx "core show version"
 Upgrading the host install rather than removing it does not help: two SIP
 servers cannot share port 5060, whatever versions they are. Pick one.
 
+## Managing outbound routes from the web UI
+
+The **Asterisk** page has an outbound route table: a match pattern, the SIMs
+to rotate between, and a ring timeout. Save writes the dialplan; **Apply**
+reloads it in Asterisk.
+
+| Pattern | Devices | Timeout |
+| --- | --- | --- |
+| `_1NXXNXXXXXX` | `slot-4 slot-5` | 60 |
+| `_011.` | `slot-6` | 90 |
+| `_.` | `slot-4 slot-5 slot-6` | 60 |
+
+Patterns must start with `_`. Without it Asterisk treats the value as a
+literal extension that matches that exact string and nothing else — a rule
+that looks right and never fires, so it is refused rather than saved.
+
+**Apply reloads only `pbx_config`**, so calls in progress are unaffected and
+no other module is touched. It needs the manager interface; without it the
+page says so and the change takes effect on the next
+`docker compose restart asterisk`.
+
+Apply is disabled while there are unsaved edits. Reloading the previously
+saved rules and reporting success would be worse than refusing.
+
+### How it fits together
+
+```
+VoCat  ──writes──>  vocat-dialplan volume  <──reads──  Asterisk
+                    routes.conf                        #include "vocat/routes.conf"
+       ──AMI Reload (Module: pbx_config)──>
+```
+
+`[from-internal]` contains nothing but `include => vocat-routes`. That is
+deliberate: Asterisk picks the best match *within* a context and only walks
+includes when the context itself matches nothing, so any pattern left in
+`[from-internal]` would make every generated route unreachable.
+
+The include must always resolve, or `[vocat-routes]` is undefined and every
+call is answered 404. The entrypoint therefore writes a default `routes.conf`
+— everything out through `VOCAT_DEVICE`, matching the behaviour before the UI
+existed — but only when the file is absent, so restarting cannot discard what
+was configured.
+
+### What the editor refuses, and why
+
+Route patterns come from a browser and land in a file that can invoke
+`System()`. Validation is a strict allowlist rather than escaping: commas,
+semicolons, newlines, quoting and every form of variable expansion are
+rejected outright. A comma alone would end the extension field and turn the
+rest into arguments — which broke this deployment's entire dialplan once
+already.
+
+Duplicate patterns are refused too: Asterisk keeps one priority 1 per
+extension, so the second would silently never run.
+
 ## The Asterisk page in VoCat
 
 VoCat can show live PBX state — which extensions are registered, whether the

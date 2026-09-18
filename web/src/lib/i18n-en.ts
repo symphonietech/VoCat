@@ -18,6 +18,19 @@ export const EN_DICT: Record<string, string> = {
   "无法连接到 Asterisk": "Cannot reach Asterisk",
   "进行中通话": "Calls in progress",
   "最近一次重载": "Last reload",
+  "外呼路由": "Outbound routes",
+  "未保存": "Unsaved",
+  "待应用": "Not applied",
+  "添加路由": "Add route",
+  "已应用": "Applied",
+  "未配置管理接口，保存后需手动重启 Asterisk 容器才能生效":
+    "The manager interface is not configured, so saved routes take effect only after restarting the Asterisk container by hand",
+  "没有路由。没有任何路由时，所有外呼都会被 Asterisk 拒绝。":
+    "No routes. With none configured, Asterisk rejects every outbound call.",
+  "设备 ID，用空格分隔": "Device IDs, space separated",
+  "模式必须以 _ 开头；多个设备轮流拨出；超时单位为秒":
+    "Patterns start with _; several devices are used in turn; timeout is in seconds",
+  "生成的拨号方案": "Generated dialplan",
   "中继（VoCat）": "Trunk (VoCat)",
   "Asterisk 中没有名为 vocat 的中继端点": "Asterisk has no endpoint named vocat",
   "分机": "Extensions",
