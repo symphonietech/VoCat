@@ -294,6 +294,43 @@ exten => _X.,1,Dial(PJSIP/vocat/sip:${EXTEN}@127.0.0.1:5062\;device=SLOT1-1,60)
 A per-SIM outbound route is usually clearer than either: give each SIM its own
 extension pattern and set `__VOCATDEV` there.
 
+### Spreading calls across several SIMs
+
+Name more than one and VoCat rotates across them, one call each in turn.
+Commas or spaces both work:
+
+```sh
+VOCAT_DEVICE=usb-2c7c-0125-3-4-5,usb-2c7c-0125-3-4-6,usb-2c7c-0125-3-4-7
+```
+
+or every registered device, without listing IDs:
+
+```sh
+VOCAT_DEVICE=*
+```
+
+The same values work in the header and the URI parameter, so a dial plan can
+rotate over one set of SIMs for one route and a different set for another:
+
+```ini
+exten => _1NXXNXXXXXX,1,Set(__VOCATDEV=usb-2c7c-0125-3-4-5,usb-2c7c-0125-3-4-6)
+exten => _011.,1,Set(__VOCATDEV=usb-2c7c-0125-3-4-7)
+```
+
+Two properties worth knowing:
+
+- **Rotation skips SIMs that are not currently IMS-registered.** A card
+  dropping out costs one device from the rotation, rather than every Nth call
+  failing on a SIM that cannot dial.
+- **An empty hint still refuses** when several devices are registered.
+  Rotation is opt-in: naming several is the operator saying they have decided
+  which SIMs may carry which calls, and `*` says the same about all of them.
+  Silence is not that decision.
+
+Rotation counts calls, not seconds, so it does not balance *load* — a
+three-hour call and a ten-second one each consume one turn. For even airtime
+rather than even call counts, use a per-route split in the dial plan.
+
 ## What the PBX sees
 
 | Situation | Status | Meaning |

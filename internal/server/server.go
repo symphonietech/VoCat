@@ -102,6 +102,7 @@ type Server struct {
 	smsTest                   *smstest.Scheduler
 	trunkMu                   sync.Mutex
 	trunkCalls                map[string]bool
+	trunkRotation             uint64
 }
 
 func New(options Options) (*Server, error) {

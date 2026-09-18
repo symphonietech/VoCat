@@ -205,3 +205,122 @@ func TestTrunkHangupReleasesTheClaim(t *testing.T) {
 		t.Fatal("Hangup left the claim in place")
 	}
 }
+
+func rotationDevices() []store.Device {
+	return []store.Device{
+		{ID: "slot5", Name: "SIM-5", DeviceType: store.DeviceTypePCIeEC20EC25},
+		{ID: "slot6", Name: "SIM-6", DeviceType: store.DeviceTypePCIeEC20EC25},
+		{ID: "slot7", Name: "SIM-7", DeviceType: store.DeviceTypePCIeEC20EC25},
+		{ID: "slot8", Name: "SIM-8", DeviceType: store.DeviceTypePCIeEC20EC25},
+	}
+}
+
+// Naming several SIMs is the operator opting into rotation, so successive
+// calls must actually land on different cards rather than all on the first.
+func TestTrunkRotatesAcrossNamedDevices(t *testing.T) {
+	gateway := trunkGatewayForTest(t,
+		map[string]bool{"slot5": true, "slot6": true, "slot7": true, "slot8": true},
+		rotationDevices()...)
+
+	seen := map[string]int{}
+	const calls = 8
+	for index := 0; index < calls; index++ {
+		got, err := gateway.ResolveDevice("slot5,slot6,slot7,slot8")
+		if err != nil {
+			t.Fatal(err)
+		}
+		seen[got]++
+	}
+	if len(seen) != 4 {
+		t.Fatalf("rotation used %d of 4 devices: %v", len(seen), seen)
+	}
+	for device, count := range seen {
+		if count != calls/4 {
+			t.Errorf("%s took %d of %d calls; want an even share", device, count, calls)
+		}
+	}
+}
+
+// Commas, spaces or both -- a dial plan should not have to guess the
+// separator, and a stray space must not become part of an ID.
+func TestTrunkAcceptsEitherHintSeparator(t *testing.T) {
+	gateway := trunkGatewayForTest(t,
+		map[string]bool{"slot5": true, "slot6": true},
+		rotationDevices()...)
+	for _, hint := range []string{"slot5,slot6", "slot5 slot6", "slot5, slot6", " slot5 ,slot6 "} {
+		got, err := gateway.ResolveDevice(hint)
+		if err != nil {
+			t.Fatalf("ResolveDevice(%q) = %v", hint, err)
+		}
+		if got != "slot5" && got != "slot6" {
+			t.Fatalf("ResolveDevice(%q) = %q", hint, got)
+		}
+	}
+}
+
+// "*" is the same opt-in, without having to list the IDs.
+func TestTrunkRotatesAcrossAllWithAsterisk(t *testing.T) {
+	gateway := trunkGatewayForTest(t,
+		map[string]bool{"slot5": true, "slot7": true},
+		rotationDevices()...)
+	seen := map[string]int{}
+	for index := 0; index < 4; index++ {
+		got, err := gateway.ResolveDevice("*")
+		if err != nil {
+			t.Fatal(err)
+		}
+		seen[got]++
+	}
+	// Only the registered two take calls; slot6 and slot8 are not IMS-ready.
+	if len(seen) != 2 || seen["slot5"] != 2 || seen["slot7"] != 2 {
+		t.Fatalf("rotation over * = %v; want slot5 and slot7 evenly", seen)
+	}
+}
+
+// A card dropping out should cost one device from the rotation, not every
+// Nth call failing on a SIM that cannot dial.
+func TestTrunkRotationSkipsUnregisteredDevices(t *testing.T) {
+	gateway := trunkGatewayForTest(t,
+		map[string]bool{"slot5": true, "slot8": true},
+		rotationDevices()...)
+	for index := 0; index < 6; index++ {
+		got, err := gateway.ResolveDevice("slot5,slot6,slot7,slot8")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got == "slot6" || got == "slot7" {
+			t.Fatalf("rotation returned %q, which is not registered", got)
+		}
+	}
+}
+
+// Every named device being unusable has to say which, and why -- unknown and
+// offline are different mistakes with different fixes.
+func TestTrunkReportsWhyNoNamedDeviceWorks(t *testing.T) {
+	gateway := trunkGatewayForTest(t, map[string]bool{}, rotationDevices()...)
+
+	_, err := gateway.ResolveDevice("slot5,slot6")
+	if err == nil || !strings.Contains(err.Error(), "VoWiFi") ||
+		!strings.Contains(err.Error(), "slot5") {
+		t.Fatalf("all-offline error = %v; want the device IDs and the reason", err)
+	}
+	if _, err = gateway.ResolveDevice("nope1,nope2"); err == nil ||
+		!strings.Contains(err.Error(), "nope1") {
+		t.Fatalf("all-unknown error = %v; want the names", err)
+	}
+	if _, err = gateway.ResolveDevice("slot5,nope1"); err == nil ||
+		!strings.Contains(err.Error(), "nope1") || !strings.Contains(err.Error(), "slot5") {
+		t.Fatalf("mixed error = %v; want both kinds named", err)
+	}
+}
+
+// The no-hint case keeps refusing. Rotation is opt-in, and an empty hint is
+// not the operator asking for it.
+func TestTrunkStillRefusesAnEmptyHint(t *testing.T) {
+	gateway := trunkGatewayForTest(t,
+		map[string]bool{"slot5": true, "slot6": true},
+		rotationDevices()...)
+	if _, err := gateway.ResolveDevice(""); err == nil {
+		t.Fatal("an empty hint picked a device; rotation must be explicit")
+	}
+}

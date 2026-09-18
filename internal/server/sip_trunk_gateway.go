@@ -46,48 +46,131 @@ func (g *sipTrunkGateway) controller() (VoWiFiCallController, error) {
 	return controller, nil
 }
 
-// ResolveDevice turns the PBX's hint into a device ID. A hint may be a device
-// ID or a device name, since a dial plan is easier to read with a name in it.
-// Without a hint the choice must be unambiguous: guessing between two SIMs
-// would place the call on whichever one happened to sort first, and bill it.
+// ResolveDevice turns the PBX's hint into a device ID.
+//
+// A hint is one of three things:
+//
+//   - empty -- use the single IMS-registered device, and refuse if there is
+//     more than one. Guessing would place a real, billed call on whichever
+//     SIM happened to sort first.
+//   - one device ID or name -- use that device. Names are accepted because a
+//     dial plan is easier to read with one in it.
+//   - several, comma or space separated, or "*" for every registered device
+//     -- rotate across them, one call each in turn.
+//
+// The list form is what makes rotation safe to offer at all: refusing to
+// choose stays the default, and naming several is the operator saying they
+// have thought about which SIMs may carry which calls. "*" says the same
+// thing about every device that happens to be registered.
+//
+// Rotation skips devices that are not currently IMS-registered rather than
+// handing back a SIM that cannot dial, so a card dropping out costs one
+// device from the rotation rather than every Nth call.
 func (g *sipTrunkGateway) ResolveDevice(hint string) (string, error) {
 	configs, err := g.server.store.ListDevices(context.Background())
 	if err != nil {
 		return "", fmt.Errorf("list devices: %w", err)
 	}
-	hint = strings.TrimSpace(hint)
-	if hint != "" {
+	names := splitDeviceHint(hint)
+
+	// No hint: the historical behaviour, and still the safe default.
+	if len(names) == 0 {
+		var ready []string
 		for _, config := range configs {
-			if config.ID != hint && !strings.EqualFold(strings.TrimSpace(config.Name), hint) {
-				continue
+			if g.server.callTransport(config.ID) == "vowifi" {
+				ready = append(ready, config.ID)
 			}
-			if g.server.callTransport(config.ID) != "vowifi" {
-				return "", fmt.Errorf("device %q is not registered for VoWiFi calling", hint)
+		}
+		switch len(ready) {
+		case 0:
+			return "", errors.New("no device is registered for VoWiFi calling")
+		case 1:
+			return ready[0], nil
+		default:
+			// Naming them matters: the operator has to pick, and the whole
+			// point of refusing is that VoCat must not. Sending them off to
+			// find the IDs elsewhere makes the refusal harder to act on than
+			// the wrong guess would have been.
+			return "", fmt.Errorf(
+				"%d devices are registered for VoWiFi calling (%s); name one with an "+
+					"X-VoCat-Device header or a device= URI parameter, several to rotate "+
+					"between them, or * for all of them",
+				len(ready), strings.Join(ready, ", "))
+		}
+	}
+
+	// "*" means every configured device, which the readiness filter below
+	// then narrows to the ones that can actually dial.
+	if len(names) == 1 && names[0] == "*" {
+		names = names[:0]
+		for _, config := range configs {
+			names = append(names, config.ID)
+		}
+	}
+
+	var candidates, unknown, offline []string
+	for _, name := range names {
+		matched := ""
+		for _, config := range configs {
+			if config.ID == name || strings.EqualFold(strings.TrimSpace(config.Name), name) {
+				matched = config.ID
+				break
 			}
-			return config.ID, nil
 		}
-		return "", fmt.Errorf("no device named %q", hint)
-	}
-	var ready []string
-	for _, config := range configs {
-		if g.server.callTransport(config.ID) == "vowifi" {
-			ready = append(ready, config.ID)
+		switch {
+		case matched == "":
+			unknown = append(unknown, name)
+		case g.server.callTransport(matched) != "vowifi":
+			offline = append(offline, matched)
+		default:
+			candidates = append(candidates, matched)
 		}
 	}
-	switch len(ready) {
-	case 0:
-		return "", errors.New("no device is registered for VoWiFi calling")
-	case 1:
-		return ready[0], nil
-	default:
-		// Naming them matters: the operator has to pick one, and the whole
-		// point of refusing is that VoCat must not choose. Sending them off to
-		// find the IDs elsewhere makes the refusal harder to act on than the
-		// wrong guess would have been.
-		return "", fmt.Errorf(
-			"%d devices are registered for VoWiFi calling (%s); name one with an X-VoCat-Device header or a device= URI parameter",
-			len(ready), strings.Join(ready, ", "))
+
+	if len(candidates) == 0 {
+		switch {
+		case len(unknown) > 0 && len(offline) == 0:
+			return "", fmt.Errorf("no device named %s", strings.Join(unknown, ", "))
+		case len(offline) > 0 && len(unknown) == 0:
+			return "", fmt.Errorf("no named device is registered for VoWiFi calling (%s)",
+				strings.Join(offline, ", "))
+		default:
+			return "", fmt.Errorf(
+				"no named device can place a call: unknown (%s), not registered for VoWiFi (%s)",
+				strings.Join(unknown, ", "), strings.Join(offline, ", "))
+		}
 	}
+	if len(candidates) == 1 {
+		return candidates[0], nil
+	}
+	return candidates[g.server.nextTrunkDevice()%uint64(len(candidates))], nil
+}
+
+// splitDeviceHint accepts commas, spaces or both, so a dial plan can write the
+// list whichever way reads best and a stray space does not become part of an
+// ID.
+func splitDeviceHint(hint string) []string {
+	fields := strings.FieldsFunc(hint, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t'
+	})
+	names := make([]string, 0, len(fields))
+	for _, field := range fields {
+		if field = strings.TrimSpace(field); field != "" {
+			names = append(names, field)
+		}
+	}
+	return names
+}
+
+// nextTrunkDevice hands out the rotation position. It counts calls rather than
+// tracking which SIM went last, so the rotation is unaffected by a device
+// joining or leaving the candidate set between calls.
+func (s *Server) nextTrunkDevice() uint64 {
+	s.trunkMu.Lock()
+	defer s.trunkMu.Unlock()
+	position := s.trunkRotation
+	s.trunkRotation++
+	return position
 }
 
 func (g *sipTrunkGateway) Dial(ctx context.Context, deviceID, number string) (string, error) {
