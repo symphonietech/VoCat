@@ -572,14 +572,21 @@ Three deliberate restrictions:
   replaces `manager.conf` with `enabled = no` rather than leaving an inert
   account declared.
 
-### If the page shows raw field names you do not recognise
+### Field names
 
-Each endpoint has a **Raw fields** toggle showing exactly what AMI returned.
-Asterisk has renamed manager fields between versions, so VoCat reads each
-value through a list of candidate names and passes the whole message through
-untouched — a field it does not recognise is still visible rather than
-silently dropped. If something useful is showing only in there, say so and it
-can be promoted to a labelled row.
+The labelled rows follow the Asterisk 22 manager documentation — `EndpointList`
+gives `ObjectName`, `Transport`, `Aor`, `DeviceState`, `ActiveChannels`;
+`ContactList` gives `Endpoint`, `Uri`, `Status`, `RoundtripUsec`, `UserAgent`,
+`ViaAddr`, `ExpirationTime`.
+
+Each value is still read through a short list of candidate names, documented
+one first. Asterisk has renamed manager fields between versions, the fallbacks
+cost one map lookup, and a row that blanks because a key moved is worse than
+one showing a value under an older name.
+
+Every endpoint also has a **Raw fields** toggle showing exactly what AMI
+returned, so a field VoCat does not label is visible rather than dropped. If
+something useful only appears there, say so and it can be promoted.
 
 ## The trunk and the Calls page together
 

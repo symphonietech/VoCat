@@ -594,11 +594,14 @@ export type AsteriskContact = {
   status?: string;
   roundtripMs?: number;
   expires?: string;
+  userAgent?: string;
+  viaAddress?: string;
   fields?: AsteriskField[];
 };
 
 export type AsteriskEndpoint = {
   name: string;
+  aor?: string;
   state?: string;
   activeChannels?: string;
   transport?: string;

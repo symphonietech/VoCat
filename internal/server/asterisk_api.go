@@ -41,6 +41,8 @@ type asteriskContact struct {
 	Status      string          `json:"status,omitempty"`
 	RoundTripMS float64         `json:"roundtrip_ms,omitempty"`
 	Expires     string          `json:"expires,omitempty"`
+	UserAgent   string          `json:"user_agent,omitempty"`
+	ViaAddress  string          `json:"via_address,omitempty"`
 	Fields      []asteriskField `json:"fields,omitempty"`
 }
 
@@ -48,6 +50,7 @@ type asteriskContact struct {
 // softphone account.
 type asteriskEndpoint struct {
 	Name           string            `json:"name"`
+	AOR            string            `json:"aor,omitempty"`
 	State          string            `json:"state,omitempty"`
 	ActiveChannels string            `json:"active_channels,omitempty"`
 	Transport      string            `json:"transport,omitempty"`
@@ -59,11 +62,13 @@ type asteriskEndpoint struct {
 // handleAsteriskStatus reports what the PBX thinks is going on. It is
 // read-only: nothing here changes Asterisk's configuration.
 //
-// Every field is read through a candidate list rather than one hard-coded
-// spelling, and the raw AMI fields are passed through untouched. Asterisk has
-// renamed manager fields between versions, and a status page that silently
-// shows nothing because a key moved is worse than one that shows the raw
-// value it did receive.
+// Field names come from the Asterisk 22 manager documentation (AMI_Events
+// EndpointList and ContactList). The documented name is tried first and other
+// spellings after it: Asterisk has renamed manager fields between versions,
+// the fallbacks cost one map lookup, and a row that blanks because a key
+// moved is worse than one showing a value under an older name. The whole
+// message is passed through too, so a field VoCat does not know about stays
+// visible rather than dropped.
 func (s *Server) handleAsteriskStatus(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodGet) {
 		return
@@ -134,9 +139,21 @@ func buildAsteriskEndpoints(endpointEvents, contactEvents []ami.Message) []aster
 		if name == "" {
 			continue
 		}
-		byName[strings.ToLower(name)] = len(result)
+		index := len(result)
+		byName[strings.ToLower(name)] = index
+		aor := event.First("Aor", "Aors", "AOR")
+		// An endpoint's AORs are usually named after it, but not always, and
+		// the AOR is the only link when a contact does not name its endpoint.
+		for _, entry := range strings.Split(aor, ",") {
+			if entry = strings.ToLower(strings.TrimSpace(entry)); entry != "" {
+				if _, taken := byName[entry]; !taken {
+					byName[entry] = index
+				}
+			}
+		}
 		result = append(result, asteriskEndpoint{
 			Name:           name,
+			AOR:            aor,
 			State:          event.First("DeviceState", "State"),
 			ActiveChannels: event.First("ActiveChannels"),
 			Transport:      event.First("Transport"),
@@ -146,17 +163,19 @@ func buildAsteriskEndpoints(endpointEvents, contactEvents []ami.Message) []aster
 	}
 	for _, event := range contactEvents {
 		contact := asteriskContact{
-			URI:     event.First("Uri", "URI"),
-			Status:  event.First("Status", "ContactStatus"),
-			Expires: event.First("ExpirationTime", "RegExpire", "Expiration"),
-			Fields:  rawFields(event),
+			URI:        event.First("Uri", "URI"),
+			Status:     event.First("Status", "ContactStatus"),
+			Expires:    event.First("ExpirationTime", "RegExpire", "Expiration"),
+			UserAgent:  event.First("UserAgent"),
+			ViaAddress: event.First("ViaAddr", "ViaAddress"),
+			Fields:     rawFields(event),
 		}
 		if micro := event.First("RoundtripUsec", "RoundTripUsec"); micro != "" {
 			if value, err := strconv.ParseFloat(micro, 64); err == nil {
 				contact.RoundTripMS = value / 1000
 			}
 		}
-		owner := event.First("EndpointName", "Endpoint")
+		owner := event.First("Endpoint", "EndpointName")
 		if owner == "" {
 			// "1001/sip:1001@..." and plain "1001" are both seen; the part
 			// before the slash is the AOR, which matches the endpoint name.

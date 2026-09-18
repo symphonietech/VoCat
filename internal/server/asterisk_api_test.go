@@ -14,9 +14,12 @@ func TestBuildAsteriskEndpointsPairsContactsByEndpointName(t *testing.T) {
 		{"Event": "EndpointList", "ObjectName": "vocat", "DeviceState": "Not in use", "ActiveChannels": "0"},
 		{"Event": "EndpointList", "ObjectName": "1001", "DeviceState": "Not in use", "ActiveChannels": "0"},
 	}
+	// Field names exactly as the Asterisk 22 ContactList event documents them.
 	contacts := []ami.Message{
-		{"Event": "ContactList", "EndpointName": "1001", "Uri": "sip:1001@192.168.31.110:51369",
-			"Status": "Reachable", "RoundtripUsec": "21000"},
+		{"Event": "ContactList", "Endpoint": "1001", "Uri": "sip:1001@192.168.31.110:51369",
+			"Status": "Reachable", "RoundtripUsec": "21000",
+			"UserAgent": "LinphoneiOS/6.2.2", "ViaAddr": "192.168.31.110",
+			"ExpirationTime": "1789699918"},
 	}
 	result := buildAsteriskEndpoints(endpoints, contacts)
 	if len(result) != 2 {
@@ -26,8 +29,17 @@ func TestBuildAsteriskEndpointsPairsContactsByEndpointName(t *testing.T) {
 	if result[0].Name != "1001" || !result[0].Registered {
 		t.Fatalf("1001 = %+v; want registered", result[0])
 	}
-	if got := result[0].Contacts[0].RoundTripMS; got != 21 {
-		t.Errorf("roundtrip = %v ms, want 21", got)
+	contact := result[0].Contacts[0]
+	if contact.RoundTripMS != 21 {
+		t.Errorf("roundtrip = %v ms, want 21", contact.RoundTripMS)
+	}
+	// UserAgent and ViaAddr answer "which phone, and from where", which is
+	// the question this page exists for.
+	if contact.UserAgent != "LinphoneiOS/6.2.2" || contact.ViaAddress != "192.168.31.110" {
+		t.Errorf("contact = %+v; want the documented UserAgent and ViaAddr", contact)
+	}
+	if contact.Expires != "1789699918" {
+		t.Errorf("expires = %q", contact.Expires)
 	}
 	if result[1].Name != "vocat" || result[1].Registered {
 		t.Fatalf("vocat = %+v; want no contacts", result[1])
@@ -92,5 +104,45 @@ func TestBuildAsteriskEndpointsIgnoresOrphanContacts(t *testing.T) {
 		[]ami.Message{{"Event": "ContactList", "EndpointName": "ghost", "Uri": "sip:a@b"}})
 	if len(result) != 1 || len(result[0].Contacts) != 0 {
 		t.Fatalf("orphan contact was attached: %+v", result)
+	}
+}
+
+// An endpoint whose AOR is not named after it still has to collect its
+// contacts: the AOR is the only link when a contact does not name its
+// endpoint, and EndpointList documents an Aor field for exactly this.
+func TestBuildAsteriskEndpointsPairsByTheEndpointsOwnAOR(t *testing.T) {
+	endpoints := []ami.Message{
+		{"Event": "EndpointList", "ObjectName": "handset-a", "Aor": "desk-phone-7"},
+	}
+	contacts := []ami.Message{
+		{"Event": "ContactList", "ObjectName": "desk-phone-7/sip:x@y", "Uri": "sip:x@y", "Status": "Reachable"},
+	}
+	result := buildAsteriskEndpoints(endpoints, contacts)
+	if len(result[0].Contacts) != 1 || !result[0].Registered {
+		t.Fatalf("contact not paired through the endpoint AOR: %+v", result[0])
+	}
+	if result[0].AOR != "desk-phone-7" {
+		t.Errorf("aor = %q", result[0].AOR)
+	}
+}
+
+// The endpoint's own name must win over an AOR belonging to another
+// endpoint, or contacts land on whichever was listed first.
+func TestBuildAsteriskEndpointsPrefersTheEndpointName(t *testing.T) {
+	endpoints := []ami.Message{
+		{"Event": "EndpointList", "ObjectName": "aliased", "Aor": "1001"},
+		{"Event": "EndpointList", "ObjectName": "1001", "Aor": "1001"},
+	}
+	contacts := []ami.Message{
+		{"Event": "ContactList", "Endpoint": "1001", "Uri": "sip:x@y", "Status": "Reachable"},
+	}
+	result := buildAsteriskEndpoints(endpoints, contacts)
+	for _, endpoint := range result {
+		if endpoint.Name == "1001" && len(endpoint.Contacts) != 1 {
+			t.Fatalf("1001 did not get its own contact: %+v", endpoint)
+		}
+		if endpoint.Name == "aliased" && len(endpoint.Contacts) != 0 {
+			t.Fatalf("contact landed on the wrong endpoint: %+v", endpoint)
+		}
 	}
 }

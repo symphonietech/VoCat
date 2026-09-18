@@ -200,6 +200,10 @@ function EndpointRow({
           <span className="break-all">{contact.uri}</span>
           {contact.status ? <span>{contact.status}</span> : null}
           {contact.roundtripMs ? <span>{contact.roundtripMs.toFixed(1)} ms</span> : null}
+          {/* Which phone, and from where -- the two things you actually want
+              when a registration looks wrong. */}
+          {contact.userAgent ? <span className="truncate">{contact.userAgent}</span> : null}
+          {contact.viaAddress ? <span>{contact.viaAddress}</span> : null}
         </div>
       ))}
 
