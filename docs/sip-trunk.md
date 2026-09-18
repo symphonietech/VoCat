@@ -495,6 +495,16 @@ predates that. Current builds take every ACK silently, and also cap outbound
 packets per peer, so a loop stops on its own and logs `siptrunk is dropping
 packets to a peer`.
 
+### "Could not read registrations: No Contacts found"
+
+Not an error, and no longer reported as one. Asterisk answers an empty
+listing with `Response: Error` and a message of that shape rather than an
+empty success, so a PBX whose softphones have all unregistered looked broken.
+
+A phone going `Unavailable` on its own is usually a mobile client that has
+backgrounded: Linphone on iOS unregisters and relies on push, so it appears
+only while the app is in the foreground or a call is up.
+
 ### Another SIP server already owns port 5060
 
 If the container's log is **completely empty** while the phone reports a
@@ -646,6 +656,16 @@ Three deliberate restrictions:
 - **No manager account at all when the secret is unset.** The entrypoint
   replaces `manager.conf` with `enabled = no` rather than leaving an inert
   account declared.
+
+### VOCAT_DEVICE once routes are configured
+
+`VOCAT_DEVICE` in `.env` seeds the **default** `routes.conf` that the
+entrypoint writes when no routes file exists. Once routes are saved from the
+web UI, that file is VoCat's and `VOCAT_DEVICE` no longer affects outbound
+routing at all — the per-route device lists replace it.
+
+It still matters for a fresh deployment, and for the one-line fallback if the
+routes file is ever deleted.
 
 ### Field names
 

@@ -124,7 +124,10 @@ func (s *Server) handleAsteriskStatus(w http.ResponseWriter, r *http.Request) {
 	// A failed contact listing is not fatal: the endpoints alone already say
 	// which accounts exist and what state Asterisk thinks they are in.
 	contacts, contactsErr := conn.List(ctx, "PJSIPShowContacts", nil)
-	if contactsErr != nil {
+	// No contacts at all is normal -- every softphone unregistered, or none
+	// configured. Asterisk reports it as a failed action, and repeating that
+	// as an error would put a warning on a healthy PBX.
+	if contactsErr != nil && !ami.IsEmptyList(contactsErr) {
 		payload["contacts_error"] = contactsErr.Error()
 	}
 	built, unpaired := buildAsteriskEndpoints(endpoints, contacts)

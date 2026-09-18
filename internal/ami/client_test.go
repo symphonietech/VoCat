@@ -202,3 +202,48 @@ func TestMessageLookupIgnoresCase(t *testing.T) {
 		t.Fatalf("First with no match = %q", got)
 	}
 }
+
+// Asterisk answers an empty listing with Response: Error and a message like
+// "No Contacts found", not an empty success. Reported verbatim, a PBX whose
+// softphones have simply unregistered reads as broken -- which is exactly
+// what a live deployment showed.
+func TestEmptyListingIsNotAFailure(t *testing.T) {
+	manager := startFakeManager(t, func(action string, fields Message, id string) string {
+		if strings.EqualFold(action, "Login") {
+			return okLogin(action, fields, id)
+		}
+		return "Response: Error\r\nActionID: " + id + "\r\nMessage: No Contacts found\r\n\r\n"
+	})
+	_, err := dialFake(t, manager).List(context.Background(), "PJSIPShowContacts", nil)
+	if err == nil {
+		t.Fatal("an empty listing returned no error at all; callers could not tell it apart")
+	}
+	if !IsEmptyList(err) {
+		t.Fatalf("IsEmptyList(%v) = false; want true", err)
+	}
+}
+
+// A genuine failure must not be mistaken for an empty list, or a broken
+// manager account looks like a PBX with nothing configured.
+func TestARealFailureIsNotAnEmptyList(t *testing.T) {
+	for _, message := range []string{
+		"Unknown action",
+		"Permission denied",
+		"No permission to run this action",
+		"",
+	} {
+		err := &ListError{Action: "PJSIPShowContacts", Message: message}
+		if err.Empty() {
+			t.Errorf("message %q was treated as an empty list", message)
+		}
+		if !strings.Contains(err.Error(), "PJSIPShowContacts") {
+			t.Errorf("error %q does not name the action", err)
+		}
+	}
+	// The shapes Asterisk really uses for an empty listing.
+	for _, message := range []string{"No Contacts found", "no endpoints found", "No Registrations found"} {
+		if !(&ListError{Message: message}).Empty() {
+			t.Errorf("message %q was not treated as an empty list", message)
+		}
+	}
+}

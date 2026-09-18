@@ -119,7 +119,7 @@ func (c *Conn) List(ctx context.Context, action string, fields Message) ([]Messa
 		return nil, err
 	}
 	if !strings.EqualFold(reply.Get("Response"), "Success") {
-		return nil, fmt.Errorf("ami: %s failed: %s", action, reply.First("Message", "Response"))
+		return nil, &ListError{Action: action, Message: reply.First("Message", "Response")}
 	}
 	var items []Message
 	for {
@@ -145,6 +145,33 @@ func (c *Conn) List(ctx context.Context, action string, fields Message) ([]Messa
 			return nil, fmt.Errorf("ami: %s returned more than %d items", action, maxListItems)
 		}
 	}
+}
+
+// ListError is a listing Asterisk refused.
+type ListError struct {
+	Action  string
+	Message string
+}
+
+func (e *ListError) Error() string {
+	return fmt.Sprintf("ami: %s failed: %s", e.Action, e.Message)
+}
+
+// Empty reports whether the refusal is Asterisk's way of saying there is
+// nothing to list. It answers an empty listing with Response: Error and a
+// message of the form "No Contacts found" rather than an empty success, so
+// without this a PBX with no registered phones -- an entirely normal state --
+// reads as a failure.
+func (e *ListError) Empty() bool {
+	message := strings.ToLower(strings.TrimSpace(e.Message))
+	return strings.HasPrefix(message, "no ") && strings.HasSuffix(message, " found")
+}
+
+// IsEmptyList reports whether err is a listing that failed only because there
+// was nothing in it.
+func IsEmptyList(err error) bool {
+	var listErr *ListError
+	return errors.As(err, &listErr) && listErr.Empty()
 }
 
 // maxListItems bounds a listing. A PBX this size has tens of endpoints; tens
