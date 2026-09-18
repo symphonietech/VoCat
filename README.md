@@ -281,10 +281,14 @@ A ready-made Asterisk container is included:
 
 ```bash
 cp -n .env.example .env
-# Edit in place. Appending would leave two ASTERISK_SIP_PASSWORD lines, and
-# which one Compose uses is not visible from the file.
-sed -i "s|^ASTERISK_SIP_PASSWORD=.*|ASTERISK_SIP_PASSWORD=$(openssl rand -base64 24)|" .env
-sed -i "s|^#*COMPOSE_FILE=.*|COMPOSE_FILE=docker-compose.yml:docker-compose.asterisk.yml|" .env
+
+# setenv replaces a key if present (commented or not) and appends it if not.
+# A plain `sed s/...` silently does nothing when the key is missing, which is
+# what an .env created from an older .env.example looks like.
+setenv() { sed -i "/^#*$1=/d" .env; printf '%s=%s\n' "$1" "$2" >> .env; }
+
+setenv ASTERISK_SIP_PASSWORD "$(openssl rand -base64 24)"
+setenv COMPOSE_FILE docker-compose.yml:docker-compose.asterisk.yml
 ./scripts/docker-build.sh
 ```
 

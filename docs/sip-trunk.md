@@ -546,9 +546,29 @@ It is **off unless a secret is set**, and the page says "not configured"
 rather than pretending something is broken:
 
 ```sh
-sed -i "s|^#*ASTERISK_AMI_SECRET=.*|ASTERISK_AMI_SECRET=$(openssl rand -base64 24)|" .env
+# setenv replaces a key if present (commented or not) and appends it if not.
+# A plain `sed s/...` silently does nothing when the key is missing, which is
+# what an .env created from an older .env.example looks like.
+setenv() { sed -i "/^#*$1=/d" .env; printf '%s=%s\n' "$1" "$2" >> .env; }
+
+setenv ASTERISK_AMI_SECRET "$(openssl rand -base64 24)"
 ./scripts/docker-build.sh
 ```
+
+The delete-then-append matters: an `.env` copied from an older
+`.env.example` has no `ASTERISK_AMI_SECRET` line at all, and a plain
+`sed s/.../.../` against a missing key exits 0 having changed nothing. The
+page then still reports "not configured" and nothing says why.
+
+Check what actually reached the container rather than trusting the edit:
+
+```sh
+docker compose exec vocat printenv | grep ASTERISK_AMI_ADDR
+```
+
+Empty means the secret is not set, or the container predates the change —
+environment is fixed when a container is created, so `docker compose restart`
+will not pick it up. `scripts/docker-build.sh` recreates.
 
 The same secret enables AMI in Asterisk and points VoCat at it, so there is
 one value to set rather than two to keep in step.
