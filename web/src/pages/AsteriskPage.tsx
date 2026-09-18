@@ -12,9 +12,22 @@ import { useI18n } from "../lib/i18n";
 const TRUNK_ENDPOINT = "vocat";
 
 function endpointTone(endpoint: AsteriskEndpoint): StatusTone {
-  if (endpoint.registered) return "success";
-  if (endpoint.name === TRUNK_ENDPOINT) return "warning";
+  if (endpoint.reachable) return "success";
+  if (endpoint.registered) return "warning";
   return "neutral";
+}
+
+// Linphone packs its APNs push token into the contact URI, which runs to
+// several hundred characters and buries the part anyone reads. The
+// parameters stay available under Raw fields.
+function shortURI(uri: string | undefined) {
+  if (!uri) return "";
+  const [base] = uri.split(";");
+  return base;
+}
+
+function hasParameters(uri: string | undefined) {
+  return Boolean(uri && uri.includes(";"));
 }
 
 function contactTone(status: string | undefined): StatusTone {
@@ -172,7 +185,17 @@ function EndpointRow({
         <StatusDot tone={endpointTone(endpoint)} />
         <span className="font-medium">{endpoint.name}</span>
         {endpoint.state ? <Tag type="info">{endpoint.state}</Tag> : null}
-        {endpoint.registered ? (
+        {endpoint.name === TRUNK_ENDPOINT ? (
+          // A trunk has a configured contact and never registers, so
+          // reachability is the only meaningful claim about it.
+          <Tag type={endpoint.reachable ? "success" : endpoint.registered ? "warning" : "danger"}>
+            {endpoint.reachable
+              ? t("可达")
+              : endpoint.registered
+                ? t("未验证可达性")
+                : t("无联系地址")}
+          </Tag>
+        ) : endpoint.registered ? (
           <Tag type="success">{t("已注册")}</Tag>
         ) : (
           <Tag type="warning">{t("未注册")}</Tag>
@@ -197,7 +220,14 @@ function EndpointRow({
           className="mt-2 flex flex-wrap items-center gap-2 pl-4 text-xs text-slate-500 dark:text-slate-400"
         >
           <StatusDot tone={contactTone(contact.status)} />
-          <span className="break-all">{contact.uri}</span>
+          <span className="break-all" title={contact.uri}>
+            {shortURI(contact.uri)}
+          </span>
+          {hasParameters(contact.uri) ? (
+            <span className="text-slate-400 dark:text-slate-500">
+              {t("（含推送参数）")}
+            </span>
+          ) : null}
           {contact.status ? <span>{contact.status}</span> : null}
           {contact.roundtripMs ? <span>{contact.roundtripMs.toFixed(1)} ms</span> : null}
           {/* Which phone, and from where -- the two things you actually want

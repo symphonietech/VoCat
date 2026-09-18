@@ -607,6 +607,7 @@ export type AsteriskEndpoint = {
   transport?: string;
   contacts: AsteriskContact[];
   registered: boolean;
+  reachable?: boolean;
   fields?: AsteriskField[];
 };
 

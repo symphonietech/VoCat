@@ -56,7 +56,11 @@ type asteriskEndpoint struct {
 	Transport      string            `json:"transport,omitempty"`
 	Contacts       []asteriskContact `json:"contacts"`
 	Registered     bool              `json:"registered"`
-	Fields         []asteriskField   `json:"fields,omitempty"`
+	// Reachable is true when a contact answered a qualify. The trunk has a
+	// statically configured contact and never registers with anything, so
+	// "registered" says nothing useful about it while "reachable" does.
+	Reachable bool            `json:"reachable"`
+	Fields    []asteriskField `json:"fields,omitempty"`
 }
 
 // handleAsteriskStatus reports what the PBX thinks is going on. It is
@@ -134,6 +138,12 @@ func buildAsteriskEndpoints(endpointEvents, contactEvents []ami.Message) []aster
 	// most versions, but where they do not, an AOR has the endpoint's name by
 	// convention and is the only link available.
 	byName := map[string]int{}
+	// byURI pairs a contact that names neither an endpoint nor a matching
+	// AOR, using the contact list the endpoint itself declares.
+	byURI := map[string]int{}
+	// declared records those URIs so an endpoint whose contact produced no
+	// ContactList event still shows it, rather than looking contactless.
+	declared := map[int][]string{}
 	for _, event := range endpointEvents {
 		name := event.First("ObjectName", "EndpointName", "Endpoint")
 		if name == "" {
@@ -142,6 +152,23 @@ func buildAsteriskEndpoints(endpointEvents, contactEvents []ami.Message) []aster
 		index := len(result)
 		byName[strings.ToLower(name)] = index
 		aor := event.First("Aor", "Aors", "AOR")
+		// EndpointList carries the endpoint's contacts inline, as
+		// "aor/uri" entries. That is the only link for a statically
+		// configured contact, whose ContactList event names neither an
+		// endpoint nor an AOR that matches -- which is why the trunk read as
+		// having no contacts at all.
+		for _, entry := range strings.Split(event.First("Contacts"), ",") {
+			entry = strings.TrimSpace(entry)
+			if entry == "" {
+				continue
+			}
+			if _, uri, found := strings.Cut(entry, "/"); found && uri != "" {
+				if _, taken := byURI[uri]; !taken {
+					byURI[uri] = index
+				}
+				declared[index] = append(declared[index], uri)
+			}
+		}
 		// An endpoint's AORs are usually named after it, but not always, and
 		// the AOR is the only link when a contact does not name its endpoint.
 		for _, entry := range strings.Split(aor, ",") {
@@ -161,6 +188,7 @@ func buildAsteriskEndpoints(endpointEvents, contactEvents []ami.Message) []aster
 			Fields:         rawFields(event),
 		})
 	}
+	seen := map[string]bool{}
 	for _, event := range contactEvents {
 		contact := asteriskContact{
 			URI:        event.First("Uri", "URI"),
@@ -184,14 +212,33 @@ func buildAsteriskEndpoints(endpointEvents, contactEvents []ami.Message) []aster
 		}
 		index, ok := byName[strings.ToLower(strings.TrimSpace(owner))]
 		if !ok {
+			index, ok = byURI[contact.URI]
+		}
+		if !ok {
 			continue
 		}
 		result[index].Contacts = append(result[index].Contacts, contact)
+		seen[contact.URI] = true
 		// Anything other than an explicitly unreachable contact counts as
-		// registered: a phone that has not been qualified yet reports an
-		// empty status, and calling that "not registered" would be wrong.
+		// present: a phone that has not been qualified yet reports an empty
+		// status, and calling that "not registered" would be wrong.
 		if !strings.EqualFold(contact.Status, "Unreachable") &&
 			!strings.EqualFold(contact.Status, "Removed") {
+			result[index].Registered = true
+		}
+		if strings.EqualFold(contact.Status, "Reachable") {
+			result[index].Reachable = true
+		}
+	}
+	// A contact the endpoint declared but no ContactList event covered is
+	// still real -- a static trunk contact is the usual case. Showing it
+	// without a status beats showing nothing.
+	for index, uris := range declared {
+		for _, uri := range uris {
+			if seen[uri] {
+				continue
+			}
+			result[index].Contacts = append(result[index].Contacts, asteriskContact{URI: uri})
 			result[index].Registered = true
 		}
 	}

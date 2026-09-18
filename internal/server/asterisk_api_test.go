@@ -195,3 +195,63 @@ func TestAsteriskStatusReportsConfiguredFromTheAddress(t *testing.T) {
 		})
 	}
 }
+
+// The trunk read as "Not registered" on a live system while its own
+// EndpointList event listed a contact. A statically configured contact is not
+// covered by a ContactList event that names a matching endpoint or AOR, so
+// the endpoint's inline Contacts field is the only link.
+func TestBuildAsteriskEndpointsShowsAStaticallyConfiguredContact(t *testing.T) {
+	endpoints := []ami.Message{{
+		"Event": "EndpointList", "ObjectName": "vocat", "Aor": "vocat",
+		"DeviceState": "Not in use", "ActiveChannels": "0",
+		"Contacts": "vocat/sip:vocat@127.0.0.1:5062,",
+	}}
+	result := buildAsteriskEndpoints(endpoints, nil)
+	if len(result) != 1 {
+		t.Fatalf("got %d endpoints", len(result))
+	}
+	if len(result[0].Contacts) != 1 {
+		t.Fatalf("the declared contact was dropped: %+v", result[0])
+	}
+	if result[0].Contacts[0].URI != "sip:vocat@127.0.0.1:5062" {
+		t.Fatalf("contact uri = %q", result[0].Contacts[0].URI)
+	}
+	if !result[0].Registered {
+		t.Fatal("an endpoint with a configured contact reported none")
+	}
+}
+
+// When a ContactList event does cover the same URI, it must win -- it carries
+// the status and round-trip the declared entry has no way to know.
+func TestBuildAsteriskEndpointsDoesNotDuplicateADeclaredContact(t *testing.T) {
+	endpoints := []ami.Message{{
+		"Event": "EndpointList", "ObjectName": "vocat", "Aor": "vocat",
+		"Contacts": "vocat/sip:vocat@127.0.0.1:5062,",
+	}}
+	// Names neither a matching endpoint nor AOR: only the URI links it.
+	contacts := []ami.Message{{
+		"Event": "ContactList", "ObjectName": "vocat;@1b2c3d",
+		"Uri": "sip:vocat@127.0.0.1:5062", "Status": "Reachable", "RoundtripUsec": "900",
+	}}
+	result := buildAsteriskEndpoints(endpoints, contacts)
+	if len(result[0].Contacts) != 1 {
+		t.Fatalf("contact duplicated: %+v", result[0].Contacts)
+	}
+	if result[0].Contacts[0].Status != "Reachable" || !result[0].Reachable {
+		t.Fatalf("the ContactList status was lost: %+v", result[0])
+	}
+}
+
+// Reachable is a stronger claim than Registered and must not be asserted from
+// a contact that has never been qualified.
+func TestBuildAsteriskEndpointsSeparatesReachableFromRegistered(t *testing.T) {
+	result := buildAsteriskEndpoints(
+		[]ami.Message{{"ObjectName": "1001"}},
+		[]ami.Message{{"Event": "ContactList", "Endpoint": "1001", "Uri": "sip:a@b"}})
+	if !result[0].Registered {
+		t.Fatal("a contact with no status should still count as registered")
+	}
+	if result[0].Reachable {
+		t.Fatal("an unqualified contact was reported reachable")
+	}
+}
