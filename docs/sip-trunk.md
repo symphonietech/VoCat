@@ -817,6 +817,66 @@ with no spaces and no `;`, at least 12 characters. A `;` starts a comment in
 an Asterisk config file, so a password containing one would be silently
 truncated: Asterisk would load happily and the phone would never register.
 
+## Inbound: a call on the SIM offered to the PBX
+
+Set `VOCAT_SIP_TRUNK_PBX` (the Asterisk overlay defaults it to
+`127.0.0.1:5060`) and a call arriving on a SIM becomes an INVITE toward
+Asterisk:
+
+```
+INVITE sip:13105557777@127.0.0.1:5060 SIP/2.0
+From: <sip:12125551234@127.0.0.1:5062>;tag=...
+X-VoCat-Device: usb-2c7c-0125-3-4-4
+X-VoCat-Device-Name: SLOT1-1
+```
+
+The request URI is the **dialled** number — the SIM's own — so a dialplan can
+route by DID. The From is the caller, which becomes the PBX's caller ID. The
+two `X-VoCat-Device` headers name the SIM, the same header the outbound
+direction reads, in the opposite direction.
+
+Asterisk's `[vocat] type=identify match=127.0.0.1` is what places the call in
+`[from-vocat]`, which today rings `$ASTERISK_SIP_USER`. Rename that account in
+the web UI and this line needs the same edit until per-SIM routing lands.
+
+### The SIM is answered last
+
+VoCat does **not** answer the call when it offers it. It waits for the PBX's
+200 OK — a handset actually picking up — and only then answers the carrier's
+INVITE.
+
+The order matters twice over. Answering first would connect the caller to
+silence while the phone was still ringing, and it would start billing them for
+it. It also means the caller hears the carrier's own ringback, which is the
+correct tone for their network, rather than whatever the PBX would generate.
+
+Every failure path releases the SIM leg: a PBX that rejects the call, one that
+never answers, one that is not running at all. A call left ringing at the
+carrier because VoCat gave up quietly is the failure this is written to avoid.
+
+### It rings in both places
+
+The Calls page still raises the call. Both are live at once and whichever
+answers first takes it; the other sees the call disappear. That is deliberate
+— the browser is the fallback when the PBX is misconfigured, which is exactly
+when you need one.
+
+Set `VOCAT_SIP_TRUNK_PBX=` (empty) in `.env` to keep inbound calls off the PBX
+entirely.
+
+### What the INVITE does on the wire
+
+UDP, so it is retransmitted at 500 ms, doubling to a 4 s ceiling, until
+something answers — Timer B at 32 s gives up if nothing ever does. A 2xx is
+ACKed to the Contact it carried, and a retransmitted 2xx (which means the ACK
+was lost) is answered with the same ACK rather than ignored; without that the
+PBX tears the call down about thirty seconds in.
+
+The SDP offer lists **both** G.711 flavours, unlike the answer the outbound
+direction sends. The trunk is asking rather than agreeing here, and which one
+a PBX prefers is its own configuration; the RTP leg takes its codec from
+whichever the answer picks.
+
 ## The trunk and the Calls page together
 
 Both work at once, and neither has to be off for the other to run. The Calls

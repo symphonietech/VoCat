@@ -189,6 +189,24 @@ func (g *sipTrunkGateway) Dial(ctx context.Context, deviceID, number string) (st
 	return call.ID, nil
 }
 
+// Answer accepts a call that arrived on a SIM, which is what connects the
+// caller to the handset the PBX has already picked up. It is deliberately not
+// called before that: answering earlier bills the caller for silence.
+func (g *sipTrunkGateway) Answer(ctx context.Context, deviceID, callID string) error {
+	controller, err := g.controller()
+	if err != nil {
+		return err
+	}
+	if _, err := controller.AnswerCall(ctx, deviceID, callID); err != nil {
+		return err
+	}
+	g.server.recordAudit(ctx, "siptrunk", "call.answer", "device", deviceID, "success", "vowifi")
+	// The IMS side reports media a moment after the answer, the same way it
+	// does for a call placed from the browser. Bridging before then would
+	// drop the first frames in both directions.
+	return g.WaitAnswered(ctx, deviceID, callID)
+}
+
 // WaitAnswered blocks until the call is both answered and carrying media. The
 // media condition matters: answering the PBX's INVITE before RTP is negotiated
 // would bridge two legs where one has nowhere to send audio, which is the

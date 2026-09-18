@@ -43,28 +43,136 @@ type Header struct {
 
 var errMalformed = errors.New("siptrunk: malformed SIP message")
 
-// ParseRequest decodes a datagram into a Request. It accepts only requests: a
-// trunk that received a response has either been sent something it never asked
-// for, or is looking at a stray retransmission.
-func ParseRequest(packet []byte) (*Request, error) {
-	if len(packet) == 0 || len(packet) > maxMessageBytes {
+// Response is an inbound SIP response. The trunk reads these only for the
+// INVITEs it sends itself, offering a call arriving on a SIM to the PBX.
+type Response struct {
+	Version string
+	Status  int
+	Reason  string
+	Headers []Header
+	Body    []byte
+}
+
+// IsResponse reports whether a datagram is a response rather than a request,
+// which is decided entirely by the first token of the start line.
+func IsResponse(packet []byte) bool {
+	return bytes.HasPrefix(packet, []byte("SIP/"))
+}
+
+// ParseResponse decodes a datagram into a Response.
+func ParseResponse(packet []byte) (*Response, error) {
+	lines, body, err := splitMessage(packet)
+	if err != nil {
+		return nil, err
+	}
+	start := strings.SplitN(lines[0], " ", 3)
+	if len(start) < 2 || !strings.HasPrefix(start[0], "SIP/") {
 		return nil, errMalformed
 	}
-	separator := []byte("\r\n\r\n")
-	index := bytes.Index(packet, separator)
+	status, err := strconv.Atoi(strings.TrimSpace(start[1]))
+	if err != nil || status < 100 || status > 699 {
+		return nil, errMalformed
+	}
+	response := &Response{Version: start[0], Status: status}
+	if len(start) == 3 {
+		response.Reason = strings.TrimSpace(start[2])
+	}
+	if response.Headers, err = parseHeaders(lines[1:]); err != nil {
+		return nil, err
+	}
+	// Same reasoning as a request: trust the datagram boundary, but refuse a
+	// message claiming more body than arrived.
+	if declared, ok := headerContentLength(response.Headers); ok {
+		if declared > len(body) {
+			return nil, errMalformed
+		}
+		body = body[:declared]
+	}
+	response.Body = body
+	return response, nil
+}
+
+// Value returns the first value for a header name.
+func (r *Response) Value(name string) string {
+	for _, value := range headerValues(r.Headers, name) {
+		return value
+	}
+	return ""
+}
+
+// Values returns every value for a header name, in arrival order.
+func (r *Response) Values(name string) []string { return headerValues(r.Headers, name) }
+
+// splitMessage divides a datagram into its start line, header lines and body.
+func splitMessage(packet []byte) ([]string, []byte, error) {
+	if len(packet) == 0 || len(packet) > maxMessageBytes {
+		return nil, nil, errMalformed
+	}
+	index := bytes.Index(packet, []byte("\r\n\r\n"))
 	size := 4
 	if index < 0 {
 		// Tolerate bare-LF framing: some stacks emit it, and rejecting the
 		// message outright would look like an unreachable peer rather than a
 		// formatting disagreement.
 		if index = bytes.Index(packet, []byte("\n\n")); index < 0 {
-			return nil, errMalformed
+			return nil, nil, errMalformed
 		}
 		size = 2
 	}
 	lines := splitLines(packet[:index])
 	if len(lines) == 0 {
-		return nil, errMalformed
+		return nil, nil, errMalformed
+	}
+	return lines, packet[index+size:], nil
+}
+
+func parseHeaders(lines []string) ([]Header, error) {
+	headers := make([]Header, 0, len(lines))
+	for _, line := range lines {
+		colon := strings.Index(line, ":")
+		if colon <= 0 {
+			return nil, errMalformed
+		}
+		name := strings.TrimSpace(line[:colon])
+		headers = append(headers, Header{
+			Name:     strings.ToLower(name),
+			Original: name,
+			Value:    strings.TrimSpace(line[colon+1:]),
+		})
+	}
+	return headers, nil
+}
+
+func headerValues(headers []Header, name string) []string {
+	name = strings.ToLower(name)
+	compact := compactForms[name]
+	var result []string
+	for _, header := range headers {
+		if header.Name == name || (compact != "" && header.Name == compact) {
+			result = append(result, header.Value)
+		}
+	}
+	return result
+}
+
+func headerContentLength(headers []Header) (int, bool) {
+	for _, value := range headerValues(headers, "content-length") {
+		size, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil || size < 0 || size > maxMessageBytes {
+			return 0, false
+		}
+		return size, true
+	}
+	return 0, false
+}
+
+// ParseRequest decodes a datagram into a Request. It accepts only requests: a
+// trunk that received a response has either been sent something it never asked
+// for, or is looking at a stray retransmission.
+func ParseRequest(packet []byte) (*Request, error) {
+	lines, body, err := splitMessage(packet)
+	if err != nil {
+		return nil, err
 	}
 	start := strings.Fields(lines[0])
 	if len(start) != 3 || !strings.HasPrefix(start[2], "SIP/") {
@@ -74,25 +182,16 @@ func ParseRequest(packet []byte) (*Request, error) {
 		return nil, errors.New("siptrunk: expected a request, got a response")
 	}
 	request := &Request{Method: strings.ToUpper(start[0]), URI: start[1], Version: start[2]}
-	for _, line := range lines[1:] {
-		colon := strings.Index(line, ":")
-		if colon <= 0 {
-			return nil, errMalformed
-		}
-		name := strings.TrimSpace(line[:colon])
-		request.Headers = append(request.Headers, Header{
-			Name:     strings.ToLower(name),
-			Original: name,
-			Value:    strings.TrimSpace(line[colon+1:]),
-		})
+	if request.Headers, err = parseHeaders(lines[1:]); err != nil {
+		return nil, err
 	}
-	body := packet[index+size:]
 	// Content-Length is advisory here: trust the datagram boundary, but refuse a
 	// message claiming more body than arrived so a truncated packet cannot be
 	// mistaken for a complete one.
-	if declared, ok := request.contentLength(); ok && declared > len(body) {
-		return nil, errMalformed
-	} else if ok {
+	if declared, ok := request.contentLength(); ok {
+		if declared > len(body) {
+			return nil, errMalformed
+		}
 		body = body[:declared]
 	}
 	request.Body = body
@@ -132,29 +231,9 @@ var compactForms = map[string]string{
 }
 
 // Values returns every value for a header name, in arrival order.
-func (r *Request) Values(name string) []string {
-	name = strings.ToLower(name)
-	compact := compactForms[name]
-	var result []string
-	for _, header := range r.Headers {
-		if header.Name == name || (compact != "" && header.Name == compact) {
-			result = append(result, header.Value)
-		}
-	}
-	return result
-}
+func (r *Request) Values(name string) []string { return headerValues(r.Headers, name) }
 
-func (r *Request) contentLength() (int, bool) {
-	value := r.Value("content-length")
-	if value == "" {
-		return 0, false
-	}
-	size, err := strconv.Atoi(strings.TrimSpace(value))
-	if err != nil || size < 0 || size > maxMessageBytes {
-		return 0, false
-	}
-	return size, true
-}
+func (r *Request) contentLength() (int, bool) { return headerContentLength(r.Headers) }
 
 // BuildResponse renders a response to request. Per RFC 3261 §8.2.6.2 the Via,
 // From, Call-ID and CSeq headers are copied from the request unchanged, and

@@ -31,6 +31,9 @@ type Gateway interface {
 	Dial(ctx context.Context, deviceID, number string) (string, error)
 	// WaitAnswered blocks until the call is active, fails, or ctx ends.
 	WaitAnswered(ctx context.Context, deviceID, callID string) error
+	// Answer accepts a call arriving on a SIM. It is called only once the PBX
+	// has answered its side, so the caller is never connected to silence.
+	Answer(ctx context.Context, deviceID, callID string) error
 	// Media returns the RTP bridge for an active call.
 	Media(ctx context.Context, deviceID, callID string) (Media, error)
 	// Hangup ends the call. It is called on every teardown path, including
@@ -160,7 +163,15 @@ func (s *Server) handleInvite(request *Request, from *net.UDPAddr) bool {
 }
 
 func (s *Server) handleBye(request *Request, from *net.UDPAddr) bool {
-	current := s.dialog(request.Value("call-id"))
+	callID := request.Value("call-id")
+	if offered := s.outboundCall(callID); offered != nil {
+		s.reply(request, from, 200, "OK", nil)
+		s.log("siptrunk inbound call ended by the PBX", "call_id", offered.callID)
+		// The PBX has hung up, so no BYE goes back to it.
+		offered.teardown(false)
+		return true
+	}
+	current := s.dialog(callID)
 	if current == nil {
 		// RFC 3261 §12.2.2: a BYE outside a dialog is 481, which stops the
 		// peer retransmitting it.

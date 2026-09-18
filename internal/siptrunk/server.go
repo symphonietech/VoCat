@@ -1,7 +1,6 @@
 package siptrunk
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -34,6 +33,11 @@ type Options struct {
 	// which is what a deployment without VoWiFi-capable devices should look
 	// like from the PBX.
 	Gateway Gateway
+	// PBX is where inbound calls are offered: the SIP address of the PBX in
+	// front, normally 127.0.0.1:5060. Empty leaves the inbound direction off,
+	// so a deployment that only places calls never has VoCat sending INVITEs
+	// at whatever happens to be listening there.
+	PBX string
 }
 
 // Server answers SIP on behalf of VoCat's SIM-backed calling.
@@ -46,9 +50,18 @@ type Server struct {
 	closing chan struct{}
 	once    sync.Once
 
-	mu      sync.Mutex
-	dialogs map[string]*dialog
-	limiter responseLimiter
+	// pbx is the resolved Options.PBX, nil when inbound is off.
+	pbx *net.UDPAddr
+
+	mu sync.Mutex
+	// dialogs are calls the PBX placed through the trunk, where VoCat is the
+	// UAS. outbounds are calls the trunk offered to the PBX, where it is the
+	// UAC. Two maps rather than one, because the roles differ in every
+	// direction that matters: who sends the BYE, who retransmits, and which
+	// side a response belongs to.
+	dialogs   map[string]*dialog
+	outbounds map[string]*outbound
+	limiter   responseLimiter
 }
 
 // ParsePeers converts textual peer entries into prefixes. A bare address
@@ -97,13 +110,22 @@ func Listen(options Options) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("siptrunk: listen on %q: %w", options.Address, err)
 	}
+	var pbx *net.UDPAddr
+	if address := strings.TrimSpace(options.PBX); address != "" {
+		if pbx, err = net.ResolveUDPAddr("udp", address); err != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("siptrunk: resolve PBX address %q: %w", address, err)
+		}
+	}
 	server := &Server{
-		conn:    conn,
-		peers:   peers,
-		logger:  options.Logger,
-		gateway: options.Gateway,
-		closing: make(chan struct{}),
-		dialogs: make(map[string]*dialog),
+		conn:      conn,
+		peers:     peers,
+		logger:    options.Logger,
+		gateway:   options.Gateway,
+		pbx:       pbx,
+		closing:   make(chan struct{}),
+		dialogs:   make(map[string]*dialog),
+		outbounds: make(map[string]*outbound),
 	}
 	server.wg.Add(1)
 	go server.serve()
@@ -123,6 +145,9 @@ func (s *Server) Close() error {
 	s.once.Do(func() {
 		close(s.closing)
 		for _, current := range s.activeDialogs() {
+			current.teardown(true)
+		}
+		for _, current := range s.activeOutbounds() {
 			current.teardown(true)
 		}
 		_ = s.conn.Close()
@@ -185,10 +210,11 @@ func (s *Server) handle(_ context.Context, packet []byte, from *net.UDPAddr) {
 		s.log("siptrunk rejected an untrusted peer", "peer", from.String())
 		return
 	}
-	if bytes.HasPrefix(packet, []byte("SIP/")) {
-		// A response, which only arrives for a request the trunk itself sent
-		// (its BYE). Nothing here retransmits, so there is nothing to do with
-		// one, and logging it as malformed would be wrong.
+	if IsResponse(packet) {
+		// A response belongs to an INVITE the trunk sent, offering a call
+		// that arrived on a SIM. Responses to its own BYE have no call left
+		// to deliver to and are dropped there.
+		s.deliverResponse(packet)
 		return
 	}
 	request, err := ParseRequest(packet)

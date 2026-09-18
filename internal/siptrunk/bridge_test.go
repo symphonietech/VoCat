@@ -63,11 +63,13 @@ type fakeGateway struct {
 	// answerAfter delays the answer so a test can look at the ringing state.
 	answerAfter time.Duration
 
-	mu       sync.Mutex
-	hints    []string
-	numbers  []string
-	hangups  int
-	answered bool
+	mu        sync.Mutex
+	hints     []string
+	numbers   []string
+	hangups   int
+	answered  bool
+	accepted  int
+	acceptErr error
 }
 
 func newFakeGateway() *fakeGateway { return &fakeGateway{media: newFakeMedia()} }
@@ -110,6 +112,24 @@ func (g *fakeGateway) WaitAnswered(ctx context.Context, _, _ string) error {
 	g.answered = true
 	g.mu.Unlock()
 	return nil
+}
+
+// Answer is the inbound direction: a call that arrived on a SIM, accepted
+// once the PBX has answered its own side.
+func (g *fakeGateway) Answer(ctx context.Context, deviceID, callID string) error {
+	if g.acceptErr != nil {
+		return g.acceptErr
+	}
+	g.mu.Lock()
+	g.accepted++
+	g.mu.Unlock()
+	return g.WaitAnswered(ctx, deviceID, callID)
+}
+
+func (g *fakeGateway) acceptCount() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.accepted
 }
 
 func (g *fakeGateway) Media(context.Context, string, string) (Media, error) { return g.media, nil }

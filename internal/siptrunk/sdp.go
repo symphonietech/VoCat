@@ -137,3 +137,29 @@ func BuildAnswer(local net.IP, port int, payload byte) []byte {
 	}
 	return []byte(strings.Join(lines, "\r\n"))
 }
+
+// BuildOffer renders the SDP VoCat sends when it offers a call arriving on a
+// SIM to the PBX. Unlike the answer this lists both G.711 flavours: the trunk
+// is asking rather than agreeing, and which one a PBX prefers is its own
+// configuration. The leg takes its codec from whichever the answer picks.
+func BuildOffer(local net.IP, port int) []byte {
+	family := "IP4"
+	if local.To4() == nil {
+		family = "IP6"
+	}
+	session := time.Now().UnixNano()
+	lines := []string{
+		"v=0",
+		fmt.Sprintf("o=- %d %d IN %s %s", session, session, family, local.String()),
+		"s=VoCat",
+		fmt.Sprintf("c=IN %s %s", family, local.String()),
+		"t=0 0",
+		fmt.Sprintf("m=audio %d RTP/AVP %d %d", port, payloadPCMU, payloadPCMA),
+		fmt.Sprintf("a=rtpmap:%d PCMU/%d", payloadPCMU, clockRate),
+		fmt.Sprintf("a=rtpmap:%d PCMA/%d", payloadPCMA, clockRate),
+		"a=ptime:20",
+		"a=sendrecv",
+		"",
+	}
+	return []byte(strings.Join(lines, "\r\n"))
+}

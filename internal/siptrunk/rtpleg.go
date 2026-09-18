@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"vocat/internal/g711"
@@ -29,8 +30,11 @@ const (
 // has nothing to give -- an RTP stream that stops is treated as a dead call by
 // everything that watches one.
 type rtpLeg struct {
-	conn    *net.UDPConn
-	payload byte
+	conn *net.UDPConn
+	// payload is atomic because an outbound leg learns which G.711 flavour it
+	// is carrying only when the answer arrives, by which time the transmit
+	// and receive loops are already running against a silent socket.
+	payload atomic.Uint32
 
 	mu     sync.RWMutex
 	remote *net.UDPAddr
@@ -61,7 +65,6 @@ func newRTPLeg(local net.IP, remote *net.UDPAddr, payload byte) (*rtpLeg, error)
 	}
 	leg := &rtpLeg{
 		conn:      conn,
-		payload:   payload,
 		remote:    remote,
 		sequence:  binary.BigEndian.Uint16(seed[:2]),
 		timestamp: binary.BigEndian.Uint32(seed[2:6]),
@@ -69,6 +72,7 @@ func newRTPLeg(local net.IP, remote *net.UDPAddr, payload byte) (*rtpLeg, error)
 		inbound:   make(chan []int16, 64),
 		closed:    make(chan struct{}),
 	}
+	leg.payload.Store(uint32(payload))
 	go leg.receive()
 	leg.pump.Do(func() { go leg.transmit() })
 	return leg, nil
@@ -76,6 +80,21 @@ func newRTPLeg(local net.IP, remote *net.UDPAddr, payload byte) (*rtpLeg, error)
 
 // LocalPort is the port to advertise in the SDP answer.
 func (leg *rtpLeg) LocalPort() int { return leg.conn.LocalAddr().(*net.UDPAddr).Port }
+
+func (leg *rtpLeg) payloadType() byte { return byte(leg.payload.Load()) }
+
+// setPayload records the codec the far end chose. An offered leg carries
+// nothing until its answer arrives, so this always runs before any audio.
+func (leg *rtpLeg) setPayload(payload byte) { leg.payload.Store(uint32(payload)) }
+
+// setRemote points the leg at the address an SDP answer named. Until this is
+// called the transmit loop sends nothing, which is what keeps an offered leg
+// from spraying RTP at whatever the last call was using.
+func (leg *rtpLeg) setRemote(remote *net.UDPAddr) {
+	leg.mu.Lock()
+	defer leg.mu.Unlock()
+	leg.remote = remote
+}
 
 // ReadPCM returns the next frame received from the PBX.
 func (leg *rtpLeg) ReadPCM(ctx context.Context) ([]int16, error) {
@@ -146,13 +165,14 @@ func (leg *rtpLeg) sendFrame(samples []int16) {
 	if remote == nil {
 		return
 	}
+	payload := leg.payloadType()
 	packet := make([]byte, 12+frameSamples)
-	packet[0], packet[1] = 0x80, leg.payload
+	packet[0], packet[1] = 0x80, payload
 	binary.BigEndian.PutUint16(packet[2:4], leg.sequence)
 	binary.BigEndian.PutUint32(packet[4:8], leg.timestamp)
 	binary.BigEndian.PutUint32(packet[8:12], leg.ssrc)
 	for index, sample := range samples {
-		if leg.payload == payloadPCMA {
+		if payload == payloadPCMA {
 			packet[12+index] = g711.LinearToALaw(sample)
 		} else {
 			packet[12+index] = g711.LinearToMuLaw(sample)
@@ -172,7 +192,8 @@ func (leg *rtpLeg) receive() {
 		if err != nil {
 			return
 		}
-		if count < 12 || packet[0]>>6 != 2 || packet[1]&0x7f != leg.payload {
+		payload := leg.payloadType()
+		if count < 12 || packet[0]>>6 != 2 || packet[1]&0x7f != payload {
 			continue
 		}
 		// Symmetric RTP: a PBX behind NAT sends from a port it did not
@@ -195,7 +216,7 @@ func (leg *rtpLeg) receive() {
 		}
 		samples := make([]int16, count-header)
 		for index, encoded := range packet[header:count] {
-			if leg.payload == payloadPCMA {
+			if payload == payloadPCMA {
 				samples[index] = g711.ALawToLinear(encoded)
 			} else {
 				samples[index] = g711.MuLawToLinear(encoded)

@@ -33,6 +33,11 @@ type Config struct {
 	// trunk. No default: an operator naming the listen address must also say
 	// who may reach it.
 	SIPTrunkPeers []string
+	// SIPTrunkPBX is where a call arriving on a SIM is offered, normally the
+	// PBX on 127.0.0.1:5060. Empty leaves the inbound direction off, so a
+	// deployment that only places calls never has VoCat sending INVITEs at
+	// whatever happens to be listening there.
+	SIPTrunkPBX string
 	// AsteriskAMI* reach the PBX's manager interface, which VoCat reads live
 	// status from. Empty address disables it: VoCat runs perfectly well with
 	// no PBX in front, and a status page that cannot connect should say
@@ -63,6 +68,7 @@ type fileConfig struct {
 	MaxRequestBodyBytes *int64   `json:"max_request_body_bytes"`
 	SIPTrunkAddress     *string  `json:"sip_trunk_address"`
 	SIPTrunkPeers       []string `json:"sip_trunk_peers"`
+	SIPTrunkPBX         *string  `json:"sip_trunk_pbx"`
 	AsteriskAMIAddress  *string  `json:"asterisk_ami_address"`
 	AsteriskAMIUsername *string  `json:"asterisk_ami_username"`
 	AsteriskAMISecret   *string  `json:"asterisk_ami_secret"`
@@ -147,6 +153,9 @@ func applyFile(cfg *Config, values fileConfig) error {
 	if values.SIPTrunkAddress != nil {
 		cfg.SIPTrunkAddress = *values.SIPTrunkAddress
 	}
+	if values.SIPTrunkPBX != nil {
+		cfg.SIPTrunkPBX = *values.SIPTrunkPBX
+	}
 	if values.AsteriskAMIAddress != nil {
 		cfg.AsteriskAMIAddress = *values.AsteriskAMIAddress
 	}
@@ -195,6 +204,7 @@ func applyEnvironment(cfg *Config) error {
 	applyString("VOCAT_ADDR", &cfg.Address)
 	applyString("VOCAT_DATABASE_PATH", &cfg.DatabasePath)
 	applyString("VOCAT_SIP_TRUNK_ADDR", &cfg.SIPTrunkAddress)
+	applyString("VOCAT_SIP_TRUNK_PBX", &cfg.SIPTrunkPBX)
 	applyString("VOCAT_ASTERISK_AMI_ADDR", &cfg.AsteriskAMIAddress)
 	applyString("VOCAT_ASTERISK_AMI_USER", &cfg.AsteriskAMIUsername)
 	applyString("VOCAT_ASTERISK_AMI_SECRET", &cfg.AsteriskAMISecret)

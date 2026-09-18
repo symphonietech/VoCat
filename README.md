@@ -302,10 +302,11 @@ its trunk on `127.0.0.1:5062` is the *host's* loopback and a bridged container
 cannot reach it at all.
 
 Outbound is verified end to end: a softphone through Asterisk, out over a SIM's
-IMS registration to the PSTN, with two-way audio. Inbound (a call arriving on
-the SIM being offered to the PBX) is not implemented yet; those are still
-answered from VoCat's own Calls page. The Calls page and the trunk work at the same time,
-with one exception: a single call's audio cannot be bridged to both, so
+IMS registration to the PSTN, with two-way audio. Inbound works in both places
+at once: a call arriving on a SIM is offered to the PBX as an INVITE *and*
+raised on VoCat's own Calls page, and whichever side answers first takes it.
+Set `VOCAT_SIP_TRUNK_PBX` to empty to keep inbound calls off the PBX
+entirely. The one thing that cannot be shared is a single call's audio, so
 connecting browser audio to a call the trunk is carrying returns `409`.
 
 With `ASTERISK_AMI_SECRET` set, VoCat's **Asterisk** page manages the PBX
@@ -360,6 +361,7 @@ Vocat reads an optional JSON configuration file from `VOCAT_CONFIG`, then applie
 | `VOCAT_MAX_REQUEST_BODY_BYTES` | `1048576` | Maximum API request body size. |
 | `VOCAT_SIP_TRUNK_ADDR` | empty | UDP address for the SIP trunk. Empty keeps the trunk off entirely. |
 | `VOCAT_SIP_TRUNK_PEERS` | empty | Addresses or CIDR prefixes allowed to use the trunk, comma or space separated. Startup fails if an address is set with no peers. |
+| `VOCAT_SIP_TRUNK_PBX` | empty | Where a call arriving on a SIM is offered, normally `127.0.0.1:5060`. Empty leaves the inbound direction off and such calls are answered only from VoCat's Calls page. |
 | `VOCAT_ASTERISK_AMI_ADDR` | empty | Asterisk manager interface to read live PBX status from, normally `127.0.0.1:5038`. Empty disables the Asterisk page. |
 | `VOCAT_ASTERISK_AMI_USER` | empty | Manager account name. |
 | `VOCAT_ASTERISK_AMI_SECRET` | empty | Manager account secret. Bind AMI to loopback: it crosses a plain connection in the clear. |

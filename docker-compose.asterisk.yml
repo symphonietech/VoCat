@@ -42,6 +42,11 @@ services:
       # operator has not chosen deliberately.
       VOCAT_SIP_TRUNK_ADDR: 127.0.0.1:5062
       VOCAT_SIP_TRUNK_PEERS: 127.0.0.1
+      # The inbound direction: where a call arriving on a SIM is offered.
+      # Asterisk's own SIP port, on the loopback both containers share. Set
+      # VOCAT_SIP_TRUNK_PBX= (empty) in .env to keep inbound calls on VoCat's
+      # own Calls page instead.
+      VOCAT_SIP_TRUNK_PBX: ${VOCAT_SIP_TRUNK_PBX-127.0.0.1:5060}
       # The other direction: VoCat reading Asterisk's live state. Loopback
       # only -- both containers share the host network namespace, and an AMI
       # password crosses a plain connection in the clear.

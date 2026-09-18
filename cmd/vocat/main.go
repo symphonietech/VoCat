@@ -650,23 +650,29 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 	// interface the operator has chosen deliberately. It starts after the API
 	// server because the gateway that places its calls is the same call
 	// controller the web UI drives.
+	// Declared out here because the incoming-call callback below offers calls
+	// to it, and that callback is what the IMS runtime invokes.
+	var trunk *siptrunk.Server
 	if address := strings.TrimSpace(cfg.SIPTrunkAddress); address != "" {
 		gateway := handler.SIPTrunkGateway()
-		trunk, trunkErr := siptrunk.Listen(siptrunk.Options{
+		started, trunkErr := siptrunk.Listen(siptrunk.Options{
 			Address: address,
 			Peers:   cfg.SIPTrunkPeers,
 			Logger:  logger,
 			Gateway: gateway,
+			PBX:     strings.TrimSpace(cfg.SIPTrunkPBX),
 		})
 		if trunkErr != nil {
 			return fmt.Errorf("start SIP trunk: %w", trunkErr)
 		}
+		trunk = started
 		defer trunk.Close()
 		logger.Info("SIP trunk listening",
 			"category", "siptrunk",
 			"address", trunk.LocalAddr().String(),
 			"peers", cfg.SIPTrunkPeers,
 			"calls", gateway != nil,
+			"inbound_pbx", strings.TrimSpace(cfg.SIPTrunkPBX),
 		)
 	}
 	onIncomingCall = func(ctx context.Context, call ims.ReceivedCall) error {
@@ -680,6 +686,25 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 			Time:        call.Timestamp,
 			Environment: "vowifi",
 		})
+		// Offer it to the PBX as well, when one is configured. The
+		// notification above still fires either way: the Calls page can
+		// answer a call the PBX is also ringing for, and whichever side
+		// answers first wins.
+		if trunk != nil && trunk.InboundEnabled() {
+			if err := trunk.Offer(siptrunk.InboundCall{
+				DeviceID:   call.DeviceID,
+				DeviceName: strings.TrimSpace(deviceConfig.Name),
+				IMSCallID:  call.CallID,
+				Caller:     call.Caller,
+				Called:     call.Called,
+			}); err != nil {
+				// Not returned: failing here would make the IMS runtime treat
+				// the call as unhandled, and the Calls page can still answer
+				// it.
+				logger.Warn("could not offer an incoming call to the PBX",
+					"category", "siptrunk", "device_id", call.DeviceID, "error", err)
+			}
+		}
 		return nil
 	}
 	go handler.StartLogRetentionLoop(pollContext, time.Minute)
