@@ -5,6 +5,7 @@ import {
   MicRegular,
   MicOffRegular,
   SpeakerMuteRegular,
+  BackspaceRegular,
 } from "@fluentui/react-icons";
 import { apiMessage, api, dialCall, hangupCall, answerCall, listCalls, sendCallDTMF } from "../api";
 import { CallHistory } from "./calls/CallHistory";
@@ -51,24 +52,43 @@ function elapsed(from: string | undefined, now: number): string {
 // visible territory instead of leaving the bar flat.
 const KEYPAD = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "0", "#"];
 
-// One press, one request. Digits are queued server-side and go out at one per
-// packet interval, so holding a key down or typing fast is fine: they arrive
-// in order, spaced far enough apart for the far end to count them.
+// The same keys do two different jobs depending on whether a call is up, so
+// the mode is explicit rather than inferred at the call site: pressing 5
+// either composes a number or sends a tone down a live call, and those are
+// not the sort of thing to get wrong by accident.
+type KeypadMode = "dial" | "dtmf";
+
+// In DTMF mode one press is one request. Digits are queued server-side and go
+// out at one per packet interval, so typing fast is fine: they arrive in
+// order, spaced far enough apart for the far end to count them.
 function Keypad({
+  mode,
   disabled,
   sent,
   onPress,
+  onBackspace,
 }: {
+  mode: KeypadMode;
   disabled?: boolean;
   sent: string;
   onPress: (digit: string) => void;
+  onBackspace: () => void;
 }) {
   const { t } = useI18n();
   return (
     <div className="mt-3 border-t border-gray-100 pt-3 dark:border-white/10">
       <div className="mb-2 flex items-center gap-2">
-        <span className="text-xs text-gray-400">{t("拨号键盘")}</span>
-        {sent ? <span className="font-mono text-xs tracking-widest">{sent}</span> : null}
+        <span className="text-xs text-gray-400">
+          {mode === "dtmf" ? t("按键音") : t("拨号键盘")}
+        </span>
+        {/* Only in DTMF mode: in dial mode the number box already shows what
+            has been typed, and a second copy of it would just disagree. */}
+        {mode === "dtmf" && sent ? (
+          <span className="font-mono text-xs tracking-widest">{sent}</span>
+        ) : null}
+        {disabled ? (
+          <span className="text-xs text-gray-400">{t("通话接通后可发送按键音")}</span>
+        ) : null}
       </div>
       <div className="grid max-w-[15rem] grid-cols-3 gap-1">
         {KEYPAD.map((digit) => (
@@ -82,6 +102,23 @@ function Keypad({
             {digit}
           </Button>
         ))}
+        {/* Composing a number needs a leading + and a way to undo a slip.
+            Neither is a keypad digit, so neither exists once a call is up. */}
+        {mode === "dial" ? (
+          <>
+            <Button size="small" className="font-mono text-base" onClick={() => onPress("+")}>
+              +
+            </Button>
+            <Button
+              size="small"
+              className="col-span-2 font-mono text-base"
+              icon={<BackspaceRegular />}
+              onClick={onBackspace}
+            >
+              {t("退格")}
+            </Button>
+          </>
+        ) : null}
       </div>
     </div>
   );
@@ -193,6 +230,12 @@ export default function CallsPage() {
     }
   };
 
+  // A live call turns the keypad into tones; with none it composes a number.
+  // Outbound ringing counts as live -- typing into the number box while a call
+  // to that number is already ringing would edit something that no longer
+  // matters.
+  const keypadMode: KeypadMode = active ? "dtmf" : "dial";
+
   const deviceOptions = devices.map((device) => ({ value: device.id, label: device.name || device.id }));
 
   return (
@@ -258,6 +301,29 @@ export default function CallsPage() {
               </Button>
             )}
           </div>
+
+          {/* One keypad, always here. Before a call it composes the number --
+              the same thing a phone's keypad does -- and during one it sends
+              RFC 4733 tones down the call's own RTP stream, which is what
+              makes a PSTN menu usable. Sending a tone needs no browser audio:
+              the digit is generated server-side. */}
+          <Keypad
+            mode={keypadMode}
+            disabled={keypadMode === "dtmf" && (busy || active?.state !== "active")}
+            sent={digits}
+            onBackspace={() => setNumber((current) => current.slice(0, -1))}
+            onPress={(digit) => {
+              if (keypadMode === "dial") {
+                setNumber((current) => current + digit);
+                return;
+              }
+              if (!active) return;
+              setDigits((current) => (current + digit).slice(-32));
+              sendCallDTMF(deviceId, active.id, digit).catch((error) => {
+                message.error(`${t("按键发送失败")}：${apiMessage(error)}`);
+              });
+            }}
+          />
 
           {active && active.direction === "incoming" && active.state === "ringing" ? (
             <Button
@@ -338,24 +404,6 @@ export default function CallsPage() {
                   <p className="mt-2 rounded-lg bg-amber-50 p-2 text-xs text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">
                     {t("当前页面不是安全上下文，浏览器不会提供麦克风，通话将只能接收。请改用 HTTPS（设置中可开启自签名证书）或通过 http://localhost 访问。")}
                   </p>
-                ) : null}
-
-                {/* The keypad is what makes a PSTN menu usable: "press 1 for
-                    billing" needs a 1 that reaches the far end, and these go
-                    out as RFC 4733 events on the call's own RTP stream rather
-                    than as audio. It does not need browser audio connected --
-                    the digit is generated server-side. */}
-                {active.state === "active" ? (
-                  <Keypad
-                    disabled={busy}
-                    sent={digits}
-                    onPress={(digit) => {
-                      setDigits((current) => (current + digit).slice(-32));
-                      sendCallDTMF(deviceId, active.id, digit).catch((error) => {
-                        message.error(`${t("按键发送失败")}：${apiMessage(error)}`);
-                      });
-                    }}
-                  />
                 ) : null}
 
                 {audioOn ? (

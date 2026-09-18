@@ -318,8 +318,9 @@ Every call is recorded — browser, trunk or automatic task alike — with its
 direction, numbers, SIM, timings, duration and outcome. History is on the
 Calls page, filterable by number and outcome, and pruned after 90 days.
 
-Keypad digits work in both places: the Calls page has a keypad on an answered
-call, and a digit pressed on a softphone crosses the trunk to the SIM. They
+Keypad digits work in both places: the Calls page has a keypad that composes a
+number before a call and sends tones during one, and a digit pressed on a
+softphone crosses the trunk to the SIM. They
 travel as RFC 4733 telephone events rather than tones, because the speech
 codecs on these legs do not carry tones reliably.
 

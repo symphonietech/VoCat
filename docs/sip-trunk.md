@@ -1096,9 +1096,16 @@ the gap is the only thing that makes `11` two digits rather than one held key.
 
 ### From the browser
 
-The Calls page has a keypad on an answered call. It does not need browser
-audio connected: the digit is generated server-side on the call's own RTP
-stream, so it works whether or not anyone is listening through the browser.
+The Calls page has one keypad, below the number box, and it is always there.
+With no call up it composes the number — the same thing a phone's keypad does
+— and during a call it sends tones. It does not need browser audio connected:
+the digit is generated server-side on the call's own RTP stream, so it works
+whether or not anyone is listening through the browser.
+
+The two jobs are an explicit mode rather than something inferred at the point
+of use: pressing 5 either composes a number or sends a tone down a live call,
+and those are not the sort of thing to get wrong by accident. `+` and a
+backspace exist only while composing, since neither is a keypad digit.
 
 ```
 POST /api/devices/{id}/calls/dtmf
