@@ -125,3 +125,42 @@ func TestSMSTestPairsLeaveUnreadableValuesAlone(t *testing.T) {
 		t.Errorf("empty list became %q", got)
 	}
 }
+
+// The endpoint editor prints the placeholder vocabulary under the body
+// parameter list and tells the operator to write {{password}} there. Hiding
+// that reference protects nothing -- the secret it names is the endpoint's
+// own password field, which is never returned -- and it turns a working
+// template into an empty password box the operator repairs by typing a
+// literal secret over it.
+func TestRedactSMSTestPairsKeepsPlaceholderReferences(t *testing.T) {
+	raw := `[{"key":"password","value":"{{password}}"},{"key":"to","value":"{{to}}"}]`
+	if got := redactSMSTestPairs(raw); got != raw {
+		t.Fatalf("a placeholder was redacted:\n want %s\n got  %s", raw, got)
+	}
+	// Text beside a placeholder is exactly where a second, literal credential
+	// would sit, so only a value that is nothing but substitutions is kept.
+	for _, value := range []string{"s3cret", "{{username}}:s3cret", "Bearer {{password}}"} {
+		pairs := `[{"key":"password","value":` + mustJSON(t, value) + `}]`
+		if got := redactSMSTestPairs(pairs); strings.Contains(got, value) {
+			t.Errorf("%q survived redaction: %s", value, got)
+		}
+	}
+}
+
+func mustJSON(t *testing.T, value string) string {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(encoded)
+}
+
+// A placeholder is visible, so the browser sends it back and it round trips
+// like any ordinary value rather than through the blank-keeps-stored path.
+func TestMergeSMSTestPairSecretsRoundTripsPlaceholders(t *testing.T) {
+	stored := `[{"key":"password","value":"{{password}}"},{"key":"to","value":"{{to}}"}]`
+	if got := mergeSMSTestPairSecrets(stored, stored); got != stored {
+		t.Fatalf("the placeholder did not survive a save:\n want %s\n got  %s", stored, got)
+	}
+}

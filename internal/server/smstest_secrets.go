@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"regexp"
 	"strings"
 )
 
@@ -33,6 +34,31 @@ var secretParamKeys = map[string]bool{
 	"token": true, "apitoken": true, "accesstoken": true, "authtoken": true,
 	"apikey": true, "appkey": true, "accesskey": true, "secretkey": true,
 	"auth": true, "authorization": true, "credential": true,
+}
+
+// placeholderPattern matches one {{name}} substitution of the kind the
+// scheduler expands at send time.
+var placeholderPattern = regexp.MustCompile(`{{\s*[A-Za-z0-9_]+\s*}}`)
+
+// isPlaceholderValue reports whether a value is nothing but substitutions.
+//
+// The endpoint editor prints the placeholder vocabulary right under the body
+// parameter list and tells the operator to write {{password}} there, so a
+// parameter holding that is a reference, not a credential: the secret it
+// names lives in the endpoint's own password field, which is already
+// write-only and never leaves the server. Hiding the reference protects
+// nothing and costs the operator the ability to see how the endpoint is
+// wired -- the field reads as an empty password box, and the obvious repair
+// is to type a literal secret over a template that was working.
+//
+// Only when nothing but whitespace is left: "Bearer {{password}}" keeps its
+// own text, and text beside a placeholder is exactly where a second,
+// literal credential would sit.
+func isPlaceholderValue(value string) bool {
+	if strings.TrimSpace(value) == "" {
+		return false
+	}
+	return strings.TrimSpace(placeholderPattern.ReplaceAllString(value, "")) == ""
 }
 
 // isSecretParamKey reports whether a parameter name holds a credential.
@@ -84,7 +110,7 @@ func redactSMSTestPairs(raw string) string {
 		return raw
 	}
 	for index := range pairs {
-		if !isSecretParamKey(pairs[index].Key) {
+		if !isSecretParamKey(pairs[index].Key) || isPlaceholderValue(pairs[index].Value) {
 			continue
 		}
 		pairs[index].HasValue = pairs[index].Value != ""

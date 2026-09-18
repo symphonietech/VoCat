@@ -56,6 +56,21 @@ function isSecretParamKey(key: string): boolean {
   return SECRET_PARAM_KEYS.has(key.toLowerCase().replace(/[^a-z0-9]/g, ""));
 }
 
+// A value that is nothing but {{placeholders}} is a reference, not a
+// credential: the secret it names lives in the endpoint's own password field,
+// which the server never returns. Masking the reference protects nothing and
+// hides how the endpoint is wired -- mirrors isPlaceholderValue in
+// internal/server/smstest_secrets.go.
+function isPlaceholderValue(value: string): boolean {
+  if (value.trim() === "") return false;
+  return value.replace(/{{\s*[A-Za-z0-9_]+\s*}}/g, "").trim() === "";
+}
+
+// A pair is masked only when there is a literal secret to hide.
+function isMaskedPair(pair: KeyValuePair): boolean {
+  return isSecretParamKey(pair.key) && !isPlaceholderValue(pair.value);
+}
+
 const EMPTY_ENDPOINT_FORM = {
   id: "",
   name: "",
@@ -229,9 +244,9 @@ function PairEditor({
                 stored. */}
             <Input
               value={pair.value}
-              type={isSecretParamKey(pair.key) ? "password" : "text"}
+              type={isMaskedPair(pair) ? "password" : "text"}
               placeholder={
-                isSecretParamKey(pair.key)
+                isMaskedPair(pair)
                   ? pair.hasValue
                     ? t("已设置，留空则不修改")
                     : t("值（保存后不再回显）")

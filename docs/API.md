@@ -551,6 +551,16 @@ name for something harmless, the other is usually a value computed from a
 secret rather than the secret. Redacting a field that is not a credential
 costs the operator the ability to read their own configuration back.
 
+A value that is **nothing but `{{placeholders}}`** is exempt whatever the
+parameter is called: `{"key":"password","value":"{{password}}"}` comes back
+in full. That value is a reference, not a credential — the secret it names is
+the endpoint `password` field, which is already write-only — so hiding it
+protects nothing and leaves the operator an empty password box where a
+working template used to be, whose obvious repair is to type a literal secret
+over it. Only a value made entirely of substitutions qualifies: text beside a
+placeholder (`Bearer {{password}}`, `{{username}}:s3cret`) is exactly where a
+second, literal credential would sit, so it is still redacted.
+
 `has_value` is an output marker only. Sending it back is ignored, and it is
 never stored.
 
