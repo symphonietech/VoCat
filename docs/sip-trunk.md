@@ -106,6 +106,11 @@ Then point a softphone at the host:
 
 Dial a number and it goes out over the SIM.
 
+That account is a **seed**, not the permanent home of the configuration: the
+entrypoint writes it once, on first start, and everything after that is
+managed on the Asterisk page under **Extension accounts**. See
+[Extensions in the web UI](#extensions-in-the-web-ui).
+
 ### Why both containers use host networking
 
 VoCat already runs with `network_mode: host`, because the export-proxy plugin
@@ -710,6 +715,65 @@ arrive under the same labelled row.
 Anything the contact listing already reported wins — it is the more specific
 source, and letting the detail overwrite it would make the round-trip flip
 between two measurements on every poll.
+
+## Extensions in the web UI
+
+Softphone accounts are edited on the Asterisk page, next to the outbound
+routes. Each row is a name, a password, an optional display name, and how
+many devices may register it at once; **Apply** reloads PJSIP so the change
+takes effect without restarting the container.
+
+VoCat renders them into `endpoints.conf` in the directory both containers
+share, and `pjsip.conf` includes it. One account is three PJSIP objects with
+the same name — the endpoint (what it may do), the auth (how it proves who it
+is) and the AOR (where it is) — which is how PJSIP models an account; they are
+generated together so a missing one cannot happen.
+
+### Passwords are write-only
+
+A password is accepted on save and **never returned**. The listing carries
+`has_password` and nothing else, the preview shows `password=<hidden>`, and
+the generated file is written `0600`.
+
+So copy a password before saving it. The field is deliberately not masked
+while you type — this is the only moment it is readable — and the key button
+generates one from the browser's CSPRNG, out of an alphabet with no
+ambiguous characters, because it gets typed into a handset by hand.
+
+Stored in VoCat's database, marked sensitive so the generic settings API
+cannot hand it out with everything else. It is stored recoverably rather than
+hashed because Asterisk needs the password itself to answer a digest
+challenge; a VoCat database backup therefore contains SIP credentials.
+
+### Replacing the seeded account
+
+Until something is saved here, `endpoints.conf` is the one the entrypoint
+seeded from `ASTERISK_SIP_USER` and `ASTERISK_SIP_PASSWORD`. The page says so,
+because saving replaces the file whole.
+
+Saving an **empty** list over a seeded file is refused once and asks for
+confirmation: the symptom otherwise is a handset that quietly stops
+registering at its next attempt, some minutes later, with nothing in the UI
+that points at the cause. Saving a list that has accounts in it replaces the
+seeded one without asking — typing an account in is already the decision.
+
+`ASTERISK_SIP_USER` still names the extension the inbound context rings
+(`[from-vocat]` in `extensions.conf`), which is unused today because the
+trunk does not offer inbound calls yet. If you rename the account here, that
+line needs the same edit.
+
+### Names that are refused
+
+`vocat`, `transport-udp`, `transport-tcp`, `global`, `system` and `general`
+are already section names in the shipped `pjsip.conf`. A second object with
+one of those names is not an override — Asterisk refuses the duplicate, and
+what else it takes down with it depends on where it gives up. They are
+refused here instead.
+
+Names are letters, digits, `_`, `-` and `.`; passwords are printable ASCII
+with no spaces and no `;`, at least 12 characters. A `;` starts a comment in
+an Asterisk config file, so a password containing one would be silently
+truncated: Asterisk would load happily and the phone would never register.
 
 ## The trunk and the Calls page together
 

@@ -31,6 +31,23 @@ export const EN_DICT: Record<string, string> = {
   "模式必须以 _ 开头；多个设备轮流拨出；超时单位为秒":
     "Patterns start with _; several devices are used in turn; timeout is in seconds",
   "生成的拨号方案": "Generated dialplan",
+  "分机账号": "Extension accounts",
+  "添加分机": "Add extension",
+  "已保存。密码只写入 Asterisk，之后无法再读取。":
+    "Saved. The password is written to Asterisk and cannot be read back.",
+  "当前分机来自 .env（ASTERISK_SIP_USER），不是在这里配置的。在此保存会整体替换它。":
+    "The current extension comes from .env (ASTERISK_SIP_USER), not from here. Saving replaces it entirely.",
+  "没有分机。没有分机时，软电话无法注册，但中继外呼不受影响。":
+    "No extensions. Without one no softphone can register; calls through the trunk are unaffected.",
+  "已设置，留空则不修改": "Set; leave blank to keep it",
+  "密码（留空则无法创建）": "Password (required for a new extension)",
+  "生成密码": "Generate a password",
+  "显示名": "Display name",
+  "同时注册的设备数": "Devices that may register at once",
+  "密码至少": "Passwords are at least",
+  "位，保存后不再回显；设备数是可同时注册的终端数量":
+    "characters and are never shown again; the last column is how many devices may register at once",
+  "生成的 PJSIP 配置": "Generated PJSIP configuration",
   "中继（VoCat）": "Trunk (VoCat)",
   "Asterisk 中没有名为 vocat 的中继端点": "Asterisk has no endpoint named vocat",
   "分机": "Extensions",

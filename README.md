@@ -308,6 +308,16 @@ answered from VoCat's own Calls page. The Calls page and the trunk work at the s
 with one exception: a single call's audio cannot be bridged to both, so
 connecting browser audio to a call the trunk is carrying returns `409`.
 
+With `ASTERISK_AMI_SECRET` set, VoCat's **Asterisk** page manages the PBX
+itself: live endpoint and registration status, the outbound routes (which
+numbers leave through which SIMs), and the softphone accounts. Each editor has
+an Apply button that reloads the relevant Asterisk module, so a change does
+not need a container restart. Extension passwords are write-only — set here,
+never shown again.
+
+`ASTERISK_SIP_USER` and `ASTERISK_SIP_PASSWORD` seed the first account once,
+on first start; after that the web UI owns it.
+
 Full setup, dial plan, multi-SIM selection and the status table the PBX sees:
 [docs/sip-trunk.md](docs/sip-trunk.md).
 
@@ -352,6 +362,7 @@ Vocat reads an optional JSON configuration file from `VOCAT_CONFIG`, then applie
 | `VOCAT_ASTERISK_AMI_ADDR` | empty | Asterisk manager interface to read live PBX status from, normally `127.0.0.1:5038`. Empty disables the Asterisk page. |
 | `VOCAT_ASTERISK_AMI_USER` | empty | Manager account name. |
 | `VOCAT_ASTERISK_AMI_SECRET` | empty | Manager account secret. Bind AMI to loopback: it crosses a plain connection in the clear. |
+| `VOCAT_ASTERISK_DIALPLAN_DIR` | empty | Directory both containers share, where VoCat writes the generated `routes.conf` and `endpoints.conf`. The Asterisk compose overlay sets it; with it empty, the editors still save to VoCat's database but write nothing for Asterisk to read. |
 | `VOCAT_REPO` | `MengMengCode/VoCat` | Trusted GitHub repository used by the self-updater, in `owner/name` form. |
 | `GITHUB_TOKEN` | empty | Optional GitHub token for private repositories or higher API limits. |
 

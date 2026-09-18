@@ -634,6 +634,33 @@ export type AsteriskRoute = {
   comment?: string;
 };
 
+// A softphone account. The password is write-only: it is sent on save and
+// never returned, so the browser only ever learns whether one is set.
+export type AsteriskExtension = {
+  name: string;
+  password?: string;
+  callerId?: string;
+  maxContacts: number;
+  comment?: string;
+  hasPassword?: boolean;
+};
+
+export type AsteriskExtensions = {
+  extensions: AsteriskExtension[];
+  // preview is the PJSIP configuration these render to, with the password
+  // lines masked.
+  preview?: string;
+  pending?: boolean;
+  path?: string;
+  canApply?: boolean;
+  // seeded means the file Asterisk is using came from the container
+  // entrypoint rather than from VoCat -- the account in .env, which saving
+  // here replaces.
+  seeded?: boolean;
+  minPasswordLength?: number;
+  error?: string;
+};
+
 export type AsteriskRoutes = {
   routes: AsteriskRoute[];
   // preview is the dialplan these routes render to, so a syntax question can

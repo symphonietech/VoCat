@@ -1,5 +1,7 @@
 import type {
   ApiErrorBody,
+  AsteriskExtension,
+  AsteriskExtensions,
   AsteriskRoute,
   AsteriskRoutes,
   AsteriskStatus,
@@ -244,6 +246,28 @@ export function applyAsteriskRoutes() {
   return api<{ applied: boolean; message?: string; at: string }>("/asterisk/routes/apply", {
     method: "POST",
   });
+}
+
+// Extension passwords travel one way only: they are sent here and never come
+// back, so an entry with no password keeps whatever is already stored.
+export function getAsteriskExtensions() {
+  return api<AsteriskExtensions>("/asterisk/extensions");
+}
+
+export function saveAsteriskExtensions(extensions: AsteriskExtension[], replaceSeeded = false) {
+  return api<{ saved: boolean; written: boolean; extensions: AsteriskExtension[]; preview: string }>(
+    "/asterisk/extensions",
+    { method: "PUT", body: { extensions, replaceSeeded } },
+  );
+}
+
+// Applying reloads res_pjsip, which is what owns endpoints, auths and AORs.
+// Reloading the dialplan instead would report success and change nothing.
+export function applyAsteriskExtensions() {
+  return api<{ applied: boolean; message?: string; at: string; note?: string }>(
+    "/asterisk/extensions/apply",
+    { method: "POST" },
+  );
 }
 
 export function listCalls(deviceId: string) {

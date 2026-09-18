@@ -104,6 +104,51 @@ if [ ! -f /etc/asterisk/vocat/routes.conf ]; then
 	} > /etc/asterisk/vocat/routes.conf
 fi
 
+# Softphone accounts come from a file VoCat generates into the same shared
+# directory. pjsip.conf includes it unconditionally, so it has to exist before
+# Asterisk parses anything -- a missing include there costs every account in
+# the file, not just one.
+#
+# Seeded from the environment only when absent, exactly like routes.conf:
+# VoCat owns it once anything is saved in the web UI, and rewriting it on
+# every restart would silently put the .env account back and drop the rest.
+if [ ! -f /etc/asterisk/vocat/endpoints.conf ]; then
+	echo "entrypoint: seeding extension $ASTERISK_SIP_USER from the environment"
+	{
+		echo "; Seeded by entrypoint.sh from ASTERISK_SIP_USER/ASTERISK_SIP_PASSWORD."
+		echo "; VoCat replaces this file when extensions are saved in the web UI."
+		echo ""
+		echo "[$ASTERISK_SIP_USER]"
+		echo "type=endpoint"
+		echo "context=from-internal"
+		echo "disallow=all"
+		echo "allow=ulaw"
+		echo "allow=alaw"
+		echo "auth=$ASTERISK_SIP_USER"
+		echo "aors=$ASTERISK_SIP_USER"
+		echo "rtp_symmetric=yes"
+		echo "force_rport=yes"
+		echo "rewrite_contact=yes"
+		echo "direct_media=no"
+		echo ""
+		echo "[$ASTERISK_SIP_USER]"
+		echo "type=auth"
+		echo "auth_type=userpass"
+		echo "username=$ASTERISK_SIP_USER"
+		echo "password=$ASTERISK_SIP_PASSWORD"
+		echo ""
+		echo "[$ASTERISK_SIP_USER]"
+		echo "type=aor"
+		echo "max_contacts=2"
+		echo "remove_existing=yes"
+		echo "qualify_frequency=60"
+	} > /etc/asterisk/vocat/endpoints.conf
+fi
+# The file holds a SIP password in the clear, which is what Asterisk needs to
+# answer a digest challenge. Narrow it whether this run wrote it or not: an
+# older deployment seeded one before this line existed.
+chmod 600 /etc/asterisk/vocat/endpoints.conf
+
 echo "entrypoint: trunk=$VOCAT_TRUNK_HOST device=${VOCAT_DEVICE:-<auto>} extension=$ASTERISK_SIP_USER"
 echo "entrypoint: manager interface (AMI) enabled=$ASTERISK_AMI_ENABLED"
 echo "entrypoint: PJSIP is the only SIP driver here; chan_sip is noloaded."
