@@ -640,6 +640,21 @@ export type AsteriskEndpoint = {
   fields?: AsteriskField[];
 };
 
+// One live channel: a call leg Asterisk is carrying right now.
+export type AsteriskChannel = {
+  name: string;
+  state?: string;
+  callerId?: string;
+  connectedLine?: string;
+  context?: string;
+  extension?: string;
+  application?: string;
+  duration?: string;
+  bridgeId?: string;
+  uniqueId?: string;
+  fields?: AsteriskField[];
+};
+
 export type AsteriskStatus = {
   // configured false means no manager address is set at all, which is the
   // normal state for a VoCat with no PBX in front of it -- not an error.
@@ -654,6 +669,8 @@ export type AsteriskStatus = {
   unpairedContacts?: AsteriskContact[];
   core?: { startupTime?: string; reloadTime?: string; calls?: string };
   endpoints: AsteriskEndpoint[];
+  channels?: AsteriskChannel[];
+  channelsError?: string;
 };
 
 export type AsteriskRoute = {

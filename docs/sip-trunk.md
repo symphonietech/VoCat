@@ -643,6 +643,27 @@ will not pick it up. `scripts/docker-build.sh` recreates.
 The same secret enables AMI in Asterisk and points VoCat at it, so there is
 one value to set rather than two to keep in step.
 
+### Live channels
+
+The Asterisk page lists every channel the PBX is carrying, with a button to
+end one. Both come from the same AMI poll the rest of the page already makes —
+a second connection every few seconds would be one for nothing.
+
+`CoreShowChannels` and `Hangup` are both covered by the `system` grant the
+manager account already has (`EVENT_FLAG_SYSTEM | EVENT_FLAG_CALL` for Hangup,
+`EVENT_FLAG_SYSTEM | EVENT_FLAG_REPORTING` for the listing), so nothing here
+needs the `command` class that was deliberately withheld.
+
+The channel name is **not** passed through. AMI's `Hangup` treats the value as
+a regular expression when it is wrapped in slashes, so a channel of `/./`
+would end every call on the PBX. VoCat lists the live channels first and
+requires an exact match against one of them, which makes that unreachable: no
+real channel name starts with a slash. It also gives the right answer for the
+ordinary case, a channel that ended between the poll and the click.
+
+Hang-ups use Q.850 cause 16, normal clearing — the call ended the way a call
+normally ends, which is what pressing a button means.
+
 ### Why AMI rather than a shell
 
 VoCat runs in its own container. Reading `asterisk -rx` output would mean

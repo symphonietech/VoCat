@@ -7,6 +7,7 @@ import type { StatusTone } from "../components/ui";
 import { RouteEditor } from "./asterisk/RouteEditor";
 import { ExtensionEditor } from "./asterisk/ExtensionEditor";
 import { InboundEditor } from "./asterisk/InboundEditor";
+import { ChannelList } from "./asterisk/ChannelList";
 import { usePolling } from "../lib/usePolling";
 import { useI18n } from "../lib/i18n";
 
@@ -118,6 +119,12 @@ export default function AsteriskPage() {
               </p>
             ) : null}
           </div>
+
+          <ChannelList
+            channels={status.channels ?? []}
+            error={status.channelsError}
+            onChange={refresh}
+          />
 
           <RouteEditor />
 

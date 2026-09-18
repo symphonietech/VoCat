@@ -233,6 +233,16 @@ export function getAsteriskStatus() {
   return api<AsteriskStatus>("/asterisk/status");
 }
 
+// Ending a channel is checked against the live list server-side: AMI's Hangup
+// takes a regular expression when the value is wrapped in slashes, and an
+// exact match against a real channel is what makes that unreachable.
+export function hangupAsteriskChannel(channel: string, cause?: number) {
+  return api<{ hungup: boolean; channel: string; cause: number }>("/asterisk/channels/hangup", {
+    method: "POST",
+    body: { channel, cause },
+  });
+}
+
 export function getAsteriskRoutes() {
   return api<AsteriskRoutes>("/asterisk/routes");
 }

@@ -130,6 +130,13 @@ func (s *Server) handleAsteriskStatus(w http.ResponseWriter, r *http.Request) {
 	if contactsErr != nil && !ami.IsEmptyList(contactsErr) {
 		payload["contacts_error"] = contactsErr.Error()
 	}
+	// Live channels, on the same connection: the page polls once and a
+	// second dial every few seconds would be a connection for nothing.
+	if channels, channelsErr := s.readAsteriskChannels(ctx, conn); channelsErr != nil {
+		payload["channels_error"] = channelsErr.Error()
+	} else {
+		payload["channels"] = channels
+	}
 	built, unpaired := buildAsteriskEndpoints(endpoints, contacts)
 	s.fillAsteriskContactStatus(ctx, conn, built)
 	payload["endpoints"] = built
