@@ -150,14 +150,17 @@ func (s *Server) saveSMSTestEndpoint(w http.ResponseWriter, r *http.Request, id 
 	}
 
 	saved, err := s.store.UpsertSMSTestEndpoint(r.Context(), store.SMSTestEndpoint{
-		ID:         id,
-		Name:       name,
-		Method:     method,
-		URL:        url,
-		Username:   request.Username,
-		Password:   password,
-		Headers:    request.Headers,
-		BodyParams: request.BodyParams,
+		ID:       id,
+		Name:     name,
+		Method:   method,
+		URL:      url,
+		Username: request.Username,
+		Password: password,
+		// A header or body parameter named like a credential is write-only
+		// too: blank keeps what is stored, exactly as the endpoint password
+		// does.
+		Headers:    mergeSMSTestPairSecrets(request.Headers, existing.Headers),
+		BodyParams: mergeSMSTestPairSecrets(request.BodyParams, existing.BodyParams),
 		CreatedAt:  existing.CreatedAt,
 	})
 	if err != nil {
@@ -401,10 +404,15 @@ func smsTestEndpointResponse(value store.SMSTestEndpoint) map[string]any {
 		// The stored gateway password is never returned; the editor sends a
 		// blank value to keep it.
 		"has_password": value.Password != "",
-		"headers":      value.Headers,
-		"body_params":  value.BodyParams,
-		"created_at":   value.CreatedAt.Format(time.RFC3339),
-		"updated_at":   value.UpdatedAt.Format(time.RFC3339),
+		// A header or body parameter named like a credential has its value
+		// removed and is marked has_value instead, the same way the endpoint
+		// password is. A gateway that wants a password in a body parameter
+		// calls it one, and nothing else distinguishes it from the recipient
+		// number beside it.
+		"headers":     redactSMSTestPairs(value.Headers),
+		"body_params": redactSMSTestPairs(value.BodyParams),
+		"created_at":  value.CreatedAt.Format(time.RFC3339),
+		"updated_at":  value.UpdatedAt.Format(time.RFC3339),
 	}
 }
 
