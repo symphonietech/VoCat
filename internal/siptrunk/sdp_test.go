@@ -95,7 +95,7 @@ func TestParseOfferRejectsOffersItCannotCarry(t *testing.T) {
 }
 
 func TestBuildAnswerAgreesToASingleCodec(t *testing.T) {
-	answer := string(BuildAnswer(net.ParseIP("192.168.31.203"), 16000, payloadPCMA, 0))
+	answer := string(BuildAnswer(net.ParseIP("192.168.31.203"), 16000, payloadPCMA, 0, "sendrecv"))
 	for _, want := range []string{
 		"c=IN IP4 192.168.31.203\r\n",
 		"m=audio 16000 RTP/AVP 8\r\n",
@@ -117,7 +117,7 @@ func TestBuildAnswerAgreesToASingleCodec(t *testing.T) {
 // An answer may only name payload types the offer listed, so the
 // telephone-event type is the PBX's number rather than VoCat's own.
 func TestBuildAnswerEchoesTheOfferedEventPayload(t *testing.T) {
-	answer := string(BuildAnswer(net.ParseIP("127.0.0.1"), 16000, payloadPCMU, 96))
+	answer := string(BuildAnswer(net.ParseIP("127.0.0.1"), 16000, payloadPCMU, 96, "sendrecv"))
 	for _, want := range []string{
 		"m=audio 16000 RTP/AVP 0 96\r\n",
 		"a=rtpmap:96 telephone-event/8000\r\n",
@@ -129,7 +129,7 @@ func TestBuildAnswerEchoesTheOfferedEventPayload(t *testing.T) {
 	}
 	// A PBX with DTMF turned off gets a call with no telephone events rather
 	// than an answer naming something it never offered.
-	plain := string(BuildAnswer(net.ParseIP("127.0.0.1"), 16000, payloadPCMU, 0))
+	plain := string(BuildAnswer(net.ParseIP("127.0.0.1"), 16000, payloadPCMU, 0, "sendrecv"))
 	if strings.Contains(plain, "telephone-event") {
 		t.Fatalf("an unoffered event payload was answered:\n%s", plain)
 	}
@@ -158,7 +158,7 @@ func TestParseOfferReadsTheTelephoneEventPayload(t *testing.T) {
 }
 
 func TestBuildAnswerHandlesIPv6(t *testing.T) {
-	answer := string(BuildAnswer(net.ParseIP("fd00::1"), 16000, payloadPCMU, 0))
+	answer := string(BuildAnswer(net.ParseIP("fd00::1"), 16000, payloadPCMU, 0, "sendrecv"))
 	if !strings.Contains(answer, "c=IN IP6 fd00::1\r\n") || !strings.Contains(answer, "a=rtpmap:0 PCMU/8000") {
 		t.Fatalf("IPv6 answer wrong:\n%s", answer)
 	}

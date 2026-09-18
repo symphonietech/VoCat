@@ -90,6 +90,9 @@ type dialog struct {
 	answer   []byte
 	acked    bool
 	answered bool
+	// direction is the media direction the PBX last asked for. Hold is a
+	// re-INVITE that changes it, not a separate signal.
+	direction string
 }
 
 // dispatch handles the methods that carry their own responses. It reports
@@ -129,7 +132,23 @@ func (s *Server) handleInvite(request *Request, from *net.UDPAddr) bool {
 		s.reply(request, from, 400, "Bad Request", nil)
 		return true
 	}
+	if offered := s.outboundCall(callID); offered != nil {
+		// A re-INVITE on a call the trunk offered to the PBX. Without this it
+		// would fall through and be taken for a brand new call, which would
+		// place a second one out through a SIM -- a softphone pressing hold
+		// on an inbound call is not a request to dial anyone.
+		return offered.renegotiate(request, from)
+	}
 	if existing := s.dialog(callID); existing != nil {
+		if !existing.isRetransmission(request) {
+			// A re-INVITE: the PBX is renegotiating an established dialog,
+			// which is how hold and resume are signalled. Replaying the
+			// original answer here would be worse than ignoring it -- that
+			// response carries the first INVITE's CSeq, so it matches no
+			// transaction the PBX has open, and the PBX eventually gives up
+			// and tears the call down.
+			return existing.renegotiate(request, from)
+		}
 		// A retransmitted INVITE. Repeating the last answer is correct and
 		// placing a second call would not be.
 		if answer := existing.currentAnswer(); answer != nil {
@@ -309,9 +328,11 @@ func (d *dialog) run(ctx context.Context, offer mediaOffer) {
 	// telephone events rather than a renegotiation.
 	leg.setEventPayload(offer.EventPayload)
 
-	body := BuildAnswer(leg.conn.LocalAddr().(*net.UDPAddr).IP, leg.LocalPort(), offer.Payload, offer.EventPayload)
+	body := BuildAnswer(leg.conn.LocalAddr().(*net.UDPAddr).IP, leg.LocalPort(),
+		offer.Payload, offer.EventPayload, offer.Direction)
 	d.mu.Lock()
 	d.answered = true
+	d.direction = offer.Direction
 	d.mu.Unlock()
 	d.respondToInvite(200, "OK", body)
 	go d.retransmitAnswer()
@@ -330,12 +351,19 @@ func (d *dialog) pump(ctx context.Context, media Media, leg *rtpLeg) {
 
 	relayDigits(ctx, stop, leg, media, d.server, d.callID)
 
+	// Both directions keep reading while a call is held, and only the
+	// forwarding stops. Draining matters: a reader that stops would let the
+	// queue behind it fill, and resume would then replay whatever was said
+	// during the hold.
 	go func() {
 		defer end()
 		for {
 			samples, err := leg.ReadPCM(ctx)
 			if err != nil {
 				return
+			}
+			if _, toSIM := d.relayDirection(); !toSIM {
+				continue
 			}
 			if err := media.WritePCM(samples); err != nil {
 				return
@@ -348,6 +376,9 @@ func (d *dialog) pump(ctx context.Context, media Media, leg *rtpLeg) {
 			samples, err := media.ReadPCM(ctx)
 			if err != nil {
 				return
+			}
+			if toPBX, _ := d.relayDirection(); !toPBX {
+				continue
 			}
 			if err := leg.WritePCM(samples); err != nil {
 				return
@@ -585,4 +616,99 @@ func relayDigits(ctx context.Context, stop <-chan struct{}, leg *rtpLeg, media M
 	}
 	go forward(leg.Digits(), sim.SendDTMF, "pbx-to-sim")
 	go forward(sim.Digits(), leg.SendDTMF, "sim-to-pbx")
+}
+
+// isRetransmission distinguishes a repeated INVITE from a re-INVITE. The CSeq
+// number is what says which: a retransmission repeats it exactly, and a
+// renegotiation increments it.
+func (d *dialog) isRetransmission(request *Request) bool {
+	return cseqNumber(request.Value("cseq")) == cseqNumber(d.invite.Value("cseq"))
+}
+
+// renegotiate answers a re-INVITE on an established dialog.
+//
+// The only renegotiation a trunk sees in practice is hold and resume, and the
+// whole of it is in the media direction: a PBX holding a call offers sendonly
+// (it will play music at us) or inactive (silence both ways), and resumes
+// with sendrecv. The RTP legs stay exactly as they are -- tearing them down
+// and rebuilding would drop audio on resume for no benefit.
+func (d *dialog) renegotiate(request *Request, from *net.UDPAddr) bool {
+	if !d.wasAnswered() {
+		// A re-INVITE before the first answer is not something a PBX does,
+		// and guessing at it would risk answering the wrong transaction.
+		d.server.reply(request, from, 491, "Request Pending", nil)
+		return true
+	}
+	offer, err := ParseOffer(request.Body)
+	if err != nil {
+		d.server.log("siptrunk rejected a re-INVITE",
+			"call_id", d.callID, "error", err)
+		d.server.reply(request, from, 488, "Not Acceptable Here", nil)
+		return true
+	}
+	if d.leg == nil {
+		d.server.reply(request, from, 500, "Server Internal Error", nil)
+		return true
+	}
+	// A hold offer can move the media address as well as the direction --
+	// c=0.0.0.0 is the old way of saying "send nowhere" and parses to no
+	// address at all. Both are followed; leaving the old remote in place
+	// would keep RTP going at somewhere the PBX has stopped listening.
+	if offer.Address == nil {
+		d.leg.setRemote(nil)
+	} else {
+		d.leg.setRemote(&net.UDPAddr{IP: offer.Address, Port: offer.Port})
+	}
+	d.mu.Lock()
+	previous := d.direction
+	d.direction = offer.Direction
+	d.mu.Unlock()
+
+	body := BuildAnswer(d.leg.conn.LocalAddr().(*net.UDPAddr).IP, d.leg.LocalPort(),
+		d.leg.payloadType(), d.leg.eventType(), offer.Direction)
+	response, err := BuildResponse(request, 200, "OK", d.localTag, body,
+		"Contact: <"+d.server.contactURI(d.peer)+">")
+	if err != nil {
+		d.server.log("siptrunk could not answer a re-INVITE", "call_id", d.callID, "error", err)
+		return true
+	}
+	// Deliberately not stored as the dialog's answer: that one is replayed
+	// for a retransmitted *original* INVITE and has to keep its own CSeq.
+	d.server.send(response, from)
+	if previous != offer.Direction {
+		d.server.log("siptrunk renegotiated a call",
+			"call_id", d.callID, "direction", offer.Direction, "was", previous)
+	}
+	return true
+}
+
+// relayDirection reports which way audio should flow, from the direction the
+// PBX last asked for. The names are from the PBX's point of view, as SDP
+// defines them: "sendonly" means it will send and will not receive.
+func (d *dialog) relayDirection() (toPBX, toSIM bool) {
+	d.mu.Lock()
+	direction := d.direction
+	d.mu.Unlock()
+	switch direction {
+	case "sendonly":
+		// Music on hold, played at the SIM. Sending the SIM's audio back
+		// would be talking to a peer that said it is not listening.
+		return false, true
+	case "recvonly":
+		return true, false
+	case "inactive":
+		return false, false
+	default:
+		return true, true
+	}
+}
+
+// cseqNumber reads the sequence number out of a CSeq header, ignoring the
+// method that follows it.
+func cseqNumber(value string) string {
+	fields := strings.Fields(strings.TrimSpace(value))
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[0]
 }

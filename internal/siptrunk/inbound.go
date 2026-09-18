@@ -70,6 +70,9 @@ type outbound struct {
 	answered  bool
 	ack       []byte
 	cseq      int
+	// direction is the media direction the PBX last asked for, which is how
+	// hold reaches an offered call too.
+	direction string
 }
 
 // Offer places a call arriving on a SIM in front of the PBX.
@@ -230,7 +233,15 @@ func (o *outbound) run(ctx context.Context) {
 	leg.setPayload(answer.Payload)
 	// Whatever the PBX's answer named, which may differ from the 101 offered.
 	leg.setEventPayload(answer.EventPayload)
-	leg.setRemote(&net.UDPAddr{IP: answer.Address, Port: answer.Port})
+	if answer.Address == nil {
+		// Answered on hold, which is unusual but legal.
+		leg.setRemote(nil)
+	} else {
+		leg.setRemote(&net.UDPAddr{IP: answer.Address, Port: answer.Port})
+	}
+	o.mu.Lock()
+	o.direction = answer.Direction
+	o.mu.Unlock()
 
 	// The SIM leg is answered only now. Answering earlier would connect the
 	// caller to silence while the handset was still ringing, and bill them
@@ -315,12 +326,17 @@ func (o *outbound) pump(ctx context.Context, media Media, leg *rtpLeg) {
 
 	relayDigits(ctx, stop, leg, media, o.server, o.callID)
 
+	// Both directions keep reading while a call is held; only the forwarding
+	// stops, so resume does not replay what was said during the hold.
 	go func() {
 		defer end()
 		for {
 			samples, err := leg.ReadPCM(ctx)
 			if err != nil {
 				return
+			}
+			if _, toSIM := o.relayDirection(); !toSIM {
+				continue
 			}
 			if err := media.WritePCM(samples); err != nil {
 				return
@@ -333,6 +349,9 @@ func (o *outbound) pump(ctx context.Context, media Media, leg *rtpLeg) {
 			samples, err := media.ReadPCM(ctx)
 			if err != nil {
 				return
+			}
+			if toPBX, _ := o.relayDirection(); !toPBX {
+				continue
 			}
 			if err := leg.WritePCM(samples); err != nil {
 				return
@@ -525,3 +544,63 @@ func tagOf(value string) string {
 }
 
 func newCallID() string { return newTag() + newTag() + "@vocat" }
+
+// renegotiate answers a re-INVITE on a call the trunk offered. The trunk is
+// the UAC here, but a re-INVITE arriving from the PBX makes it the UAS for
+// that one transaction, and the handling is the same: follow the direction,
+// keep the legs.
+func (o *outbound) renegotiate(request *Request, from *net.UDPAddr) bool {
+	if !o.wasAnswered() || o.leg == nil {
+		o.server.reply(request, from, 491, "Request Pending", nil)
+		return true
+	}
+	offer, err := ParseOffer(request.Body)
+	if err != nil {
+		o.server.log("siptrunk rejected a re-INVITE on an offered call",
+			"call_id", o.callID, "error", err)
+		o.server.reply(request, from, 488, "Not Acceptable Here", nil)
+		return true
+	}
+	if offer.Address == nil {
+		o.leg.setRemote(nil)
+	} else {
+		o.leg.setRemote(&net.UDPAddr{IP: offer.Address, Port: offer.Port})
+	}
+	o.mu.Lock()
+	previous := o.direction
+	o.direction = offer.Direction
+	o.mu.Unlock()
+
+	body := BuildAnswer(o.leg.conn.LocalAddr().(*net.UDPAddr).IP, o.leg.LocalPort(),
+		o.leg.payloadType(), o.leg.eventType(), offer.Direction)
+	response, err := BuildResponse(request, 200, "OK", o.localTag, body,
+		"Contact: <"+o.server.contactURI(o.server.pbx)+">")
+	if err != nil {
+		o.server.log("siptrunk could not answer a re-INVITE", "call_id", o.callID, "error", err)
+		return true
+	}
+	o.server.send(response, from)
+	if previous != offer.Direction {
+		o.server.log("siptrunk renegotiated an inbound call",
+			"call_id", o.callID, "direction", offer.Direction, "was", previous)
+	}
+	return true
+}
+
+// relayDirection reports which way audio should flow, from the direction the
+// PBX last asked for.
+func (o *outbound) relayDirection() (toPBX, toSIM bool) {
+	o.mu.Lock()
+	direction := o.direction
+	o.mu.Unlock()
+	switch direction {
+	case "sendonly":
+		return false, true
+	case "recvonly":
+		return true, false
+	case "inactive":
+		return false, false
+	default:
+		return true, true
+	}
+}

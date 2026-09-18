@@ -444,3 +444,47 @@ func TestOfferRelaysADigitFromThePBXToTheSIM(t *testing.T) {
 		t.Fatalf("the SIM leg received %q, want \"1\"", got)
 	}
 }
+
+// Hold on an inbound call arrives as a re-INVITE for a dialog the trunk
+// started. Before this it matched no dialog at all, fell through to the
+// new-call path and placed a second call out through a SIM -- a softphone
+// pressing hold is not a request to dial anyone.
+func TestReInviteOnAnOfferedCallDoesNotPlaceASecondCall(t *testing.T) {
+	pbx := newFakePBX(t)
+	gateway := newFakeGateway()
+	server := inboundServer(t, gateway, pbx.address())
+	if err := server.Offer(sampleInbound()); err != nil {
+		t.Fatal(err)
+	}
+	invite, from := pbx.receiveMethod(t, "INVITE")
+	pbx.send(t, pbx.answer(t, invite, 24006), from)
+	pbx.receiveMethod(t, "ACK")
+
+	callID := headerOf(t, invite, "Call-ID")
+	body := "v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\ns=Asterisk\r\n" +
+		"c=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 24008 RTP/AVP 0\r\n" +
+		"a=rtpmap:0 PCMU/8000\r\na=sendonly\r\n"
+	hold := "INVITE sip:vocat@" + server.LocalAddr().String() + " SIP/2.0\r\n" +
+		"Via: SIP/2.0/UDP " + pbx.address() + ";branch=z9hG4bKhold1\r\n" +
+		"From: <sip:asterisk@" + pbx.address() + ">;tag=pbx1234\r\n" +
+		"To: " + headerOf(t, invite, "From") + "\r\n" +
+		"Call-ID: " + callID + "\r\n" +
+		"CSeq: 2 INVITE\r\n" +
+		"Contact: <sip:asterisk@" + pbx.address() + ">\r\n" +
+		"Content-Type: application/sdp\r\n" +
+		"Content-Length: " + strconv.Itoa(len(body)) + "\r\n\r\n" + body
+	pbx.send(t, hold, from)
+
+	response, _ := pbx.receive(t)
+	if !strings.HasPrefix(response, "SIP/2.0 200") {
+		t.Fatalf("the re-INVITE was not answered:\n%s", response)
+	}
+	if !strings.Contains(response, "a=recvonly") {
+		t.Fatalf("sendonly was not mirrored:\n%s", response)
+	}
+	// One call placed, not two. The fake gateway counts what it was asked to
+	// dial, and an offered call never dials at all.
+	if numbers := gateway.dialledNumbers(); len(numbers) != 0 {
+		t.Fatalf("the re-INVITE placed a call out through a SIM: %v", numbers)
+	}
+}

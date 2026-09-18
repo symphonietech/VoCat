@@ -962,6 +962,50 @@ Rows carry a checkbox for deleting several at once. Deleting every extension
 is allowed — the inbound file then rejects calls with the same truthful cause
 rather than the save being refused as if it were a mistake.
 
+## Hold and resume
+
+A PBX holds a call with a re-INVITE that changes the media direction, and
+resumes with another. The trunk answers both in their own transaction and
+leaves the RTP legs alone — tearing them down and rebuilding would drop audio
+on resume for nothing.
+
+Before this, a re-INVITE was mistaken for a retransmitted INVITE and answered
+by replaying the original 200. That is worse than ignoring it: the replayed
+response carries the *first* INVITE's CSeq, so it matches no transaction the
+PBX has open. The PBX retransmits, times out, and tears the call down. A
+re-INVITE is told apart by its CSeq number — a retransmission repeats it, a
+renegotiation increments it.
+
+The direction is mirrored, as RFC 3264 §6.1 requires: a peer that says it will
+only send is told it will only receive. Backwards is how a held call comes
+back with audio in one direction and nothing to explain it.
+
+What each direction does to the bridge:
+
+| The PBX offers | Audio to the PBX | Audio to the SIM |
+| --- | --- | --- |
+| `sendrecv` | yes | yes |
+| `sendonly` (music on hold) | no | yes |
+| `recvonly` | yes | no |
+| `inactive` | no | no |
+
+Both directions keep **reading** while a call is held; only the forwarding
+stops. A reader that stopped would let the queue behind it fill, and resume
+would then replay whatever was said during the hold.
+
+`c=0.0.0.0` is accepted too. It is how RFC 2543 held a call and plenty of
+equipment still does it; refusing it as malformed would tear down a call that
+was only asking for silence. It parses to no address at all, which is exactly
+what inactive means, so the leg simply sends nowhere.
+
+This works in both directions. A re-INVITE on a call the *trunk* offered — a
+softphone holding an inbound call — used to match no dialog, fall through to
+the new-call path, and place a second call out through a SIM.
+
+`UPDATE` is still answered 501. Asterisk uses re-INVITE for hold, and an
+UPDATE has different rules about when it may arrive; it is not worth guessing
+at until something sends one.
+
 ## Keypad digits
 
 Digits cross both legs as RFC 4733 telephone events — a named event in its own

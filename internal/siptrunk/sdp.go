@@ -122,16 +122,41 @@ func ParseOffer(body []byte) (mediaOffer, error) {
 	if offer.Address == nil {
 		offer.Address = sessionAddress
 	}
-	if offer.Address == nil || offer.Address.IsUnspecified() {
+	if offer.Address != nil && offer.Address.IsUnspecified() {
+		// c=0.0.0.0 is how RFC 2543 put a call on hold, and plenty of
+		// equipment still does it. Treating it as malformed would refuse a
+		// re-INVITE that is merely asking for silence, and the PBX would tear
+		// the call down. A nil address means "send nowhere", which is exactly
+		// what inactive means.
+		offer.Address = nil
+		offer.Direction = "inactive"
+		return offer, nil
+	}
+	if offer.Address == nil {
 		return mediaOffer{}, errors.New("siptrunk: SDP has no usable connection address")
 	}
 	return offer, nil
 }
 
-// BuildAnswer renders the SDP VoCat returns for an accepted offer, agreeing to
-// the single payload type the offer chose. Answering with one format rather
-// than a list keeps the PBX from renegotiating to something unsupported.
-func BuildAnswer(local net.IP, port int, payload, eventPayload byte) []byte {
+// answerDirection mirrors an offer's direction, which is what RFC 3264 §6.1
+// requires: a peer that says it will only send is told it will only receive.
+// Getting this backwards is how a held call comes back with one-way audio.
+func answerDirection(offer string) string {
+	switch offer {
+	case "sendonly":
+		return "recvonly"
+	case "recvonly":
+		return "sendonly"
+	case "inactive":
+		return "inactive"
+	default:
+		return "sendrecv"
+	}
+}
+
+// BuildAnswer renders the SDP VoCat returns for an accepted offer. direction
+// is the offer's own, mirrored here.
+func BuildAnswer(local net.IP, port int, payload, eventPayload byte, direction string) []byte {
 	family := "IP4"
 	if local.To4() == nil {
 		family = "IP6"
@@ -162,7 +187,7 @@ func BuildAnswer(local net.IP, port int, payload, eventPayload byte) []byte {
 			fmt.Sprintf("a=fmtp:%d 0-15", eventPayload),
 		)
 	}
-	lines = append(lines, "a=ptime:20", "a=sendrecv", "")
+	lines = append(lines, "a=ptime:20", "a="+answerDirection(direction), "")
 	return []byte(strings.Join(lines, "\r\n"))
 }
 
