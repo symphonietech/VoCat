@@ -19,6 +19,14 @@ if [ ${#ASTERISK_SIP_PASSWORD} -lt 12 ]; then
 	exit 1
 fi
 
+# A comma is the argument separator inside an extensions.conf application
+# call, so "Set(__VOCATDEV=a,b,c)" parses as Set with three stray arguments,
+# the _. extension fails to load, and every call is answered 404 by Asterisk
+# before it ever reaches VoCat. VoCat accepts commas or spaces between device
+# names, so normalising to spaces here keeps .env readable and the dialplan
+# valid.
+VOCAT_DEVICE=$(printf '%s' "$VOCAT_DEVICE" | tr ',' ' ')
+
 export ASTERISK_SIP_PASSWORD ASTERISK_SIP_USER VOCAT_TRUNK_HOST VOCAT_DEVICE
 substitute='$ASTERISK_SIP_PASSWORD $ASTERISK_SIP_USER $VOCAT_TRUNK_HOST $VOCAT_DEVICE'
 

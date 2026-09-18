@@ -297,7 +297,10 @@ extension pattern and set `__VOCATDEV` there.
 ### Spreading calls across several SIMs
 
 Name more than one and VoCat rotates across them, one call each in turn.
-Commas or spaces both work:
+Write it with commas or spaces; the entrypoint normalises commas to spaces
+before rendering the dial plan, because a comma inside an `extensions.conf`
+application call is an argument separator and would break the `Set()` it
+lands in:
 
 ```sh
 VOCAT_DEVICE=usb-2c7c-0125-3-4-5,usb-2c7c-0125-3-4-6,usb-2c7c-0125-3-4-7
@@ -312,8 +315,12 @@ VOCAT_DEVICE=*
 The same values work in the header and the URI parameter, so a dial plan can
 rotate over one set of SIMs for one route and a different set for another:
 
+Writing the list straight into a dial plan needs **spaces**, not commas —
+nothing normalises it for you there, and commas would be parsed as extra
+arguments to `Set`:
+
 ```ini
-exten => _1NXXNXXXXXX,1,Set(__VOCATDEV=usb-2c7c-0125-3-4-5,usb-2c7c-0125-3-4-6)
+exten => _1NXXNXXXXXX,1,Set(__VOCATDEV=usb-2c7c-0125-3-4-5 usb-2c7c-0125-3-4-6)
 exten => _011.,1,Set(__VOCATDEV=usb-2c7c-0125-3-4-7)
 ```
 
