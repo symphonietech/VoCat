@@ -9,10 +9,14 @@ This is deliberately **not** a registrar. There are no user accounts and no
 digest authentication: peers are authorised by source address. Identity is the
 PBX's job.
 
-> **Status.** Outbound calls work: the PBX sends an `INVITE`, VoCat places the
-> call over the SIM's IMS registration and bridges the audio. The inbound
-> direction — a call arriving on the SIM being offered to the PBX — is not here
-> yet; inbound calls are still answered from VoCat's own Calls page.
+> **Status.** Outbound works, verified end to end: a Linphone softphone through
+> Asterisk, out over a SIM's IMS registration to the PSTN, two minutes of
+> two-way audio, torn down by the far end's `BYE`. Multi-SIM selection by
+> `X-VoCat-Device` is proven on the same path.
+>
+> The inbound direction — a call arriving on the SIM being offered to the PBX —
+> is **not implemented**. Nothing reaches the `[from-vocat]` context yet, so
+> incoming calls are still answered from VoCat's own Calls page.
 
 ## Enabling it
 

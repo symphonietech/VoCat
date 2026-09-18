@@ -297,10 +297,10 @@ VoCat uses `network_mode: host` for the export-proxy's `SO_BINDTODEVICE`, so
 its trunk on `127.0.0.1:5062` is the *host's* loopback and a bridged container
 cannot reach it at all.
 
-Outbound calls work today — the PBX sends an `INVITE`, VoCat places the call
-over the SIM and bridges the audio. Inbound (a call arriving on the SIM being
-offered to the PBX) is not implemented yet; those are still answered from
-VoCat's own Calls page. The Calls page and the trunk work at the same time,
+Outbound is verified end to end: a softphone through Asterisk, out over a SIM's
+IMS registration to the PSTN, with two-way audio. Inbound (a call arriving on
+the SIM being offered to the PBX) is not implemented yet; those are still
+answered from VoCat's own Calls page. The Calls page and the trunk work at the same time,
 with one exception: a single call's audio cannot be bridged to both, so
 connecting browser audio to a call the trunk is carrying returns `409`.
 
