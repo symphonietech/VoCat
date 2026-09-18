@@ -1,7 +1,11 @@
 package server
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	"vocat/internal/ami"
 )
@@ -144,5 +148,50 @@ func TestBuildAsteriskEndpointsPrefersTheEndpointName(t *testing.T) {
 		if endpoint.Name == "aliased" && len(endpoint.Contacts) != 0 {
 			t.Fatalf("contact landed on the wrong endpoint: %+v", endpoint)
 		}
+	}
+}
+
+// The page reports "not configured" purely from the address VoCat was given,
+// so this is the one path that decides whether the whole feature appears to
+// exist. Nothing else tested that the option actually reaches the handler.
+func TestAsteriskStatusReportsConfiguredFromTheAddress(t *testing.T) {
+	for _, testCase := range []struct {
+		name       string
+		address    string
+		configured bool
+	}{
+		{name: "unset", address: "", configured: false},
+		{name: "whitespace only", address: "   ", configured: false},
+		// Unreachable on purpose: "configured but down" must read as
+		// configured, or a stopped PBX looks like a missing setting.
+		{name: "set", address: "127.0.0.1:1", configured: true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			server := &Server{
+				logger:      regionTestLogger(),
+				asteriskAMI: ami.Options{Address: testCase.address, Timeout: 200 * time.Millisecond},
+			}
+			recorder := httptest.NewRecorder()
+			server.handleAsteriskStatus(recorder, httptest.NewRequest(http.MethodGet, "/api/asterisk/status", nil))
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status = %d", recorder.Code)
+			}
+			var body struct {
+				Data struct {
+					Configured bool   `json:"configured"`
+					Error      string `json:"error"`
+				} `json:"data"`
+			}
+			if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			if body.Data.Configured != testCase.configured {
+				t.Fatalf("configured = %v, want %v (body %s)",
+					body.Data.Configured, testCase.configured, recorder.Body.String())
+			}
+			if testCase.configured && body.Data.Error == "" {
+				t.Fatal("an unreachable PBX reported no error; the page would look connected")
+			}
+		})
 	}
 }
