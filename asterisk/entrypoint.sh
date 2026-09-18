@@ -43,34 +43,14 @@ done
 # which rejects an account it has never heard of. Every signal points at
 # credentials, and this container's log stays empty because it never saw the
 # packet. Failing loudly here costs one restart loop and saves that hunt.
-port_5060_owner() {
-	for protocol in u t; do
-		# $4 is the local address; $5 is the peer, and using it would mean
-		# this check never fires. NR>1 drops the header row.
-		if ss -ln"$protocol" 2>/dev/null | awk 'NR>1 {print $4}' | grep -qE '(^|:)5060$'; then
-			printf '%s' " $protocol"
-		fi
-	done
-}
-
-# Recreating this service stops the old container and starts the new one, and
-# the old socket is not always gone by the time the new entrypoint looks. A
-# check that gave up instantly would turn that ordinary race into a permanent
-# crash loop, because restart: unless-stopped retries a failing container for
-# ever. Waiting a few seconds distinguishes a handover from a real conflict.
-occupied="$(port_5060_owner)"
-waited=0
-while [ -n "$occupied" ] && [ "$waited" -lt 15 ]; do
-	if [ "$waited" -eq 0 ]; then
-		echo "entrypoint: port 5060 is busy; waiting for it to be released..."
+occupied=""
+for protocol in u t; do
+	# $4 is the local address; $5 is the peer, and using it would mean this
+	# check never fires. NR>1 drops the header row.
+	if ss -ln"$protocol" 2>/dev/null | awk 'NR>1 {print $4}' | grep -qE '(^|:)5060$'; then
+		occupied="$occupied $protocol"
 	fi
-	sleep 1
-	waited=$((waited + 1))
-	occupied="$(port_5060_owner)"
 done
-if [ -n "$occupied" ] && [ "$waited" -gt 0 ]; then
-	echo "entrypoint: port 5060 still busy after ${waited}s." >&2
-fi
 if [ -n "$occupied" ]; then
 	echo "entrypoint: port 5060 is already in use on this host ($occupied)." >&2
 	echo "entrypoint: this container uses host networking, so it cannot bind it." >&2
