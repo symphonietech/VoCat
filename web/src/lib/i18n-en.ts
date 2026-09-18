@@ -82,6 +82,7 @@ export const EN_DICT: Record<string, string> = {
   "已挂断": "Hung up",
   "拨号键盘": "Keypad",
   "按键音": "Tones",
+  "值（保存后不再回显）": "Value (never shown again once saved)",
   "通话接通后可发送按键音": "Tones can be sent once the call is answered",
   "退格": "Back",
   "通话记录": "Call history",
