@@ -387,3 +387,65 @@ func TestRedactSecretsRemovesEveryCredential(t *testing.T) {
 		t.Errorf("empty text became %q", got)
 	}
 }
+
+// Redaction must not reach the request. A credential is hidden from the API
+// and from the stored reply, and still has to arrive at the gateway verbatim
+// or the whole feature stops sending.
+func TestRunScheduleSendsTheRealCredentialAndStoresNeither(t *testing.T) {
+	ctx := context.Background()
+	scheduler, database := newTestScheduler(t)
+
+	const secret = "s3cret-gateway-pass"
+	var gotBody map[string]string
+	var gotAuth string
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("X-Api-Key")
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusOK)
+		// A gateway that echoes the request back is the case that put the
+		// credential into the stored reply in the first place.
+		_, _ = w.Write([]byte(`{"ok":true,"echo":"password=` + secret + `"}`))
+	}))
+	defer gateway.Close()
+
+	headers, _ := json.Marshal([]Pair{{Key: "X-Api-Key", Value: secret}})
+	body, _ := json.Marshal([]Pair{
+		{Key: "to", Value: "{{to}}"},
+		{Key: "password", Value: secret},
+	})
+	if _, err := database.UpsertSMSTestEndpoint(ctx, store.SMSTestEndpoint{
+		ID: "ep1", Name: "gateway", Method: http.MethodPost, URL: gateway.URL,
+		Headers: string(headers), BodyParams: string(body),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	schedule, err := database.UpsertSMSTestSchedule(ctx, store.SMSTestSchedule{
+		ID: "sc1", EndpointID: "ep1", Recipient: "+15551230000",
+		ContentTemplate: "Your code is {{code}}", IsExternal: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := scheduler.RunSchedule(ctx, schedule)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The gateway got the real thing, in both a header and a body parameter.
+	if gotAuth != secret {
+		t.Errorf("the gateway received header %q, want the real credential", gotAuth)
+	}
+	if gotBody["password"] != secret {
+		t.Errorf("the gateway received body password %q, want the real credential", gotBody["password"])
+	}
+	if gotBody["to"] != "+15551230000" {
+		t.Errorf("the recipient did not substitute: %q", gotBody["to"])
+	}
+	// And the record of it carries neither.
+	if strings.Contains(result.SendResponse, secret) {
+		t.Fatalf("the credential was stored in the result: %s", result.SendResponse)
+	}
+	if !strings.Contains(result.SendResponse, `"ok":true`) {
+		t.Fatalf("the reply was mangled rather than redacted: %s", result.SendResponse)
+	}
+}
