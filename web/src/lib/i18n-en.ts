@@ -69,6 +69,13 @@ export const EN_DICT: Record<string, string> = {
   "还没有分机": "No extensions yet",
   "生成的来电拨号方案": "Generated inbound dialplan",
   "进行中的通道": "Live channels",
+  "注册变更记录": "Registration history",
+  "未记录": "Not recording",
+  "还没有注册变更。只有状态改变时才会记录，稳定的分机不会产生记录。":
+    "No registration changes yet. Only changes are recorded, so a stable extension produces none.",
+  "未配置管理接口，因此不会记录注册变更。":
+    "The manager interface is not configured, so registration changes are not recorded.",
+  "展开": "Show",
   "无法读取通道": "Could not read channels",
   "已挂断": "Hung up",
   "拨号键盘": "Keypad",

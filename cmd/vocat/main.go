@@ -714,6 +714,7 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 	handler.StartSMSNotificationDispatchers(pollContext)
 	go handler.StartCellularCallMonitor(pollContext)
 	go handler.StartCallRecorder(pollContext)
+	go handler.StartRegistrationRecorder(pollContext)
 	handler.StartAutomaticTasks(pollContext)
 
 	serverConfig := func(handler http.Handler) *http.Server {

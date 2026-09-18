@@ -664,6 +664,34 @@ ordinary case, a channel that ended between the poll and the click.
 Hang-ups use Q.850 cause 16, normal clearing — the call ended the way a call
 normally ends, which is what pressing a button means.
 
+### Registration history
+
+The page shows what is true now, which answers "is it registered" and not
+"when did it stop". A handset that drops for ninety seconds every hour is
+invisible unless someone happens to be watching at that moment.
+
+So a recorder samples contact state every thirty seconds, whether anyone is
+looking or not, and writes **one row per change** — not one per poll. A table
+with a row every thirty seconds answers "was it up at 03:14" and buries the
+thing anyone actually looks for.
+
+Four details that keep the history honest:
+
+- **Seeded from what was last recorded.** Without that, the first poll after a
+  restart writes a change for every contact that did not change.
+- **A PBX that is down records nothing.** That is the recorder's view of the
+  world, not the handsets', and filling the history with it would drown the
+  real transitions.
+- **An unqualified contact is skipped.** A contact with no status yet would
+  otherwise produce a transition every time Asterisk restarts, which says
+  nothing about the handset.
+- **A contact that vanishes is recorded as `Unregistered`.** Asterisk simply
+  stops mentioning one that has gone, so absence is the only signal there is.
+
+Kept for 30 days. `GET /api/asterisk/registrations` reads it, and the response
+says whether recording is on at all — an empty list on a PBX with no manager
+interface means "off", not "quiet", and the two look identical otherwise.
+
 ### Why AMI rather than a shell
 
 VoCat runs in its own container. Reading `asterisk -rx` output would mean

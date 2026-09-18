@@ -4,6 +4,7 @@ import type {
   AsteriskExtensionCandidate,
   AsteriskExtensions,
   AsteriskInbound,
+  AsteriskRegistration,
   AsteriskRoute,
   AsteriskRoutes,
   AsteriskStatus,
@@ -241,6 +242,15 @@ export function hangupAsteriskChannel(channel: string, cause?: number) {
     method: "POST",
     body: { channel, cause },
   });
+}
+
+// Registration changes over time. "recording" says whether history is being
+// collected at all, so an empty list on a PBX with no manager interface reads
+// as off rather than quiet.
+export function getAsteriskRegistrations(limit = 50) {
+  return api<{ registrations: AsteriskRegistration[]; recording: boolean }>(
+    `/asterisk/registrations?limit=${limit}`,
+  );
 }
 
 export function getAsteriskRoutes() {

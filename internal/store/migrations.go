@@ -522,6 +522,28 @@ func migrationStatements(version int) []string {
 			`CREATE INDEX IF NOT EXISTS call_records_device_idx
 				ON call_records(device_id, started_at DESC)`,
 		}
+	case 27:
+		return []string{
+			// Registration history: one row per state change of an endpoint's
+			// contact, not one per poll. A handset that flaps is otherwise
+			// visible only to whoever happens to be watching the page at the
+			// moment it happens.
+			`CREATE TABLE IF NOT EXISTS asterisk_registrations (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				endpoint TEXT NOT NULL,
+				contact_uri TEXT NOT NULL DEFAULT '',
+				status TEXT NOT NULL DEFAULT '',
+				previous_status TEXT NOT NULL DEFAULT '',
+				user_agent TEXT NOT NULL DEFAULT '',
+				via_address TEXT NOT NULL DEFAULT '',
+				roundtrip_ms REAL NOT NULL DEFAULT 0,
+				changed_at INTEGER NOT NULL
+			)`,
+			`CREATE INDEX IF NOT EXISTS asterisk_registrations_changed_idx
+				ON asterisk_registrations(changed_at DESC, id DESC)`,
+			`CREATE INDEX IF NOT EXISTS asterisk_registrations_endpoint_idx
+				ON asterisk_registrations(endpoint, changed_at DESC)`,
+		}
 	default:
 		return nil
 	}

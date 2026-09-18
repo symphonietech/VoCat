@@ -8,6 +8,7 @@ import { RouteEditor } from "./asterisk/RouteEditor";
 import { ExtensionEditor } from "./asterisk/ExtensionEditor";
 import { InboundEditor } from "./asterisk/InboundEditor";
 import { ChannelList } from "./asterisk/ChannelList";
+import { RegistrationHistory } from "./asterisk/RegistrationHistory";
 import { usePolling } from "../lib/usePolling";
 import { useI18n } from "../lib/i18n";
 
@@ -179,6 +180,8 @@ export default function AsteriskPage() {
               ))}
             </Section>
           ) : null}
+
+          <RegistrationHistory />
 
           {status.contactsError ? (
             <p className="mt-3 text-xs text-amber-600 dark:text-amber-400">

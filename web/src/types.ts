@@ -673,6 +673,20 @@ export type AsteriskStatus = {
   channelsError?: string;
 };
 
+// One change in an endpoint contact's state. Recorded whether or not anyone
+// is looking, which is the point: a handset that drops for ninety seconds an
+// hour is invisible to a page you have to be watching.
+export type AsteriskRegistration = {
+  endpoint: string;
+  contactUri?: string;
+  status?: string;
+  previousStatus?: string;
+  userAgent?: string;
+  viaAddress?: string;
+  roundtripMs?: number;
+  changedAt: string;
+};
+
 export type AsteriskRoute = {
   pattern: string;
   devices: string[];
