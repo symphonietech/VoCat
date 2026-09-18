@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -230,5 +231,87 @@ func TestAsteriskExtensionsAreStoredSensitive(t *testing.T) {
 	}
 	if strings.Contains(string(setting.Redacted().Value), "correct-horse-battery") {
 		t.Fatal("the redacted setting still carries the password")
+	}
+}
+
+// Saving writes both files from the same list. An account that exists in one
+// and not the other registers fine and is not dialable, and nothing anywhere
+// says why -- which is the whole reason they are generated together.
+func TestAsteriskExtensionsWritesBothFiles(t *testing.T) {
+	server, _, dir := extensionsTestServer(t)
+	if code := putExtensions(t, server,
+		`{"extensions":[{"name":"1001","password":"correct-horse-battery","max_contacts":2},`+
+			`{"name":"1003","password":"correct-horse-battery","max_contacts":1}]}`).Code; code != http.StatusOK {
+		t.Fatalf("PUT status = %d", code)
+	}
+	endpoints, err := os.ReadFile(filepath.Join(dir, endpointsFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	internal, err := os.ReadFile(filepath.Join(dir, internalFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"1001", "1003"} {
+		if !strings.Contains(string(endpoints), "["+name+"]\ntype=endpoint\n") {
+			t.Errorf("%s has no endpoint:\n%s", name, endpoints)
+		}
+		if !strings.Contains(string(internal), "exten => "+name+",1,Dial(PJSIP/"+name+",30)\n") {
+			t.Errorf("%s is not dialable from another handset:\n%s", name, internal)
+		}
+	}
+	// The dialplan half carries no secret, so it is not the file that needs
+	// 0600 -- but it must not carry one either.
+	if strings.Contains(string(internal), "correct-horse-battery") {
+		t.Fatalf("the internal dialplan carries a password:\n%s", internal)
+	}
+}
+
+// Removing an account has to remove it from both, or a deleted extension
+// stays dialable and Asterisk tries to ring an endpoint that is gone.
+func TestAsteriskExtensionsRemovesFromBothFiles(t *testing.T) {
+	server, _, dir := extensionsTestServer(t)
+	putExtensions(t, server,
+		`{"extensions":[{"name":"1001","password":"correct-horse-battery","max_contacts":2},`+
+			`{"name":"1003","password":"correct-horse-battery","max_contacts":1}]}`)
+	if code := putExtensions(t, server,
+		`{"extensions":[{"name":"1001","max_contacts":2}]}`).Code; code != http.StatusOK {
+		t.Fatal("removing an account was refused")
+	}
+	endpoints, _ := os.ReadFile(filepath.Join(dir, endpointsFileName))
+	internal, _ := os.ReadFile(filepath.Join(dir, internalFileName))
+	if strings.Contains(string(endpoints), "[1003]") {
+		t.Errorf("the removed account still has an endpoint:\n%s", endpoints)
+	}
+	if strings.Contains(string(internal), "1003") {
+		t.Errorf("the removed account is still dialable:\n%s", internal)
+	}
+}
+
+// Pending drives the Apply button. A dialplan file that is stale while the
+// endpoints file matches is exactly the state that leaves a new account
+// registering and unreachable, so it has to count.
+func TestAsteriskExtensionsPendingCoversBothFiles(t *testing.T) {
+	server, _, dir := extensionsTestServer(t)
+	putExtensions(t, server, `{"extensions":[{"name":"1001","password":"correct-horse-battery","max_contacts":2}]}`)
+	if pending, _ := getExtensions(t, server)["pending"].(bool); pending {
+		t.Fatal("pending right after a save that wrote both files")
+	}
+	if err := os.WriteFile(filepath.Join(dir, internalFileName), []byte("; stale\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if pending, _ := getExtensions(t, server)["pending"].(bool); !pending {
+		t.Fatal("a stale dialplan file was not reported as pending")
+	}
+}
+
+// The dialplan half has no secret in it and is the half someone reads to
+// answer "why can 1001 not reach 1003", so it is shown whole.
+func TestAsteriskExtensionsReturnsTheInternalPreview(t *testing.T) {
+	server, _, _ := extensionsTestServer(t)
+	putExtensions(t, server, `{"extensions":[{"name":"1001","password":"correct-horse-battery","max_contacts":2}]}`)
+	preview, _ := getExtensions(t, server)["internal_preview"].(string)
+	if !strings.Contains(preview, "exten => 1001,1,Dial(PJSIP/1001,30)") {
+		t.Fatalf("internal preview = %q", preview)
 	}
 }

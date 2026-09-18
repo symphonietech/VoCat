@@ -190,7 +190,8 @@ export function ExtensionEditor() {
       </div>
 
       <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
-        {t("密码至少")} {state?.minPasswordLength ?? 12} {t("位，保存后不再回显；设备数是可同时注册的终端数量")}
+        {t("密码至少")} {state?.minPasswordLength ?? 12}{" "}
+        {t("位，保存后不再回显；设备数是可同时注册的终端数量。分机之间可直接互拨。")}
         {state?.path ? ` · ${state.path}` : ""}
       </p>
 
@@ -201,6 +202,19 @@ export function ExtensionEditor() {
           </summary>
           <pre className="mt-2 overflow-x-auto rounded-lg bg-slate-50 p-3 text-xs dark:bg-slate-800/50">
             {state.preview}
+          </pre>
+        </details>
+      ) : null}
+
+      {state?.internalPreview ? (
+        // The half that answers "why can 1001 not reach 1003". Generated from
+        // the same list, so an account cannot exist without being dialable.
+        <details className="mt-2">
+          <summary className="cursor-pointer text-xs text-sky-600 dark:text-sky-400">
+            {t("生成的内线拨号方案")}
+          </summary>
+          <pre className="mt-2 overflow-x-auto rounded-lg bg-slate-50 p-3 text-xs dark:bg-slate-800/50">
+            {state.internalPreview}
           </pre>
         </details>
       ) : null}

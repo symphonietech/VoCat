@@ -149,6 +149,21 @@ fi
 # older deployment seeded one before this line existed.
 chmod 600 /etc/asterisk/vocat/endpoints.conf
 
+# The matching dialplan half, so the seeded account can be dialled from
+# another handset. extensions.conf includes it unconditionally; without the
+# file, [vocat-internal] is undefined and from-internal includes a context
+# that does not exist.
+if [ ! -f /etc/asterisk/vocat/internal.conf ]; then
+	{
+		echo "; Seeded by entrypoint.sh alongside the extension above."
+		echo "; VoCat replaces this file when extensions are saved in the web UI."
+		echo ""
+		echo "[vocat-internal]"
+		echo "exten => $ASTERISK_SIP_USER,1,Dial(PJSIP/$ASTERISK_SIP_USER,30)"
+		echo " same => n,Hangup()"
+	} > /etc/asterisk/vocat/internal.conf
+fi
+
 echo "entrypoint: trunk=$VOCAT_TRUNK_HOST device=${VOCAT_DEVICE:-<auto>} extension=$ASTERISK_SIP_USER"
 echo "entrypoint: manager interface (AMI) enabled=$ASTERISK_AMI_ENABLED"
 echo "entrypoint: PJSIP is the only SIP driver here; chan_sip is noloaded."

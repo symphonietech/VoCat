@@ -174,3 +174,83 @@ func TestExtensionBoundsTheContactCount(t *testing.T) {
 		}
 	}
 }
+
+// Exact extensions, not a pattern. A pattern has to guess the numbering plan,
+// and guessing wrong either leaves an account undialable or dials an endpoint
+// Asterisk has never heard of.
+func TestRenderInternalDialplanDialsEachAccountExactly(t *testing.T) {
+	first, second := validExtension(), validExtension()
+	second.Name = "1002"
+	rendered, err := RenderInternalDialplan([]Extension{second, first})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(rendered, "["+InternalContext+"]\n") {
+		t.Fatalf("wrong context:\n%s", rendered)
+	}
+	for _, want := range []string{
+		"exten => 1001,1,Dial(PJSIP/1001,30)\n same => n,Hangup()\n",
+		"exten => 1002,1,Dial(PJSIP/1002,30)\n same => n,Hangup()\n",
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Errorf("missing %q:\n%s", want, rendered)
+		}
+	}
+	// No "@vocat": that suffix is what sends a call out through the trunk,
+	// and an internal call must stay on the PBX.
+	if strings.Contains(rendered, "@vocat") {
+		t.Fatalf("an internal call was routed to the trunk:\n%s", rendered)
+	}
+	// Sorted, so the file has a stable diff regardless of input order.
+	if strings.Index(rendered, "exten => 1001") > strings.Index(rendered, "exten => 1002") {
+		t.Fatalf("output is not sorted:\n%s", rendered)
+	}
+}
+
+// pjsip.conf and extensions.conf both include their generated file
+// unconditionally, so an empty list must still produce a parseable context.
+func TestRenderInternalDialplanHandlesAnEmptyList(t *testing.T) {
+	rendered, err := RenderInternalDialplan(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(rendered, "["+InternalContext+"]") {
+		t.Fatalf("the context is missing, so from-internal would include nothing:\n%s", rendered)
+	}
+	if strings.Contains(rendered, "exten =>") {
+		t.Fatalf("an empty list produced an extension:\n%s", rendered)
+	}
+}
+
+// Internal dialling is consulted before the outbound routes, so an account
+// named after an emergency number would shadow the route that reaches it --
+// discovered only by someone dialling it for real.
+func TestExtensionRefusesEmergencyNumbers(t *testing.T) {
+	for _, name := range []string{"911", "933", "112", "999", "000", "110", "119"} {
+		extension := validExtension()
+		extension.Name = name
+		if err := extension.Validate(); err == nil {
+			t.Errorf("emergency number %q was accepted as an extension", name)
+		}
+	}
+	// Not a blanket ban on numbers that merely start with one of them.
+	extension := validExtension()
+	extension.Name = "9110"
+	if err := extension.Validate(); err != nil {
+		t.Errorf("9110 was refused: %v", err)
+	}
+}
+
+// Both files come from one list, so a rejected account must stop both --
+// otherwise one of them is written from a list the other refused.
+func TestRenderInternalDialplanRefusesWhatEndpointsRefuse(t *testing.T) {
+	bad := validExtension()
+	bad.Name = "vocat"
+	if _, err := RenderInternalDialplan([]Extension{bad}); err == nil {
+		t.Fatal("a reserved name was rendered into the dialplan")
+	}
+	duplicate := validExtension()
+	if _, err := RenderInternalDialplan([]Extension{validExtension(), duplicate}); err == nil {
+		t.Fatal("a duplicate was rendered into the dialplan")
+	}
+}

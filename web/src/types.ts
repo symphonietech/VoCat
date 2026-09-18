@@ -650,6 +650,9 @@ export type AsteriskExtensions = {
   // preview is the PJSIP configuration these render to, with the password
   // lines masked.
   preview?: string;
+  // internalPreview is the extension-to-extension dialplan generated from the
+  // same list. No secret in it, so it is shown whole.
+  internalPreview?: string;
   pending?: boolean;
   path?: string;
   canApply?: boolean;

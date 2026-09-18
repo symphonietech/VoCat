@@ -723,11 +723,53 @@ routes. Each row is a name, a password, an optional display name, and how
 many devices may register it at once; **Apply** reloads PJSIP so the change
 takes effect without restarting the container.
 
-VoCat renders them into `endpoints.conf` in the directory both containers
-share, and `pjsip.conf` includes it. One account is three PJSIP objects with
-the same name — the endpoint (what it may do), the auth (how it proves who it
-is) and the AOR (where it is) — which is how PJSIP models an account; they are
+VoCat renders them into two files in the directory both containers share:
+`endpoints.conf`, which `pjsip.conf` includes, and `internal.conf`, which
+`extensions.conf` includes. One account is three PJSIP objects with the same
+name — the endpoint (what it may do), the auth (how it proves who it is) and
+the AOR (where it is) — which is how PJSIP models an account; they are
 generated together so a missing one cannot happen.
+
+### Dialling another extension
+
+Saving also writes `internal.conf`, a `[vocat-internal]` dialplan context with
+one exact-match rule per account:
+
+```
+exten => 1002,1,Dial(PJSIP/1002,30)
+ same => n,Hangup()
+```
+
+Note the absence of `@vocat`. That suffix is what sends a call out through the
+trunk to a SIM; an internal call stays on the PBX.
+
+`[from-internal]` includes `vocat-internal` **before** `vocat-routes`, and the
+order is what makes this work. Asterisk searches a context's own extensions
+first, and only then walks its includes — taking the first include that
+matches, not the best match across all of them. So `1002` resolves in the
+internal context and never reaches the route patterns, while `12125551234`
+matches nothing internal and falls through to the routes.
+
+Exact rules rather than a pattern like `_1XXX`, because a pattern has to guess
+the numbering plan: guess too narrow and an account is silently not dialable,
+guess too wide and Asterisk tries to ring an endpoint that does not exist. The
+account list is right there, so neither is necessary.
+
+Both files come from that one list, which is the point — adding 1003 in the UI
+makes it registerable *and* dialable from 1001 in the same Apply, with no
+second file to remember. Apply therefore reloads two modules: `res_pjsip` for
+the accounts and `pbx_config` for the dialplan. Reloading only the first would
+leave a new account registering perfectly and unreachable from every handset.
+
+Emergency numbers — `911`, `933`, `112`, `999`, `000`, `110`, `119` — are
+refused as extension names. Internal dialling is consulted first, so an
+account called `911` would shadow the route that reaches emergency services,
+and the only way to discover that is to dial it for real.
+
+The same shadowing is possible with any name that collides with a number you
+route outbound: an extension named `18005551212` would ring a handset instead
+of placing the call. Emergency numbers are guarded because the consequence is
+not recoverable; the rest is left to whoever picks the numbering plan.
 
 ### Passwords are write-only
 

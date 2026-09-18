@@ -29,6 +29,13 @@ type Extension struct {
 const (
 	// ExtensionsContext is where every generated extension is placed.
 	ExtensionsContext = "from-internal"
+	// InternalContext holds extension-to-extension dialling. The shipped
+	// extensions.conf includes it from ExtensionsContext ahead of the
+	// outbound routes.
+	InternalContext = "vocat-internal"
+	// internalRingSeconds is how long an internal call rings. Short: the
+	// caller is in the same building and can see whether anyone is there.
+	internalRingSeconds = 30
 
 	// MinPasswordLength matches the check the Asterisk entrypoint makes on
 	// the seeded account. A SIP registrar on a public address is scanned
@@ -51,6 +58,23 @@ var reservedNames = map[string]bool{
 	"global":        true,
 	"system":        true,
 	"general":       true,
+}
+
+// emergencyNames are refused as extension names. Internal dialling is
+// consulted before the outbound routes, so an account with one of these names
+// would shadow the route that reaches emergency services -- silently, and
+// only discovered by someone dialling it for real.
+//
+// The list is deliberately short and covers the numbers reachable from the
+// networks these SIMs sit on. It is not an attempt at every country.
+var emergencyNames = map[string]bool{
+	"911": true, // North America
+	"933": true, // North America, E911 address verification
+	"112": true, // EU, GSM standard
+	"999": true, // UK, Ireland, Hong Kong
+	"000": true, // Australia
+	"110": true, // China, Japan (police)
+	"119": true, // China, Japan, Korea (fire and ambulance)
 }
 
 // extensionRune matches a SIP username. Deliberately narrower than the RFC
@@ -105,6 +129,9 @@ func (e Extension) Validate() error {
 		return errors.New("extension name is too long")
 	case reservedNames[strings.ToLower(name)]:
 		return fmt.Errorf("%q is reserved by the shipped configuration", name)
+	case emergencyNames[name]:
+		return fmt.Errorf("%q is an emergency number; an extension with that name would "+
+			"shadow the route that reaches it", name)
 	}
 	for _, value := range name {
 		if !extensionRune(value) {
@@ -213,6 +240,55 @@ func RenderExtensions(extensions []Extension) (string, error) {
 		// Without this the contact reads NonQual for ever and the Asterisk
 		// page can never say whether the phone is actually there.
 		out.WriteString("qualify_frequency=60\n\n")
+	}
+	return out.String(), nil
+}
+
+// RenderInternalDialplan builds the extension-to-extension context.
+//
+// One exact-match extension per account rather than a pattern: a pattern has
+// to guess the numbering plan, and guessing wrong either misses an account
+// (it is not dialable and nothing says why) or matches one that does not
+// exist (Asterisk dials an endpoint it has never heard of). The account list
+// is right here, so neither is necessary.
+//
+// [from-internal] includes this context before the outbound routes. Asterisk
+// consults a context's own extensions first and then walks its includes in
+// order, taking the first include that matches -- not the best match across
+// all of them -- so an exact extension here wins over any route pattern.
+func RenderInternalDialplan(extensions []Extension) (string, error) {
+	if len(extensions) > MaxExtensions {
+		return "", fmt.Errorf("too many extensions (%d, limit %d)", len(extensions), MaxExtensions)
+	}
+	names := make([]string, 0, len(extensions))
+	seen := map[string]bool{}
+	for index, extension := range extensions {
+		if err := extension.Validate(); err != nil {
+			return "", fmt.Errorf("extension %d (%s): %w", index+1, extension.Name, err)
+		}
+		name := strings.TrimSpace(extension.Name)
+		if seen[strings.ToLower(name)] {
+			return "", fmt.Errorf("extension %s appears more than once", name)
+		}
+		seen[strings.ToLower(name)] = true
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	var out strings.Builder
+	out.WriteString(GeneratedHeader + " Edits here are overwritten on the next Apply.\n")
+	out.WriteString(";\n")
+	out.WriteString("; Extension-to-extension dialling, generated from the same account list\n")
+	out.WriteString("; as endpoints.conf so an account cannot exist without being dialable.\n\n")
+	fmt.Fprintf(&out, "[%s]\n", InternalContext)
+	if len(names) == 0 {
+		out.WriteString("; No extensions configured. This context matches nothing, so every\n")
+		out.WriteString("; number falls through to the outbound routes.\n")
+		return out.String(), nil
+	}
+	for _, name := range names {
+		fmt.Fprintf(&out, "exten => %s,1,Dial(PJSIP/%s,%d)\n", name, name, internalRingSeconds)
+		out.WriteString(" same => n,Hangup()\n")
 	}
 	return out.String(), nil
 }

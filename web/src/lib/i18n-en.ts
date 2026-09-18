@@ -45,9 +45,10 @@ export const EN_DICT: Record<string, string> = {
   "显示名": "Display name",
   "同时注册的设备数": "Devices that may register at once",
   "密码至少": "Passwords are at least",
-  "位，保存后不再回显；设备数是可同时注册的终端数量":
-    "characters and are never shown again; the last column is how many devices may register at once",
+  "位，保存后不再回显；设备数是可同时注册的终端数量。分机之间可直接互拨。":
+    "characters and are never shown again; the last column is how many devices may register at once. Extensions can dial each other directly.",
   "生成的 PJSIP 配置": "Generated PJSIP configuration",
+  "生成的内线拨号方案": "Generated internal dialplan",
   "中继（VoCat）": "Trunk (VoCat)",
   "Asterisk 中没有名为 vocat 的中继端点": "Asterisk has no endpoint named vocat",
   "分机": "Extensions",

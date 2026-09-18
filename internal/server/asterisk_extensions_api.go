@@ -25,6 +25,11 @@ const asteriskExtensionsKey = "asterisk.extensions"
 // are PJSIP objects, which is a different file and a different reload.
 const endpointsFileName = "endpoints.conf"
 
+// internalFileName holds the extension-to-extension dialplan, generated from
+// the same account list. Two files because they are two different Asterisk
+// subsystems with two different reloads, not because they have two sources.
+const internalFileName = "internal.conf"
+
 // asteriskExtension is the wire shape. The password is write-only: it is
 // accepted on PUT and never returned, so a browser session that can read the
 // page cannot read the SIP credentials out of it.
@@ -129,6 +134,64 @@ func (s *Server) asteriskEndpointsPath() string {
 	return filepath.Join(s.asteriskDialplanDir, endpointsFileName)
 }
 
+func (s *Server) asteriskInternalPath() string {
+	if strings.TrimSpace(s.asteriskDialplanDir) == "" {
+		return ""
+	}
+	return filepath.Join(s.asteriskDialplanDir, internalFileName)
+}
+
+// renderAsteriskExtensions produces both generated files. They always move
+// together: an account that exists in one and not the other registers fine
+// and is not dialable, with nothing anywhere saying why.
+func renderAsteriskExtensions(extensions []asteriskExtension) (endpoints, internal string, err error) {
+	config := toConfigExtensions(extensions)
+	if endpoints, err = asteriskconf.RenderExtensions(config); err != nil {
+		return "", "", err
+	}
+	if internal, err = asteriskconf.RenderInternalDialplan(config); err != nil {
+		return "", "", err
+	}
+	return endpoints, internal, nil
+}
+
+// writeAsteriskExtensionFiles writes both, endpoints first. Neither ordering
+// is atomic across the pair, and this one fails on the side that is merely
+// unreachable rather than the side that would let a stale account register.
+func (s *Server) writeAsteriskExtensionFiles(endpoints, internal string) error {
+	if path := s.asteriskEndpointsPath(); path != "" {
+		if err := writeAsteriskSecretFile(path, endpoints); err != nil {
+			return err
+		}
+	}
+	if path := s.asteriskInternalPath(); path != "" {
+		// No secret in this one, so it matches the routes file rather than
+		// the endpoints file.
+		if err := writeAsteriskRoutesFile(path, internal); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// asteriskExtensionFilesDiffer reports whether either generated file is out
+// of step with what the stored accounts render to.
+func (s *Server) asteriskExtensionFilesDiffer(endpoints, internal string) bool {
+	for path, want := range map[string]string{
+		s.asteriskEndpointsPath(): endpoints,
+		s.asteriskInternalPath():  internal,
+	} {
+		if path == "" {
+			continue
+		}
+		current, err := os.ReadFile(path)
+		if err != nil || string(current) != want {
+			return true
+		}
+	}
+	return false
+}
+
 // asteriskEndpointsAreSeeded reports whether the file Asterisk is using came
 // from the container entrypoint rather than from VoCat. The entrypoint writes
 // the account in .env on first start, and until something is saved here that
@@ -153,24 +216,28 @@ func (s *Server) handleGetAsteriskExtensions(w http.ResponseWriter, r *http.Requ
 		"can_apply":           strings.TrimSpace(s.asteriskAMI.Address) != "",
 		"min_password_length": asteriskconf.MinPasswordLength,
 	}
-	rendered, err := asteriskconf.RenderExtensions(toConfigExtensions(extensions))
+	endpoints, internal, err := renderAsteriskExtensions(extensions)
 	if err != nil {
 		payload["error"] = err.Error()
 	} else {
-		payload["preview"] = redactPasswords(rendered)
+		payload["preview"] = redactPasswords(endpoints)
+		// The dialplan half has no secret in it, so it is shown whole. It is
+		// also the half someone reads to answer "why can 1001 not reach
+		// 1003", which is the question this file exists for.
+		payload["internal_preview"] = internal
+		if s.asteriskDialplanDir != "" {
+			payload["pending"] = s.asteriskExtensionFilesDiffer(endpoints, internal)
+		}
 	}
-	current, readErr := os.ReadFile(s.asteriskEndpointsPath())
-	switch {
-	case s.asteriskEndpointsPath() == "":
-	case readErr != nil:
-		payload["pending"] = true
-	default:
-		payload["pending"] = err == nil && string(current) != rendered
-		// A file Asterisk is using that VoCat did not write is the account
-		// the container seeded from the environment on first start. Saving
-		// here replaces it, so the page has to say so before it happens
-		// rather than after the handset stops registering.
-		payload["seeded"] = !strings.HasPrefix(string(current), asteriskconf.GeneratedHeader)
+	if path := s.asteriskEndpointsPath(); path != "" {
+		if current, readErr := os.ReadFile(path); readErr == nil {
+			// A file Asterisk is using that VoCat did not write is the
+			// account the container seeded from the environment on first
+			// start. Saving here replaces it, so the page has to say so
+			// before it happens rather than after the handset stops
+			// registering.
+			payload["seeded"] = !strings.HasPrefix(string(current), asteriskconf.GeneratedHeader)
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"data": payload})
 }
@@ -225,7 +292,7 @@ func (s *Server) handlePutAsteriskExtensions(w http.ResponseWriter, r *http.Requ
 	}
 	// Render before storing. A rejected account must not be saved, or the
 	// page would show one that can never be applied.
-	rendered, err := asteriskconf.RenderExtensions(toConfigExtensions(merged))
+	rendered, internal, err := renderAsteriskExtensions(merged)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_extension", err.Error())
 		return
@@ -242,10 +309,10 @@ func (s *Server) handlePutAsteriskExtensions(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	written := false
-	if path := s.asteriskEndpointsPath(); path != "" {
-		if err := writeAsteriskSecretFile(path, rendered); err != nil {
-			s.logger.Error("could not write the Asterisk endpoints file",
-				"category", "siptrunk", "path", path, "error", err)
+	if s.asteriskDialplanDir != "" {
+		if err := s.writeAsteriskExtensionFiles(rendered, internal); err != nil {
+			s.logger.Error("could not write the Asterisk extension files",
+				"category", "siptrunk", "dir", s.asteriskDialplanDir, "error", err)
 			writeError(w, http.StatusInternalServerError, "write_failed", err.Error())
 			return
 		}
@@ -254,8 +321,9 @@ func (s *Server) handlePutAsteriskExtensions(w http.ResponseWriter, r *http.Requ
 	s.recordAudit(r.Context(), "admin", "asterisk.extensions.save", "asterisk", "extensions", "success", "")
 	writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{
 		"saved": true, "written": written,
-		"extensions": withoutPasswords(merged),
-		"preview":    redactPasswords(rendered),
+		"extensions":       withoutPasswords(merged),
+		"preview":          redactPasswords(rendered),
+		"internal_preview": internal,
 	}})
 }
 
@@ -288,18 +356,21 @@ func writeAsteriskSecretFile(path, contents string) error {
 func (s *Server) handleApplyAsteriskExtensions(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(s.asteriskAMI.Address) == "" {
 		writeError(w, http.StatusNotImplemented, "ami_not_configured",
-			"the Asterisk manager interface is not configured, so VoCat cannot reload PJSIP; "+
+			"the Asterisk manager interface is not configured, so VoCat cannot reload Asterisk; "+
 				"run `docker compose restart asterisk` instead")
 		return
 	}
 	extensions := s.storedAsteriskExtensions(r.Context())
-	rendered, err := asteriskconf.RenderExtensions(toConfigExtensions(extensions))
+	rendered, internal, err := renderAsteriskExtensions(extensions)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_extension", err.Error())
 		return
 	}
-	if path := s.asteriskEndpointsPath(); path != "" {
-		if err := writeAsteriskSecretFile(path, rendered); err != nil {
+	// Re-render and rewrite first: applying what is on disk when it differs
+	// from what is stored would reload a stale account list and report
+	// success.
+	if s.asteriskDialplanDir != "" {
+		if err := s.writeAsteriskExtensionFiles(rendered, internal); err != nil {
 			writeError(w, http.StatusInternalServerError, "write_failed", err.Error())
 			return
 		}
@@ -314,19 +385,28 @@ func (s *Server) handleApplyAsteriskExtensions(w http.ResponseWriter, r *http.Re
 	}
 	defer conn.Close()
 
-	response, err := conn.Action(ctx, "Reload", ami.Message{"Module": "res_pjsip"})
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "reload_failed", err.Error())
-		return
-	}
-	if !strings.EqualFold(response.Get("Response"), "Success") {
-		writeError(w, http.StatusBadGateway, "reload_failed", response.First("Message", "Response"))
-		return
+	// Two modules, because saving an extension now writes two files: the
+	// accounts, which res_pjsip owns, and the internal dialplan, which
+	// pbx_config owns. Reloading only the first would leave a new account
+	// registering perfectly and unreachable from every other handset.
+	//
+	// res_pjsip first: an account that exists but is not yet dialable is a
+	// smaller window than one that is dialable and does not exist.
+	for _, module := range []string{"res_pjsip", "pbx_config"} {
+		response, err := conn.Action(ctx, "Reload", ami.Message{"Module": module})
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "reload_failed", module+": "+err.Error())
+			return
+		}
+		if !strings.EqualFold(response.Get("Response"), "Success") {
+			writeError(w, http.StatusBadGateway, "reload_failed",
+				module+": "+response.First("Message", "Response"))
+			return
+		}
 	}
 	s.recordAudit(r.Context(), "admin", "asterisk.extensions.apply", "asterisk", "extensions", "success", "")
 	writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{
 		"applied": true,
-		"message": response.First("Message"),
 		"at":      time.Now().UTC().Format(time.RFC3339),
 		// A phone re-registers on its own timer, so an account whose password
 		// just changed goes away and comes back rather than failing visibly.
