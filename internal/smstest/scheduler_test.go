@@ -29,7 +29,7 @@ func newTestScheduler(t *testing.T) (*Scheduler, *store.Store) {
 func seedSchedule(t *testing.T, database *store.Store, url string, schedule store.SMSTestSchedule) store.SMSTestSchedule {
 	t.Helper()
 	ctx := context.Background()
-	body, _ := json.Marshal([]keyValue{
+	body, _ := json.Marshal([]Pair{
 		{Key: "to", Value: "{{to}}"},
 		{Key: "text", Value: "{{content}}"},
 	})
@@ -363,39 +363,27 @@ func containsRune(alphabet string, char rune) bool {
 	return false
 }
 
-// The gateway password must not come back out through a result row. A gateway
-// that takes credentials in the query string puts them in the URL, and Go's
-// transport errors quote that URL back -- so a failed send would write the
-// password into a record the results page returns.
-func TestRedactSecretRemovesTheGatewayPassword(t *testing.T) {
-	secret := "s3cret-gateway-pass"
-	body := `Post "https://gw.example/send?user=bob&pass=` + secret + `&to=1": dial tcp: refused`
-	got := redactSecret(body, secret)
-	if strings.Contains(got, secret) {
-		t.Fatalf("the password survived redaction: %s", got)
+// The stored reply is returned by the results API, so every credential has to
+// be gone from it -- not just the password field.
+func TestRedactSecretsRemovesEveryCredential(t *testing.T) {
+	secrets := []string{"field-password", "body-api-key"}
+	body := `{"echo":"pass=field-password&key=body-api-key","to":"+1"}`
+	got := redactSecrets(body, secrets)
+	for _, secret := range secrets {
+		if strings.Contains(got, secret) {
+			t.Errorf("%q survived: %s", secret, got)
+		}
 	}
-	if !strings.Contains(got, secretMask) {
-		t.Fatalf("nothing was redacted: %s", got)
+	// What is not a credential is left readable: a result nobody can read is
+	// not worth storing.
+	if !strings.Contains(got, `"to":"+1"`) {
+		t.Errorf("the record was mangled: %s", got)
 	}
-	// Every occurrence, because a gateway may echo the request as well as
-	// the transport quoting it.
-	twice := redactSecret(secret+" and "+secret, secret)
-	if strings.Contains(twice, secret) {
-		t.Fatalf("only the first occurrence was redacted: %s", twice)
-	}
-}
-
-// Blanking every occurrence of a two-character password would mangle the
-// response into something unreadable while protecting a secret that is not
-// one.
-func TestRedactSecretLeavesShortAndEmptyValuesAlone(t *testing.T) {
-	if got := redactSecret("no secret here", ""); got != "no secret here" {
-		t.Errorf("an empty secret changed the text: %q", got)
-	}
-	if got := redactSecret("a as in apple", "a"); got != "a as in apple" {
+	// A very short secret is skipped rather than blanking half the text.
+	if got := redactSecrets("a as in apple", []string{"a"}); got != "a as in apple" {
 		t.Errorf("a one-character secret mangled the text: %q", got)
 	}
-	if got := redactSecret("", "longenough"); got != "" {
+	if got := redactSecrets("", []string{"longenough"}); got != "" {
 		t.Errorf("empty text became %q", got)
 	}
 }

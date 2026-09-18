@@ -530,10 +530,16 @@ blank value on update keeps what is stored.**
    value is removed and the entry is marked `"has_value": true`. A gateway
    that wants a password in a body parameter calls it one, and nothing else
    distinguishes it from the recipient number beside it.
-3. The gateway's own reply, stored per result in `send_response`, has the
-   endpoint password removed **before it is stored** — a gateway that takes
-   credentials in the query string puts them in the URL, and Go's transport
-   errors quote that URL back.
+3. The gateway's own reply, stored per result in `send_response`, has **every**
+   one of the endpoint's credentials removed before it is stored — the
+   password field and every credential-named header and body parameter. A
+   gateway that takes credentials in the query string puts them in the URL,
+   and Go's transport errors quote that URL back, so a failed send would
+   otherwise write one into a record the results endpoint returns.
+
+The endpoint's `url` is **not** redacted: it is how an operator identifies
+which gateway a definition points at. Put credentials in it through the
+`{{password}}` placeholder rather than literally, or they are readable there.
 
 Names treated as credentials, matched with case and punctuation ignored so
 `API-Key`, `api_key` and `apikey` are one entry:

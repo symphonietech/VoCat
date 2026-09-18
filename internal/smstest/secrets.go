@@ -1,15 +1,17 @@
-package server
+package smstest
 
 import (
 	"encoding/json"
 	"strings"
+
+	"vocat/internal/store"
 )
 
-// smsTestPair is one header or body parameter of an SMS gateway endpoint.
+// Pair is one header or body parameter of an SMS gateway endpoint.
 //
 // HasValue is set only on the way out, in place of a secret's value: the
 // editor needs to know a secret is stored without being told what it is.
-type smsTestPair struct {
+type Pair struct {
 	Key      string `json:"key"`
 	Value    string `json:"value"`
 	HasValue bool   `json:"has_value,omitempty"`
@@ -35,8 +37,8 @@ var secretParamKeys = map[string]bool{
 	"auth": true, "authorization": true, "credential": true,
 }
 
-// isSecretParamKey reports whether a parameter name holds a credential.
-func isSecretParamKey(key string) bool {
+// IsSecretParamKey reports whether a parameter name holds a credential.
+func IsSecretParamKey(key string) bool {
 	var builder strings.Builder
 	for _, value := range strings.ToLower(strings.TrimSpace(key)) {
 		if (value >= 'a' && value <= 'z') || (value >= '0' && value <= '9') {
@@ -46,23 +48,23 @@ func isSecretParamKey(key string) bool {
 	return secretParamKeys[builder.String()]
 }
 
-// decodeSMSTestPairs parses a stored header or body parameter list. Invalid
+// DecodePairs parses a stored header or body parameter list. Invalid
 // JSON returns ok false, and callers then leave the value exactly as it was:
 // this code redacts secrets, and silently rewriting something it could not
 // read would be a different job done badly.
-func decodeSMSTestPairs(raw string) ([]smsTestPair, bool) {
+func DecodePairs(raw string) ([]Pair, bool) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" || raw == "[]" {
 		return nil, true
 	}
-	var pairs []smsTestPair
+	var pairs []Pair
 	if err := json.Unmarshal([]byte(raw), &pairs); err != nil {
 		return nil, false
 	}
 	return pairs, true
 }
 
-func encodeSMSTestPairs(pairs []smsTestPair) string {
+func encodePairs(pairs []Pair) string {
 	if len(pairs) == 0 {
 		return "[]"
 	}
@@ -73,10 +75,10 @@ func encodeSMSTestPairs(pairs []smsTestPair) string {
 	return string(encoded)
 }
 
-// redactSMSTestPairs blanks the value of every credential parameter and marks
+// RedactPairs blanks the value of every credential parameter and marks
 // that one is stored. This is what the API returns.
-func redactSMSTestPairs(raw string) string {
-	pairs, ok := decodeSMSTestPairs(raw)
+func RedactPairs(raw string) string {
+	pairs, ok := DecodePairs(raw)
 	if !ok || len(pairs) == 0 {
 		// Nothing to redact, so the value is handed back byte for byte:
 		// turning "" into "[]" would be this function editing configuration
@@ -84,28 +86,28 @@ func redactSMSTestPairs(raw string) string {
 		return raw
 	}
 	for index := range pairs {
-		if !isSecretParamKey(pairs[index].Key) {
+		if !IsSecretParamKey(pairs[index].Key) {
 			continue
 		}
 		pairs[index].HasValue = pairs[index].Value != ""
 		pairs[index].Value = ""
 	}
-	return encodeSMSTestPairs(pairs)
+	return encodePairs(pairs)
 }
 
-// mergeSMSTestPairSecrets fills a blank credential value from what is stored,
+// MergePairSecrets fills a blank credential value from what is stored,
 // which is what makes a write-only field editable: the browser never had the
 // value, so it cannot send it back, and every edit to a neighbouring
 // parameter would otherwise wipe it.
 //
 // Matched by name and by how many times that name has appeared, so a list
 // with two parameters of the same name keeps them apart.
-func mergeSMSTestPairSecrets(incoming, stored string) string {
-	pairs, ok := decodeSMSTestPairs(incoming)
+func MergePairSecrets(incoming, stored string) string {
+	pairs, ok := DecodePairs(incoming)
 	if !ok || len(pairs) == 0 {
 		return incoming
 	}
-	previous, ok := decodeSMSTestPairs(stored)
+	previous, ok := DecodePairs(stored)
 	if !ok {
 		previous = nil
 	}
@@ -113,7 +115,7 @@ func mergeSMSTestPairSecrets(incoming, stored string) string {
 	for index := range pairs {
 		// has_value is an output marker; it must never be stored.
 		pairs[index].HasValue = false
-		if !isSecretParamKey(pairs[index].Key) {
+		if !IsSecretParamKey(pairs[index].Key) {
 			continue
 		}
 		name := strings.ToLower(strings.TrimSpace(pairs[index].Key))
@@ -126,12 +128,12 @@ func mergeSMSTestPairSecrets(incoming, stored string) string {
 			pairs[index].Value = value
 		}
 	}
-	return encodeSMSTestPairs(pairs)
+	return encodePairs(pairs)
 }
 
 // nthPairValue returns the value of the occurrence-th parameter with this
 // name, so two parameters sharing a name do not take each other's secret.
-func nthPairValue(pairs []smsTestPair, name string, occurrence int) (string, bool) {
+func nthPairValue(pairs []Pair, name string, occurrence int) (string, bool) {
 	count := 0
 	for _, pair := range pairs {
 		if strings.ToLower(strings.TrimSpace(pair.Key)) != name {
@@ -143,4 +145,30 @@ func nthPairValue(pairs []smsTestPair, name string, occurrence int) (string, boo
 		count++
 	}
 	return "", false
+}
+
+// SecretValues lists every credential an endpoint holds: the password field
+// and the value of every header or body parameter named like one.
+//
+// It exists because a gateway's reply is stored and shown. Most gateways do
+// not use the password field at all -- they take the credential as a body
+// parameter -- so redacting only that field left the one that mattered in
+// the record.
+func SecretValues(endpoint store.SMSTestEndpoint) []string {
+	secrets := []string{}
+	if endpoint.Password != "" {
+		secrets = append(secrets, endpoint.Password)
+	}
+	for _, raw := range []string{endpoint.Headers, endpoint.BodyParams} {
+		pairs, ok := DecodePairs(raw)
+		if !ok {
+			continue
+		}
+		for _, pair := range pairs {
+			if IsSecretParamKey(pair.Key) && pair.Value != "" {
+				secrets = append(secrets, pair.Value)
+			}
+		}
+	}
+	return secrets
 }

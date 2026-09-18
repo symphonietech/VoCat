@@ -283,13 +283,16 @@ func (s *Scheduler) RunSchedule(ctx context.Context, schedule store.SMSTestSched
 		Code:       code,
 		Status:     status,
 		// Redacted before it is stored, not before it is shown: the result
-		// row is returned by the API and is the one place the gateway
-		// password could come back out. A gateway that takes credentials in
-		// the query string puts them in the URL, and Go's own transport
+		// row is returned by the API and is the one place a gateway
+		// credential could come back out. A gateway that takes credentials
+		// in the query string puts them in the URL, and Go's own transport
 		// errors quote that URL back -- so a failed send would otherwise
-		// write the password into a record anyone with the page open can
-		// read.
-		SendResponse: truncate(redactSecret(response, endpoint.Password), responseLimit),
+		// write one into a record anyone with the page open can read.
+		//
+		// Every credential, not just the password field: most gateways do
+		// not use that field at all and take the credential as a body
+		// parameter or a header instead.
+		SendResponse: truncate(redactSecrets(response, SecretValues(endpoint)), responseLimit),
 	})
 	if err != nil {
 		return store.SMSTestResult{}, fmt.Errorf("record result: %w", err)
@@ -301,11 +304,6 @@ func (s *Scheduler) RunSchedule(ctx context.Context, schedule store.SMSTestSched
 	s.logger.Info("smstest: test submitted",
 		"schedule", schedule.ID, "code", code, "recipient", schedule.Recipient, "status", status)
 	return result, nil
-}
-
-type keyValue struct {
-	Key   string `json:"key"`
-	Value string `json:"value"`
 }
 
 func (s *Scheduler) submit(
@@ -328,7 +326,7 @@ func (s *Scheduler) submit(
 	}
 
 	var body io.Reader
-	bodyParams := decodeKeyValues(endpoint.BodyParams)
+	bodyParams, _ := DecodePairs(endpoint.BodyParams)
 	if len(bodyParams) > 0 {
 		fields := make(map[string]string, len(bodyParams))
 		for _, param := range bodyParams {
@@ -345,7 +343,8 @@ func (s *Scheduler) submit(
 	if err != nil {
 		return "", fmt.Errorf("build request: %w", err)
 	}
-	for _, header := range decodeKeyValues(endpoint.Headers) {
+	headers, _ := DecodePairs(endpoint.Headers)
+	for _, header := range headers {
 		request.Header.Set(header.Key, replacer.Replace(header.Value))
 	}
 	if endpoint.Username != "" || endpoint.Password != "" {
@@ -372,18 +371,6 @@ func (s *Scheduler) submit(
 	return text, nil
 }
 
-func decodeKeyValues(raw string) []keyValue {
-	raw = strings.TrimSpace(raw)
-	if raw == "" || raw == "[]" {
-		return nil
-	}
-	var pairs []keyValue
-	if err := json.Unmarshal([]byte(raw), &pairs); err != nil {
-		return nil
-	}
-	return pairs
-}
-
 func isInbound(direction string) bool {
 	return direction == "inbound" || direction == "received"
 }
@@ -391,20 +378,26 @@ func isInbound(direction string) bool {
 // secretMask is what replaces a credential in anything stored or returned.
 const secretMask = "<redacted>"
 
-// redactSecret removes a secret from text that will be persisted. It is
-// deliberately a blunt substring replacement: the secret can reach a response
-// body by being echoed, quoted in an error, or reflected in a redirect URL,
-// and guessing which of those happened is less reliable than removing it
-// wherever it appears.
+// redactSecrets removes every one of an endpoint's credentials from text that
+// will be persisted. It is deliberately a blunt substring replacement: a
+// secret reaches a response body by being echoed, quoted in an error, or
+// reflected in a redirect URL, and guessing which of those happened is less
+// reliable than removing it wherever it appears.
 //
 // A very short secret is left alone. Blanking every occurrence of a two-
 // character password would mangle the response into something unreadable
 // while protecting a secret that is not one.
-func redactSecret(value, secret string) string {
-	if len(secret) < 4 || value == "" {
+func redactSecrets(value string, secrets []string) string {
+	if value == "" {
 		return value
 	}
-	return strings.ReplaceAll(value, secret, secretMask)
+	for _, secret := range secrets {
+		if len(secret) < 4 {
+			continue
+		}
+		value = strings.ReplaceAll(value, secret, secretMask)
+	}
+	return value
 }
 
 func truncate(value string, limit int) string {
