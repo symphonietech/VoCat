@@ -683,6 +683,34 @@ Every endpoint also has a **Raw fields** toggle showing exactly what AMI
 returned, so a field VoCat does not label is visible rather than dropped. If
 something useful only appears there, say so and it can be promoted.
 
+### Why the trunk needs a second query
+
+`PJSIPShowContacts` lists only contacts that **registered**. The trunk's
+contact is written into `pjsip.conf`, so it never appears there — on a PBX
+with no softphone registered at all the listing is refused outright with
+`No Contacts found`, which is a normal state and not an error.
+
+The endpoint's own `EndpointList` event names its contact, so the row shows
+the URI, but nothing in either listing says whether that contact answers a
+qualify. The trunk therefore read "Not qualified" for ever while it was
+carrying calls.
+
+`PJSIPShowEndpoint`, one endpoint at a time, answers with a
+`ContactStatusDetail` per contact — `URI`, `Status`, `RoundtripUsec`,
+`UserAgent`, `ViaAddress`, `RegExpire` — which covers static and dynamic
+contacts alike. VoCat issues it only for endpoints that still have a contact
+with no status, so a PBX whose phones are all registered spends no extra
+round trips, and at most 16 per page load in any case.
+
+Note the spellings: this event says `URI`, `ViaAddress` and `RegExpire` where
+`ContactList` says `Uri`, `ViaAddr` and `ExpirationTime`. Lookups are
+case-insensitive and each field is read through a candidate list, so both
+arrive under the same labelled row.
+
+Anything the contact listing already reported wins — it is the more specific
+source, and letting the detail overwrite it would make the round-trip flip
+between two measurements on every poll.
+
 ## The trunk and the Calls page together
 
 Both work at once, and neither has to be off for the other to run. The Calls

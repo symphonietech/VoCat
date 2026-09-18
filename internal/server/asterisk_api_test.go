@@ -267,3 +267,139 @@ func TestBuildAsteriskEndpointsReturnsUnpairedContacts(t *testing.T) {
 		t.Fatalf("unpaired = %+v", unpaired)
 	}
 }
+
+// The trunk's contact is configured, not registered, so PJSIPShowContacts
+// never mentions it and its row read "Not qualified" for ever while the trunk
+// was carrying calls. PJSIPShowEndpoint reports the same contact's qualify
+// state as a ContactStatusDetail, which is the only source for it.
+func TestMergeContactStatusResolvesAStaticContact(t *testing.T) {
+	endpoint := asteriskEndpoint{
+		Name:     "vocat",
+		Contacts: []asteriskContact{{URI: "sip:vocat@127.0.0.1:5062"}},
+	}
+	// Field names exactly as the Asterisk 22 ContactStatusDetail event
+	// documents them -- note URI, ViaAddress and RegExpire, which ContactList
+	// spells Uri, ViaAddr and ExpirationTime.
+	mergeContactStatus(&endpoint, []ami.Message{{
+		"Event": "ContactStatusDetail", "AOR": "vocat",
+		"URI": "sip:vocat@127.0.0.1:5062", "Status": "Reachable",
+		"RoundtripUsec": "1500", "EndpointName": "vocat",
+		"UserAgent": "VoCat", "ViaAddress": "127.0.0.1:5062",
+		"RegExpire": "0",
+	}})
+	if len(endpoint.Contacts) != 1 {
+		t.Fatalf("the detail was appended instead of merged: %+v", endpoint.Contacts)
+	}
+	contact := endpoint.Contacts[0]
+	if contact.Status != "Reachable" {
+		t.Fatalf("status = %q", contact.Status)
+	}
+	if contact.RoundTripMS != 1.5 {
+		t.Errorf("roundtrip = %v ms, want 1.5", contact.RoundTripMS)
+	}
+	if contact.UserAgent != "VoCat" || contact.ViaAddress != "127.0.0.1:5062" {
+		t.Errorf("contact = %+v; want the documented UserAgent and ViaAddress", contact)
+	}
+	if contact.Expires != "0" {
+		t.Errorf("expires = %q; RegExpire was not read", contact.Expires)
+	}
+	if !endpoint.Reachable || !endpoint.Registered {
+		t.Fatalf("endpoint = %+v; want reachable and registered", endpoint)
+	}
+}
+
+// What the contact listing already said is the more specific answer, and a
+// detail must not overwrite it -- the round-trip in particular is measured
+// per contact and would otherwise flip between two sources on every poll.
+func TestMergeContactStatusKeepsWhatTheListingReported(t *testing.T) {
+	endpoint := asteriskEndpoint{
+		Name: "1001",
+		Contacts: []asteriskContact{{
+			URI: "sip:a@b", Status: "Reachable", RoundTripMS: 21,
+			UserAgent: "LinphoneiOS/6.2.2",
+		}},
+	}
+	mergeContactStatus(&endpoint, []ami.Message{{
+		"Event": "ContactStatusDetail", "URI": "sip:a@b",
+		"Status": "Unreachable", "RoundtripUsec": "99000", "UserAgent": "other",
+	}})
+	contact := endpoint.Contacts[0]
+	if contact.Status != "Reachable" || contact.RoundTripMS != 21 || contact.UserAgent != "LinphoneiOS/6.2.2" {
+		t.Fatalf("the listing was overwritten: %+v", contact)
+	}
+}
+
+// A contact Asterisk reports in the detail but that no listing covered is
+// real. Dropping it would hide the very contact this query exists to find.
+func TestMergeContactStatusAppendsAnUnknownContact(t *testing.T) {
+	endpoint := asteriskEndpoint{Name: "vocat", Contacts: []asteriskContact{}}
+	mergeContactStatus(&endpoint, []ami.Message{{
+		"Event": "ContactStatusDetail", "URI": "sip:vocat@127.0.0.1:5062",
+		"Status": "Reachable", "Something": "new",
+	}})
+	if len(endpoint.Contacts) != 1 || endpoint.Contacts[0].URI != "sip:vocat@127.0.0.1:5062" {
+		t.Fatalf("contacts = %+v", endpoint.Contacts)
+	}
+	if !endpoint.Reachable {
+		t.Fatal("an appended Reachable contact did not mark the endpoint reachable")
+	}
+	found := ""
+	for _, field := range endpoint.Contacts[0].Fields {
+		if field.Name == "Something" {
+			found = field.Value
+		}
+	}
+	if found != "new" {
+		t.Fatalf("raw fields dropped: %+v", endpoint.Contacts[0].Fields)
+	}
+}
+
+// PJSIPShowEndpoint answers with every kind of detail there is. Only the
+// contact ones say anything about reachability, and an AorDetail carrying a
+// Contact field must not be mistaken for one.
+func TestMergeContactStatusIgnoresOtherDetailEvents(t *testing.T) {
+	endpoint := asteriskEndpoint{Name: "vocat", Contacts: []asteriskContact{{URI: "sip:vocat@127.0.0.1:5062"}}}
+	mergeContactStatus(&endpoint, []ami.Message{
+		{"Event": "EndpointDetail", "ObjectName": "vocat", "DeviceState": "Not in use"},
+		{"Event": "AorDetail", "ObjectName": "vocat", "Contacts": "sip:vocat@127.0.0.1:5062"},
+		{"Event": "AuthDetail", "ObjectName": "vocat-auth", "Password": "secret"},
+	})
+	if endpoint.Contacts[0].Status != "" || endpoint.Reachable {
+		t.Fatalf("a non-contact detail was read as a status: %+v", endpoint)
+	}
+}
+
+// An Unreachable contact is exactly the state the page has to show, and
+// calling it reachable would make the amber row this fixes lie the other way.
+func TestMergeContactStatusReportsUnreachable(t *testing.T) {
+	endpoint := asteriskEndpoint{Name: "vocat", Contacts: []asteriskContact{{URI: "sip:vocat@127.0.0.1:5062"}}}
+	mergeContactStatus(&endpoint, []ami.Message{{
+		"Event": "ContactStatusDetail", "URI": "sip:vocat@127.0.0.1:5062", "Status": "Unreachable",
+	}})
+	if endpoint.Reachable {
+		t.Fatal("an Unreachable contact was reported reachable")
+	}
+	if endpoint.Contacts[0].Status != "Unreachable" {
+		t.Fatalf("status = %q", endpoint.Contacts[0].Status)
+	}
+}
+
+// The extra query costs a round trip per endpoint, so the usual case -- every
+// contact dynamic, every status already known -- must not spend any.
+func TestNeedsContactStatusOnlyWhenSomethingIsUnknown(t *testing.T) {
+	known := asteriskEndpoint{Contacts: []asteriskContact{{URI: "sip:a@b", Status: "Reachable"}}}
+	if needsContactStatus(known) {
+		t.Error("an endpoint with a known status would be queried again")
+	}
+	unknown := asteriskEndpoint{Contacts: []asteriskContact{
+		{URI: "sip:a@b", Status: "Reachable"},
+		{URI: "sip:c@d", Status: "  "},
+	}}
+	if !needsContactStatus(unknown) {
+		t.Error("an endpoint with an unknown status would never be resolved")
+	}
+	// No contacts at all means nothing to qualify, not a missing status.
+	if needsContactStatus(asteriskEndpoint{Contacts: []asteriskContact{}}) {
+		t.Error("an endpoint with no contacts would be queried for nothing")
+	}
+}

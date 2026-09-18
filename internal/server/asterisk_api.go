@@ -131,6 +131,7 @@ func (s *Server) handleAsteriskStatus(w http.ResponseWriter, r *http.Request) {
 		payload["contacts_error"] = contactsErr.Error()
 	}
 	built, unpaired := buildAsteriskEndpoints(endpoints, contacts)
+	s.fillAsteriskContactStatus(ctx, conn, built)
 	payload["endpoints"] = built
 	if len(unpaired) > 0 {
 		payload["unpaired_contacts"] = unpaired
@@ -261,4 +262,119 @@ func buildAsteriskEndpoints(endpointEvents, contactEvents []ami.Message) ([]aste
 		return strings.ToLower(result[first].Name) < strings.ToLower(result[second].Name)
 	})
 	return result, unpaired
+}
+
+// maxStatusQueries bounds the follow-up round trips. A PBX this size has a
+// handful of endpoints; a page that issues one AMI action per endpoint on a
+// much larger one would be slower than it is useful.
+const maxStatusQueries = 16
+
+// fillAsteriskContactStatus asks about endpoints whose contacts have no
+// status yet.
+//
+// PJSIPShowContacts lists only contacts registered dynamically, so a
+// statically configured one -- the trunk's, always -- comes back with nothing
+// to say about reachability, and the row reads amber for ever on a trunk that
+// is carrying calls. PJSIPShowEndpoint reports ContactStatusDetail per
+// endpoint, which covers both kinds.
+//
+// Only endpoints that need it are queried, so the usual case where every
+// contact is dynamic costs no extra round trips at all.
+func (s *Server) fillAsteriskContactStatus(ctx context.Context, conn *ami.Conn, endpoints []asteriskEndpoint) {
+	queries := 0
+	for index := range endpoints {
+		endpoint := &endpoints[index]
+		if !needsContactStatus(*endpoint) {
+			continue
+		}
+		if queries >= maxStatusQueries {
+			return
+		}
+		queries++
+		details, err := conn.List(ctx, "PJSIPShowEndpoint", ami.Message{"Endpoint": endpoint.Name})
+		if err != nil {
+			if !ami.IsEmptyList(err) {
+				s.logger.Debug("could not read contact status",
+					"category", "siptrunk", "endpoint", endpoint.Name, "error", err)
+			}
+			continue
+		}
+		mergeContactStatus(endpoint, details)
+	}
+}
+
+// needsContactStatus reports whether an endpoint has a contact whose status
+// is still unknown, which is the only reason to spend another round trip.
+func needsContactStatus(endpoint asteriskEndpoint) bool {
+	for _, contact := range endpoint.Contacts {
+		if strings.TrimSpace(contact.Status) == "" {
+			return true
+		}
+	}
+	return false
+}
+
+// mergeContactStatus folds ContactStatusDetail events into contacts already
+// known, matching on URI. Anything the detail reports and the listing did not
+// is filled in; a value already present is left alone, since the listing is
+// the more specific source when both have it.
+func mergeContactStatus(endpoint *asteriskEndpoint, details []ami.Message) {
+	for _, event := range details {
+		if !strings.EqualFold(event.Get("Event"), "ContactStatusDetail") {
+			continue
+		}
+		uri := event.First("URI", "Uri")
+		if uri == "" {
+			continue
+		}
+		status := event.First("Status", "ContactStatus")
+		found := false
+		for index := range endpoint.Contacts {
+			contact := &endpoint.Contacts[index]
+			if contact.URI != uri {
+				continue
+			}
+			found = true
+			applyContactStatus(contact, event, status)
+		}
+		if !found {
+			contact := asteriskContact{URI: uri, Fields: rawFields(event)}
+			applyContactStatus(&contact, event, status)
+			endpoint.Contacts = append(endpoint.Contacts, contact)
+		}
+		// Same rule as the contact listing: a contact Asterisk knows about
+		// counts as present unless it says otherwise, and only an answered
+		// qualify makes it reachable.
+		if !strings.EqualFold(status, "Unreachable") && !strings.EqualFold(status, "Removed") {
+			endpoint.Registered = true
+		}
+		if strings.EqualFold(status, "Reachable") {
+			endpoint.Reachable = true
+		}
+	}
+}
+
+func applyContactStatus(contact *asteriskContact, event ami.Message, status string) {
+	if contact.Status == "" {
+		contact.Status = status
+	}
+	if contact.UserAgent == "" {
+		contact.UserAgent = event.First("UserAgent")
+	}
+	if contact.ViaAddress == "" {
+		contact.ViaAddress = event.First("ViaAddress", "ViaAddr")
+	}
+	if contact.Expires == "" {
+		contact.Expires = event.First("RegExpire", "ExpirationTime")
+	}
+	if contact.RoundTripMS == 0 {
+		if micro := event.First("RoundtripUsec", "RoundTripUsec"); micro != "" {
+			if value, err := strconv.ParseFloat(micro, 64); err == nil {
+				contact.RoundTripMS = value / 1000
+			}
+		}
+	}
+	if len(contact.Fields) == 0 {
+		contact.Fields = rawFields(event)
+	}
 }
