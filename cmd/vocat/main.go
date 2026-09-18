@@ -36,6 +36,7 @@ import (
 	"vocat/internal/pcsc"
 	"vocat/internal/server"
 	"vocat/internal/siptrunk"
+	"vocat/internal/smstest"
 	"vocat/internal/store"
 	"vocat/internal/update"
 	"vocat/internal/vowifi"
@@ -609,9 +610,17 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 		}
 	}()
 
+	// The SMS delivery test scheduler polls its own tables and the SMS
+	// history; it touches no hardware, so it runs regardless of whether any
+	// modem is present.
+	smsTestScheduler := smstest.New(database, logger.With("category", "smstest"))
+	smsTestScheduler.Start()
+	defer smsTestScheduler.Stop()
+
 	handler, err := server.New(server.Options{
 		Store:               database,
 		Auth:                authService,
+		SMSTest:             smsTestScheduler,
 		Devices:             deviceManager,
 		VoWiFi:              vowifiManager,
 		Logs:                logs,
