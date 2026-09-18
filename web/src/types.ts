@@ -510,55 +510,6 @@ export type Notice = {
   detail?: string;
 } | null;
 
-export interface SMSTestEndpoint {
-  id: string;
-  name: string;
-  method: string;
-  url: string;
-  username: string;
-  hasPassword: boolean;
-  headers: string;
-  bodyParams: string;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface SMSTestSchedule {
-  id: string;
-  name: string;
-  endpointId: string;
-  recipient: string;
-  sender: string;
-  contentTemplate: string;
-  codeType: string;
-  codeLength: number;
-  frequencyMinutes: number;
-  startTime: string;
-  enabled: boolean;
-  isExternal: boolean;
-  lastRunAt: string | null;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface SMSTestResult {
-  id: number;
-  scheduleId: string;
-  sentAt: string;
-  receivedAt: string | null;
-  elapsedMs: number | null;
-  code: string;
-  status: string;
-  sendResponse: string;
-  deviceId: string;
-}
-
-export interface SMSTestResultsResponse {
-  results: SMSTestResult[];
-  summary: Record<string, number>;
-  hours: number;
-}
-
 // Call mirrors vowifi.Call from the IMS provider. `codec` and `mediaReady`
 // only appear once SDP has been negotiated — on a provisional response with a
 // body (early media) or on the 200 OK — so they are absent while dialing.

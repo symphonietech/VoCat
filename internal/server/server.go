@@ -24,7 +24,6 @@ import (
 	"vocat/internal/extensions"
 	"vocat/internal/httpsmode"
 	"vocat/internal/loghub"
-	"vocat/internal/smstest"
 	"vocat/internal/store"
 	"vocat/internal/update"
 	"vocat/internal/vowifi"
@@ -52,7 +51,6 @@ type Options struct {
 	UpdateRepository    string
 	UpdateToken         string
 	HTTPS               *httpsmode.Manager
-	SMSTest             *smstest.Scheduler
 	// AsteriskAMI reaches the PBX in front of the SIP trunk. A zero value
 	// disables the Asterisk page, which is the normal state for a VoCat with
 	// no PBX.
@@ -107,7 +105,6 @@ type Server struct {
 	cellularDataEventOnce     sync.Once
 	cellularDataLifecycleOnce sync.Once
 	cellularData              *cellularDataRuntime
-	smsTest                   *smstest.Scheduler
 	trunkMu                   sync.Mutex
 	trunkCalls                map[string]bool
 	trunkRotation             uint64
@@ -168,7 +165,6 @@ func New(options Options) (*Server, error) {
 		updateRepository:    strings.TrimSpace(options.UpdateRepository),
 		updateToken:         strings.TrimSpace(options.UpdateToken),
 		https:               options.HTTPS,
-		smsTest:             options.SMSTest,
 		asteriskAMI:         options.AsteriskAMI,
 		asteriskDialplanDir: options.AsteriskDialplanDir,
 		netTraffic:          newLiveNetTracker(),

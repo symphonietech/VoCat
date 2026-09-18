@@ -14,7 +14,6 @@ import DevicesPage from "./pages/DevicesPage";
 import ProxyPage from "./pages/ProxyPage";
 import ExportProxyPage from "./pages/ExportProxyPage";
 import SmsPage from "./pages/SmsPage";
-import SmsTestPage from "./pages/SmsTestPage";
 import AsteriskPage from "./pages/AsteriskPage";
 import CallsPage from "./pages/CallsPage";
 import AutomaticTasksPage from "./pages/AutomaticTasksPage";
@@ -119,7 +118,6 @@ function AppRoot() {
           <Route path="proxy" element={<ProxyPage />} />
           <Route path="export-proxy" element={<ExportProxyPage />} />
           <Route path="sms" element={<SmsPage />} />
-          <Route path="smstest" element={<SmsTestPage />} />
           <Route path="calls" element={<CallsPage />} />
           <Route path="asterisk" element={<AsteriskPage />} />
           <Route path="automatic-tasks" element={<AutomaticTasksPage />} />
