@@ -270,6 +270,16 @@ export function applyAsteriskExtensions() {
   );
 }
 
+// Digits go into a live call as RFC 4733 telephone events, over the call's own
+// RTP stream. They cannot be sent as audio tones: an IMS call usually
+// negotiates AMR, which mangles a pair of pure tones past recognition.
+export function sendCallDTMF(deviceId: string, callId: string, digits: string) {
+  return api<{ sent: boolean; digits: string; callId: string }>(
+    `/devices/${encodeURIComponent(deviceId)}/calls/dtmf`,
+    { method: "POST", body: { callId, digits } },
+  );
+}
+
 export function listCalls(deviceId: string) {
   return api<CallsResponse>(`/devices/${encodeURIComponent(deviceId)}/calls`);
 }

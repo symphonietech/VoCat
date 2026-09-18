@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"vocat/internal/dtmf"
 	"vocat/internal/g711"
 )
 
@@ -36,6 +37,17 @@ type rtpMedia struct {
 	remote      *net.UDPAddr
 	codec       string
 	payloadType byte
+	// dtmfPayload is the telephone-event payload type the carrier's answer
+	// named. Zero means it declined, and there is then no way to send a digit
+	// on this call: in-band tones through a speech codec are not one.
+	dtmfPayload byte
+
+	dtmfOut dtmf.Sender
+	dtmfIn  dtmf.Receiver
+	// digits carries what the far end pressed. Buffered and lossy on purpose:
+	// nothing may be listening, and a keypad press is not worth stalling the
+	// receive loop for.
+	digits chan rune
 
 	writeMu   sync.Mutex
 	pending   []int16
@@ -66,6 +78,7 @@ func newRTPMedia(local net.IP, logger *slog.Logger) (*rtpMedia, error) {
 		conn: connection, sequence: binary.BigEndian.Uint16(seed[:2]),
 		timestamp: binary.BigEndian.Uint32(seed[2:6]), ssrc: binary.BigEndian.Uint32(seed[6:]),
 		downlink: make(chan []int16, 64), closed: make(chan struct{}),
+		digits: make(chan rune, 32),
 		logger: logger,
 	}
 	go media.receive()
@@ -192,10 +205,21 @@ func (media *rtpMedia) configureRemote(body []byte) error {
 	if codec == "" {
 		return errors.New("ims: remote SDP has no usable audio format")
 	}
+	// The telephone-event payload type is whatever the answer named, which is
+	// not necessarily the 100 the offer proposed. Without it, digits cannot
+	// be sent at all.
+	var eventPayload byte
+	for number, name := range mappings {
+		if strings.EqualFold(name, "telephone-event") && number > 0 && number < 128 {
+			eventPayload = byte(number)
+			break
+		}
+	}
 	media.mu.Lock()
 	media.remote = &net.UDPAddr{IP: address, Port: port}
 	media.codec = codec
 	media.payloadType = payload
+	media.dtmfPayload = eventPayload
 	media.mu.Unlock()
 	media.startTransmit()
 	return nil
@@ -297,6 +321,16 @@ func (media *rtpMedia) transmit() {
 			return
 		case <-ticker.C:
 		}
+		// A queued digit takes this interval instead of an audio frame. The
+		// clock still advances underneath, so the tone occupies real time on
+		// the far end's timeline rather than shortening the call's audio.
+		if media.dtmfOut.Pending() {
+			if media.sendEvent() {
+				media.sequence++
+				media.timestamp += rtpPacketSamples
+				continue
+			}
+		}
 		media.writeMu.Lock()
 		filled := copy(frame, media.pending)
 		media.pending = media.pending[filled:]
@@ -327,6 +361,69 @@ func (media *rtpMedia) reportSendError(err error) {
 			"error", err,
 		)
 	})
+}
+
+// SendDTMF queues keypad digits for the far end.
+//
+// It returns an error rather than sending tones as audio when the carrier
+// declined telephone-event: G.711 would carry a recognisable pair of tones,
+// but AMR -- which is what an IMS call usually negotiates -- would not, and a
+// digit that silently does not arrive is worse than one that is refused.
+func (media *rtpMedia) SendDTMF(sequence string) error {
+	if err := dtmf.Valid(sequence); err != nil {
+		return err
+	}
+	media.mu.RLock()
+	negotiated := media.remote != nil && media.codec != ""
+	payload := media.dtmfPayload
+	media.mu.RUnlock()
+	if !negotiated {
+		return errors.New("ims: RTP media is not negotiated")
+	}
+	if payload == 0 {
+		return errors.New("ims: the carrier did not negotiate RFC 4733 telephone events, so digits cannot be sent")
+	}
+	return media.dtmfOut.Queue(sequence)
+}
+
+// Digits returns what the far end pressed. The channel is lossy: nothing may
+// be listening, and a keypad press is not worth stalling the receive loop for.
+func (media *rtpMedia) Digits() <-chan rune { return media.digits }
+
+// sendEvent transmits one telephone-event packet, reporting whether it took
+// this interval. The sequence number advances for it like any other packet;
+// the timestamp does not, because every packet of one event repeats the
+// timestamp the event began at.
+func (media *rtpMedia) sendEvent() bool {
+	media.mu.RLock()
+	var remote *net.UDPAddr
+	if media.remote != nil {
+		clone := *media.remote
+		remote = &clone
+	}
+	eventPayload := media.dtmfPayload
+	media.mu.RUnlock()
+	if remote == nil || eventPayload == 0 {
+		return false
+	}
+	event, ok := media.dtmfOut.Next(media.timestamp, rtpPacketSamples)
+	if !ok {
+		return false
+	}
+	packet := make([]byte, 12+dtmf.PayloadBytes)
+	packet[0] = 0x80
+	packet[1] = eventPayload
+	if event.Marker {
+		packet[1] |= 0x80
+	}
+	binary.BigEndian.PutUint16(packet[2:4], media.sequence)
+	binary.BigEndian.PutUint32(packet[4:8], event.Timestamp)
+	binary.BigEndian.PutUint32(packet[8:12], media.ssrc)
+	copy(packet[12:], event.Payload)
+	if _, err := media.conn.WriteToUDP(packet, remote); err != nil {
+		media.reportSendError(err)
+	}
+	return true
 }
 
 // sendFrame encodes and transmits exactly one packet. The sequence number and
@@ -376,7 +473,20 @@ func (media *rtpMedia) receive() {
 			remote.Port = source.Port // symmetric RTP/NAT port learning
 		}
 		media.mu.Unlock()
-		if remote == nil || !remote.IP.Equal(source.IP) || count < 12 || packet[0]>>6 != 2 || packet[1]&0x7f != payload {
+		media.mu.RLock()
+		eventPayload := media.dtmfPayload
+		media.mu.RUnlock()
+		if remote == nil || !remote.IP.Equal(source.IP) || count < 12 || packet[0]>>6 != 2 {
+			continue
+		}
+		// A telephone event is not audio and must not be decoded as any: the
+		// four bytes of an event payload run through a G.711 table produce a
+		// click.
+		if eventPayload != 0 && packet[1]&0x7f == eventPayload {
+			media.acceptEvent(packet[:count])
+			continue
+		}
+		if packet[1]&0x7f != payload {
 			continue
 		}
 		header := 12 + int(packet[0]&0x0f)*4
@@ -410,6 +520,30 @@ func (media *rtpMedia) receive() {
 			default:
 			}
 		}
+	}
+}
+
+// acceptEvent turns an inbound telephone-event packet into a digit, once per
+// event rather than once per packet.
+func (media *rtpMedia) acceptEvent(packet []byte) {
+	header := 12 + int(packet[0]&0x0f)*4
+	if packet[0]&0x10 != 0 {
+		if len(packet) < header+4 {
+			return
+		}
+		header += 4 + int(binary.BigEndian.Uint16(packet[header+2:header+4]))*4
+	}
+	if header+dtmf.PayloadBytes > len(packet) {
+		return
+	}
+	timestamp := binary.BigEndian.Uint32(packet[4:8])
+	digit, ok := media.dtmfIn.Accept(packet[header:], timestamp)
+	if !ok {
+		return
+	}
+	select {
+	case media.digits <- digit:
+	default:
 	}
 }
 

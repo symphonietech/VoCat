@@ -18,6 +18,16 @@ type Media interface {
 	WritePCM([]int16) error
 }
 
+// DTMFMedia is the optional half of Media: a leg that negotiated RFC 4733
+// telephone events can carry keypad digits. A leg that did not cannot carry
+// them at all -- tones through a speech codec are not a fallback -- so this
+// is an assertion rather than part of Media, and a call whose SIM leg lacks
+// it simply does not relay digits.
+type DTMFMedia interface {
+	SendDTMF(string) error
+	Digits() <-chan rune
+}
+
 // Gateway is everything the trunk needs from VoCat's SIM-backed calling. The
 // server implements it against the VoWiFi call controller; tests implement it
 // with a fake, which is the point of it being an interface.
@@ -294,8 +304,12 @@ func (d *dialog) run(ctx context.Context, offer mediaOffer) {
 		return
 	}
 	d.leg = leg
+	// Only what the PBX offered: an answer may not name a payload type the
+	// offer did not list, so a PBX with DTMF turned off gets a call with no
+	// telephone events rather than a renegotiation.
+	leg.setEventPayload(offer.EventPayload)
 
-	body := BuildAnswer(leg.conn.LocalAddr().(*net.UDPAddr).IP, leg.LocalPort(), offer.Payload)
+	body := BuildAnswer(leg.conn.LocalAddr().(*net.UDPAddr).IP, leg.LocalPort(), offer.Payload, offer.EventPayload)
 	d.mu.Lock()
 	d.answered = true
 	d.mu.Unlock()
@@ -313,6 +327,8 @@ func (d *dialog) pump(ctx context.Context, media Media, leg *rtpLeg) {
 	var once sync.Once
 	stop := make(chan struct{})
 	end := func() { once.Do(func() { close(stop) }) }
+
+	relayDigits(ctx, stop, leg, media, d.server, d.callID)
 
 	go func() {
 		defer end()
@@ -529,4 +545,44 @@ func headerURI(value string) string {
 		value = value[:index]
 	}
 	return strings.TrimSpace(value)
+}
+
+// relayDigits carries keypad presses across the bridge in both directions.
+//
+// Without this a softphone calling a PSTN menu hears "press 1 for billing"
+// and can do nothing about it: the digit reaches VoCat as an RFC 4733 event
+// on the PBX leg and stops there. The two legs negotiate their telephone
+// events separately, so a digit is re-generated on the far leg rather than
+// forwarded packet for packet -- the payload types and clocks do not match.
+//
+// A leg that negotiated no telephone events simply has no goroutine, and the
+// call runs exactly as it did before.
+func relayDigits(ctx context.Context, stop <-chan struct{}, leg *rtpLeg, media Media, server *Server, callID string) {
+	sim, _ := media.(DTMFMedia)
+	if sim == nil {
+		return
+	}
+	forward := func(from <-chan rune, send func(string) error, direction string) {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-stop:
+				return
+			case digit, ok := <-from:
+				if !ok {
+					return
+				}
+				if err := send(string(digit)); err != nil {
+					// Once per digit rather than once per call: a menu that
+					// swallows every press is worth seeing in a log, and the
+					// call itself is unaffected.
+					server.logDebug("siptrunk could not relay a digit",
+						"call_id", callID, "direction", direction, "digit", string(digit), "error", err)
+				}
+			}
+		}
+	}
+	go forward(leg.Digits(), sim.SendDTMF, "pbx-to-sim")
+	go forward(sim.Digits(), leg.SendDTMF, "sim-to-pbx")
 }

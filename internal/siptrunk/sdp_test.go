@@ -95,7 +95,7 @@ func TestParseOfferRejectsOffersItCannotCarry(t *testing.T) {
 }
 
 func TestBuildAnswerAgreesToASingleCodec(t *testing.T) {
-	answer := string(BuildAnswer(net.ParseIP("192.168.31.203"), 16000, payloadPCMA))
+	answer := string(BuildAnswer(net.ParseIP("192.168.31.203"), 16000, payloadPCMA, 0))
 	for _, want := range []string{
 		"c=IN IP4 192.168.31.203\r\n",
 		"m=audio 16000 RTP/AVP 8\r\n",
@@ -107,15 +107,58 @@ func TestBuildAnswerAgreesToASingleCodec(t *testing.T) {
 			t.Fatalf("missing %q in:\n%s", want, answer)
 		}
 	}
-	// Exactly one payload in the m= line: a list would invite the PBX to pick
+	// Exactly one codec in the m= line: a list would invite the PBX to pick
 	// something else later.
 	if strings.Contains(answer, "RTP/AVP 8 0") {
 		t.Fatalf("answer offered more than one codec:\n%s", answer)
 	}
 }
 
+// An answer may only name payload types the offer listed, so the
+// telephone-event type is the PBX's number rather than VoCat's own.
+func TestBuildAnswerEchoesTheOfferedEventPayload(t *testing.T) {
+	answer := string(BuildAnswer(net.ParseIP("127.0.0.1"), 16000, payloadPCMU, 96))
+	for _, want := range []string{
+		"m=audio 16000 RTP/AVP 0 96\r\n",
+		"a=rtpmap:96 telephone-event/8000\r\n",
+		"a=fmtp:96 0-15\r\n",
+	} {
+		if !strings.Contains(answer, want) {
+			t.Fatalf("missing %q in:\n%s", want, answer)
+		}
+	}
+	// A PBX with DTMF turned off gets a call with no telephone events rather
+	// than an answer naming something it never offered.
+	plain := string(BuildAnswer(net.ParseIP("127.0.0.1"), 16000, payloadPCMU, 0))
+	if strings.Contains(plain, "telephone-event") {
+		t.Fatalf("an unoffered event payload was answered:\n%s", plain)
+	}
+}
+
+// Without the event payload from the offer, the leg has no way to know which
+// packets are digits and decodes them as a click of audio.
+func TestParseOfferReadsTheTelephoneEventPayload(t *testing.T) {
+	offer, err := ParseOffer([]byte(asteriskOffer))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if offer.EventPayload != 101 {
+		t.Fatalf("event payload = %d, want 101", offer.EventPayload)
+	}
+	// An offer with no telephone-event leaves it zero, which is what makes
+	// SendDTMF refuse rather than send packets nothing is listening for.
+	without := strings.ReplaceAll(asteriskOffer, "a=rtpmap:101 telephone-event/8000\r\n", "")
+	offer, err = ParseOffer([]byte(without))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if offer.EventPayload != 0 {
+		t.Fatalf("event payload = %d with no rtpmap, want 0", offer.EventPayload)
+	}
+}
+
 func TestBuildAnswerHandlesIPv6(t *testing.T) {
-	answer := string(BuildAnswer(net.ParseIP("fd00::1"), 16000, payloadPCMU))
+	answer := string(BuildAnswer(net.ParseIP("fd00::1"), 16000, payloadPCMU, 0))
 	if !strings.Contains(answer, "c=IN IP6 fd00::1\r\n") || !strings.Contains(answer, "a=rtpmap:0 PCMU/8000") {
 		t.Fatalf("IPv6 answer wrong:\n%s", answer)
 	}

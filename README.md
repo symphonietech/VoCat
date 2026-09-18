@@ -309,6 +309,11 @@ Set `VOCAT_SIP_TRUNK_PBX` to empty to keep inbound calls off the PBX
 entirely. The one thing that cannot be shared is a single call's audio, so
 connecting browser audio to a call the trunk is carrying returns `409`.
 
+Keypad digits work in both places: the Calls page has a keypad on an answered
+call, and a digit pressed on a softphone crosses the trunk to the SIM. They
+travel as RFC 4733 telephone events rather than tones, because the speech
+codecs on these legs do not carry tones reliably.
+
 With `ASTERISK_AMI_SECRET` set, VoCat's **Asterisk** page manages the PBX
 itself: live endpoint and registration status, the outbound routes (which
 numbers leave through which SIMs), and the softphone accounts. Each editor has

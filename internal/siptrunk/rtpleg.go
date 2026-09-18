@@ -4,6 +4,7 @@ import (
 	"context"
 	cryptorand "crypto/rand"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -11,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"vocat/internal/dtmf"
 	"vocat/internal/g711"
 )
 
@@ -35,6 +37,15 @@ type rtpLeg struct {
 	// is carrying only when the answer arrives, by which time the transmit
 	// and receive loops are already running against a silent socket.
 	payload atomic.Uint32
+	// eventPayload is the negotiated RFC 4733 type, or zero when the far end
+	// offered none and this leg cannot carry keypad digits.
+	eventPayload atomic.Uint32
+
+	dtmfOut dtmf.Sender
+	dtmfIn  dtmf.Receiver
+	// digits carries what the far end pressed. Lossy on purpose: a keypad
+	// press is not worth stalling the receive loop for.
+	digits chan rune
 
 	mu     sync.RWMutex
 	remote *net.UDPAddr
@@ -70,6 +81,7 @@ func newRTPLeg(local net.IP, remote *net.UDPAddr, payload byte) (*rtpLeg, error)
 		timestamp: binary.BigEndian.Uint32(seed[2:6]),
 		ssrc:      binary.BigEndian.Uint32(seed[6:]),
 		inbound:   make(chan []int16, 64),
+		digits:    make(chan rune, 32),
 		closed:    make(chan struct{}),
 	}
 	leg.payload.Store(uint32(payload))
@@ -86,6 +98,27 @@ func (leg *rtpLeg) payloadType() byte { return byte(leg.payload.Load()) }
 // setPayload records the codec the far end chose. An offered leg carries
 // nothing until its answer arrives, so this always runs before any audio.
 func (leg *rtpLeg) setPayload(payload byte) { leg.payload.Store(uint32(payload)) }
+
+func (leg *rtpLeg) eventType() byte { return byte(leg.eventPayload.Load()) }
+
+// setEventPayload records the telephone-event type both sides agreed on. Zero
+// means the far end offered none, and digits are refused rather than sent as
+// tones nothing is listening for.
+func (leg *rtpLeg) setEventPayload(payload byte) { leg.eventPayload.Store(uint32(payload)) }
+
+// SendDTMF queues keypad digits for the far end.
+func (leg *rtpLeg) SendDTMF(sequence string) error {
+	if err := dtmf.Valid(sequence); err != nil {
+		return err
+	}
+	if leg.eventType() == 0 {
+		return errors.New("siptrunk: the PBX did not negotiate RFC 4733 telephone events")
+	}
+	return leg.dtmfOut.Queue(sequence)
+}
+
+// Digits reports what the far end pressed.
+func (leg *rtpLeg) Digits() <-chan rune { return leg.digits }
 
 // setRemote points the leg at the address an SDP answer named. Until this is
 // called the transmit loop sends nothing, which is what keeps an offered leg
@@ -143,6 +176,14 @@ func (leg *rtpLeg) transmit() {
 			return
 		case <-ticker.C:
 		}
+		// A queued digit takes this interval instead of an audio frame. The
+		// clock advances underneath either way, so the tone occupies real
+		// time on the far end's timeline.
+		if leg.dtmfOut.Pending() && leg.sendEvent() {
+			leg.sequence++
+			leg.timestamp += frameSamples
+			continue
+		}
 		leg.writeMu.Lock()
 		filled := copy(frame, leg.queued)
 		leg.queued = leg.queued[filled:]
@@ -151,6 +192,63 @@ func (leg *rtpLeg) transmit() {
 			frame[index] = 0
 		}
 		leg.sendFrame(frame)
+	}
+}
+
+// sendEvent transmits one telephone-event packet, reporting whether it took
+// this interval. The sequence number advances for it like any other packet;
+// the timestamp does not, because every packet of one event repeats the
+// timestamp the event began at.
+func (leg *rtpLeg) sendEvent() bool {
+	leg.mu.RLock()
+	var remote *net.UDPAddr
+	if leg.remote != nil {
+		clone := *leg.remote
+		remote = &clone
+	}
+	leg.mu.RUnlock()
+	eventPayload := leg.eventType()
+	if remote == nil || eventPayload == 0 {
+		return false
+	}
+	event, ok := leg.dtmfOut.Next(leg.timestamp, frameSamples)
+	if !ok {
+		return false
+	}
+	packet := make([]byte, 12+dtmf.PayloadBytes)
+	packet[0] = 0x80
+	packet[1] = eventPayload
+	if event.Marker {
+		packet[1] |= 0x80
+	}
+	binary.BigEndian.PutUint16(packet[2:4], leg.sequence)
+	binary.BigEndian.PutUint32(packet[4:8], event.Timestamp)
+	binary.BigEndian.PutUint32(packet[8:12], leg.ssrc)
+	copy(packet[12:], event.Payload)
+	_, _ = leg.conn.WriteToUDP(packet, remote)
+	return true
+}
+
+// acceptEvent turns an inbound telephone-event packet into a digit, once per
+// event rather than once per packet.
+func (leg *rtpLeg) acceptEvent(packet []byte) {
+	header := 12 + int(packet[0]&0x0f)*4
+	if packet[0]&0x10 != 0 {
+		if len(packet) < header+4 {
+			return
+		}
+		header += 4 + int(binary.BigEndian.Uint16(packet[header+2:header+4]))*4
+	}
+	if header+dtmf.PayloadBytes > len(packet) {
+		return
+	}
+	digit, ok := leg.dtmfIn.Accept(packet[header:], binary.BigEndian.Uint32(packet[4:8]))
+	if !ok {
+		return
+	}
+	select {
+	case leg.digits <- digit:
+	default:
 	}
 }
 
@@ -193,7 +291,16 @@ func (leg *rtpLeg) receive() {
 			return
 		}
 		payload := leg.payloadType()
-		if count < 12 || packet[0]>>6 != 2 || packet[1]&0x7f != payload {
+		if count < 12 || packet[0]>>6 != 2 {
+			continue
+		}
+		// A telephone event is not audio and must not be decoded as any: four
+		// bytes of event payload through a G.711 table is a click.
+		if eventPayload := leg.eventType(); eventPayload != 0 && packet[1]&0x7f == eventPayload {
+			leg.acceptEvent(packet[:count])
+			continue
+		}
+		if packet[1]&0x7f != payload {
 			continue
 		}
 		// Symmetric RTP: a PBX behind NAT sends from a port it did not

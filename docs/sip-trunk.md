@@ -877,6 +877,46 @@ direction sends. The trunk is asking rather than agreeing here, and which one
 a PBX prefers is its own configuration; the RTP leg takes its codec from
 whichever the answer picks.
 
+## Keypad digits
+
+Digits cross both legs as RFC 4733 telephone events — a named event in its own
+RTP payload type, not audio.
+
+They cannot be tones. Every leg here runs a speech codec: G.711 at best, and
+an IMS call usually negotiates AMR, which mangles a pair of pure tones just
+enough that the IVR on the far end hears nothing, or hears a different digit.
+A digit that silently does not arrive is worse than one that is refused, so
+VoCat refuses rather than falling back to tones.
+
+### Across the trunk
+
+The PBX leg offers `telephone-event/8000` as payload 101 and answers with
+whatever number the PBX's own offer used — an answer may only name a payload
+type the offer listed, so a PBX with DTMF turned off gets a call with no
+telephone events rather than a renegotiation it did not ask for.
+
+The two legs negotiate their event types separately, and their clocks are
+unrelated, so a digit is **re-generated** on the far leg rather than forwarded
+packet for packet. One press becomes eight 20 ms tone packets sharing a
+timestamp, then the end packet repeated three times, then a three-frame gap —
+the gap is the only thing that makes `11` two digits rather than one held key.
+
+### From the browser
+
+The Calls page has a keypad on an answered call. It does not need browser
+audio connected: the digit is generated server-side on the call's own RTP
+stream, so it works whether or not anyone is listening through the browser.
+
+```
+POST /api/devices/{id}/calls/dtmf
+{"call_id": "...", "digits": "*123#"}
+```
+
+`409` means the carrier declined `telephone-event` in its SDP answer, so this
+call cannot carry digits at all. `501` means the call is on the modem's
+circuit-switched path rather than IMS, where VoCat has no RTP stream to put
+events on.
+
 ## The trunk and the Calls page together
 
 Both work at once, and neither has to be off for the other to run. The Calls

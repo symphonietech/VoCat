@@ -393,3 +393,54 @@ func TestOfferReACKsARetransmittedAnswer(t *testing.T) {
 		t.Fatalf("the second ACK differs from the first:\n%s\n---\n%s", first, second)
 	}
 }
+
+// A digit pressed on a softphone has to reach the SIM, or a caller sitting in
+// a PSTN phone menu can hear "press 1 for billing" and do nothing about it.
+// The two legs negotiate their own telephone-event types, so the digit is
+// re-generated on the far leg rather than forwarded packet for packet.
+func TestOfferRelaysADigitFromThePBXToTheSIM(t *testing.T) {
+	pbx := newFakePBX(t)
+	gateway := newFakeGateway()
+	server := inboundServer(t, gateway, pbx.address())
+
+	media, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer media.Close()
+	mediaPort := media.LocalAddr().(*net.UDPAddr).Port
+
+	if err := server.Offer(sampleInbound()); err != nil {
+		t.Fatal(err)
+	}
+	invite, from := pbx.receiveMethod(t, "INVITE")
+	// The answer accepts the telephone-event type the offer proposed, which
+	// is what makes the leg treat those packets as digits rather than audio.
+	answer := strings.Replace(pbx.answer(t, invite, mediaPort),
+		"m=audio "+strconv.Itoa(mediaPort)+" RTP/AVP 0\r\n",
+		"m=audio "+strconv.Itoa(mediaPort)+" RTP/AVP 0 101\r\n"+
+			"a=rtpmap:101 telephone-event/8000\r\n", 1)
+	pbx.send(t, answer, from)
+	pbx.receiveMethod(t, "ACK")
+
+	target := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: sdpAudioPort(t, invite)}
+	// One RFC 4733 event for "1": the trunk reports a digit on the first
+	// packet of an event, so repeating it is only insurance against loss.
+	packet := make([]byte, 16)
+	packet[0], packet[1] = 0x80, 0x80|101
+	packet[3] = 1
+	packet[7] = 160
+	packet[12] = 1   // event: the digit 1
+	packet[13] = 10  // volume
+	packet[15] = 160 // duration
+	deadline := time.Now().Add(3 * time.Second)
+	for gateway.media.sentDigits() == "" && time.Now().Before(deadline) {
+		if _, err := media.WriteToUDP(packet, target); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := gateway.media.sentDigits(); got != "1" {
+		t.Fatalf("the SIM leg received %q, want \"1\"", got)
+	}
+}

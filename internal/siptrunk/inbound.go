@@ -228,6 +228,8 @@ func (o *outbound) run(ctx context.Context) {
 		return
 	}
 	leg.setPayload(answer.Payload)
+	// Whatever the PBX's answer named, which may differ from the 101 offered.
+	leg.setEventPayload(answer.EventPayload)
 	leg.setRemote(&net.UDPAddr{IP: answer.Address, Port: answer.Port})
 
 	// The SIM leg is answered only now. Answering earlier would connect the
@@ -310,6 +312,8 @@ func (o *outbound) pump(ctx context.Context, media Media, leg *rtpLeg) {
 	var once sync.Once
 	stop := make(chan struct{})
 	end := func() { once.Do(func() { close(stop) }) }
+
+	relayDigits(ctx, stop, leg, media, o.server, o.callID)
 
 	go func() {
 		defer end()

@@ -6,7 +6,7 @@ import {
   MicOffRegular,
   SpeakerMuteRegular,
 } from "@fluentui/react-icons";
-import { apiMessage, api, dialCall, hangupCall, answerCall, listCalls } from "../api";
+import { apiMessage, api, dialCall, hangupCall, answerCall, listCalls, sendCallDTMF } from "../api";
 import type { Call, DeviceListItem } from "../types";
 import {
   Button,
@@ -48,6 +48,44 @@ function elapsed(from: string | undefined, now: number): string {
 // Peak amplitude is only meaningful to a person as "is anything moving", so the
 // meter trades accuracy for legibility: a square root lifts quiet speech into
 // visible territory instead of leaving the bar flat.
+const KEYPAD = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "0", "#"];
+
+// One press, one request. Digits are queued server-side and go out at one per
+// packet interval, so holding a key down or typing fast is fine: they arrive
+// in order, spaced far enough apart for the far end to count them.
+function Keypad({
+  disabled,
+  sent,
+  onPress,
+}: {
+  disabled?: boolean;
+  sent: string;
+  onPress: (digit: string) => void;
+}) {
+  const { t } = useI18n();
+  return (
+    <div className="mt-3 border-t border-gray-100 pt-3 dark:border-white/10">
+      <div className="mb-2 flex items-center gap-2">
+        <span className="text-xs text-gray-400">{t("拨号键盘")}</span>
+        {sent ? <span className="font-mono text-xs tracking-widest">{sent}</span> : null}
+      </div>
+      <div className="grid max-w-[15rem] grid-cols-3 gap-1">
+        {KEYPAD.map((digit) => (
+          <Button
+            key={digit}
+            size="small"
+            disabled={disabled}
+            className="font-mono text-base"
+            onClick={() => onPress(digit)}
+          >
+            {digit}
+          </Button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function LevelMeter({ label, level, muted }: { label: string; level: number; muted?: boolean }) {
   const width = Math.min(100, Math.round(Math.sqrt(Math.max(0, level)) * 100));
   return (
@@ -77,6 +115,8 @@ export default function CallsPage() {
   const [calls, setCalls] = useState<Call[]>([]);
   const [number, setNumber] = useState("");
   const [busy, setBusy] = useState(false);
+  // What has been sent on this call, so a mistyped menu choice is visible.
+  const [digits, setDigits] = useState("");
   const [loadError, setLoadError] = useState("");
   const [audioOn, setAudioOn] = useState(false);
   const [micOn, setMicOn] = useState(true);
@@ -131,6 +171,12 @@ export default function CallsPage() {
   useEffect(() => {
     if (!mediaReady) setAudioOn(false);
   }, [mediaReady, activeId]);
+
+  // A new call starts with an empty keypad history; showing the last call's
+  // digits against this one would be worse than showing none.
+  useEffect(() => {
+    setDigits("");
+  }, [activeId]);
 
   const audio = useCallAudio(deviceId, activeId, audioOn && mediaReady, micOn);
 
@@ -291,6 +337,24 @@ export default function CallsPage() {
                   <p className="mt-2 rounded-lg bg-amber-50 p-2 text-xs text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">
                     {t("当前页面不是安全上下文，浏览器不会提供麦克风，通话将只能接收。请改用 HTTPS（设置中可开启自签名证书）或通过 http://localhost 访问。")}
                   </p>
+                ) : null}
+
+                {/* The keypad is what makes a PSTN menu usable: "press 1 for
+                    billing" needs a 1 that reaches the far end, and these go
+                    out as RFC 4733 events on the call's own RTP stream rather
+                    than as audio. It does not need browser audio connected --
+                    the digit is generated server-side. */}
+                {active.state === "active" ? (
+                  <Keypad
+                    disabled={busy}
+                    sent={digits}
+                    onPress={(digit) => {
+                      setDigits((current) => (current + digit).slice(-32));
+                      sendCallDTMF(deviceId, active.id, digit).catch((error) => {
+                        message.error(`${t("按键发送失败")}：${apiMessage(error)}`);
+                      });
+                    }}
+                  />
                 ) : null}
 
                 {audioOn ? (

@@ -49,6 +49,8 @@ export const EN_DICT: Record<string, string> = {
     "characters and are never shown again; the last column is how many devices may register at once. Extensions can dial each other directly.",
   "生成的 PJSIP 配置": "Generated PJSIP configuration",
   "生成的内线拨号方案": "Generated internal dialplan",
+  "拨号键盘": "Keypad",
+  "按键发送失败": "Could not send the digit",
   "中继（VoCat）": "Trunk (VoCat)",
   "Asterisk 中没有名为 vocat 的中继端点": "Asterisk has no endpoint named vocat",
   "分机": "Extensions",

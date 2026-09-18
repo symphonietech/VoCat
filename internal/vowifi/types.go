@@ -459,6 +459,14 @@ type CallMedia interface {
 	WritePCM([]int16) error
 }
 
+// CallDTMFSender is optional on a CallMedia: a leg that negotiated RFC 4733
+// telephone events can carry keypad digits, and one that did not cannot carry
+// them at all. Tones as audio are not a fallback -- AMR, which is what an IMS
+// call usually negotiates, does not survive them.
+type CallDTMFSender interface {
+	SendDTMF(string) error
+}
+
 // CallMediaController is optional so signalling-only IMS implementations stay
 // compatible. Media is only exposed for a specific active call.
 type CallMediaController interface {

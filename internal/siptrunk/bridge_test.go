@@ -16,14 +16,35 @@ import (
 // what the SIM would have sent, and what it returns is what the SIM heard.
 type fakeMedia struct {
 	inbound chan []int16
+	// digits is the SIM side's inbound keypad channel, so a test can push a
+	// digit the far end pressed.
+	digits chan rune
 
 	mu      sync.Mutex
 	written [][]int16
+	sent    []string
 	closed  bool
 }
 
 func newFakeMedia() *fakeMedia {
-	return &fakeMedia{inbound: make(chan []int16, 8)}
+	return &fakeMedia{inbound: make(chan []int16, 8), digits: make(chan rune, 8)}
+}
+
+// SendDTMF and Digits make fakeMedia a DTMFMedia, which is what the bridge
+// asserts before relaying anything.
+func (m *fakeMedia) SendDTMF(sequence string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sent = append(m.sent, sequence)
+	return nil
+}
+
+func (m *fakeMedia) Digits() <-chan rune { return m.digits }
+
+func (m *fakeMedia) sentDigits() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return strings.Join(m.sent, "")
 }
 
 func (m *fakeMedia) ReadPCM(ctx context.Context) ([]int16, error) {

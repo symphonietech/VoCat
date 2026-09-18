@@ -737,6 +737,11 @@ func (s *Server) handleDevicePath(
 			return true
 		}
 		return s.handleCallMedia(w, r, config)
+	case "calls/dtmf":
+		if !s.requirePhysicalDevice(w, physicalPresent) {
+			return true
+		}
+		return s.handleCallDTMF(w, r, config)
 	default:
 		return false
 	}

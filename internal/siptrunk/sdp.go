@@ -17,6 +17,10 @@ const (
 	payloadPCMU = 0
 	payloadPCMA = 8
 	clockRate   = 8000
+	// payloadEvent is the telephone-event type VoCat offers. Nothing fixes it
+	// -- it is a dynamic type -- but 101 is what every PBX uses, and matching
+	// the common choice avoids a renegotiation nobody benefits from.
+	payloadEvent = 101
 )
 
 // mediaOffer is what the PBX asked for: where to send audio, and which of the
@@ -25,6 +29,11 @@ type mediaOffer struct {
 	Address net.IP
 	Port    int
 	Payload byte
+	// EventPayload is the RFC 4733 telephone-event type, or zero when the
+	// offer has none. Without it a call cannot carry keypad digits: G.711
+	// would pass the tones, but the PBX is not listening for audio tones and
+	// neither is the carrier on the other leg.
+	EventPayload byte
 	// SendOnly records a=sendonly / a=recvonly, which a PBX uses for hold.
 	Direction string
 }
@@ -88,6 +97,15 @@ func ParseOffer(body []byte) (mediaOffer, error) {
 			if !inAudio {
 				continue
 			}
+			if mapping, found := strings.CutPrefix(value, "rtpmap:"); found {
+				fields := strings.Fields(mapping)
+				if len(fields) == 2 && strings.HasPrefix(strings.ToLower(fields[1]), "telephone-event") {
+					if number, err := strconv.Atoi(fields[0]); err == nil && number > 0 && number < 128 {
+						offer.EventPayload = byte(number)
+					}
+				}
+				continue
+			}
 			switch value {
 			case "sendonly", "recvonly", "inactive", "sendrecv":
 				offer.Direction = value
@@ -113,7 +131,7 @@ func ParseOffer(body []byte) (mediaOffer, error) {
 // BuildAnswer renders the SDP VoCat returns for an accepted offer, agreeing to
 // the single payload type the offer chose. Answering with one format rather
 // than a list keeps the PBX from renegotiating to something unsupported.
-func BuildAnswer(local net.IP, port int, payload byte) []byte {
+func BuildAnswer(local net.IP, port int, payload, eventPayload byte) []byte {
 	family := "IP4"
 	if local.To4() == nil {
 		family = "IP6"
@@ -123,18 +141,28 @@ func BuildAnswer(local net.IP, port int, payload byte) []byte {
 		name = "PCMA"
 	}
 	session := time.Now().UnixNano()
+	formats := strconv.Itoa(int(payload))
+	// Keyed to the number the offer chose rather than VoCat's own: an answer
+	// may only accept a payload type the offer listed.
+	if eventPayload != 0 {
+		formats += " " + strconv.Itoa(int(eventPayload))
+	}
 	lines := []string{
 		"v=0",
 		fmt.Sprintf("o=- %d %d IN %s %s", session, session, family, local.String()),
 		"s=VoCat",
 		fmt.Sprintf("c=IN %s %s", family, local.String()),
 		"t=0 0",
-		fmt.Sprintf("m=audio %d RTP/AVP %d", port, payload),
+		fmt.Sprintf("m=audio %d RTP/AVP %s", port, formats),
 		fmt.Sprintf("a=rtpmap:%d %s/%d", payload, name, clockRate),
-		"a=ptime:20",
-		"a=sendrecv",
-		"",
 	}
+	if eventPayload != 0 {
+		lines = append(lines,
+			fmt.Sprintf("a=rtpmap:%d telephone-event/%d", eventPayload, clockRate),
+			fmt.Sprintf("a=fmtp:%d 0-15", eventPayload),
+		)
+	}
+	lines = append(lines, "a=ptime:20", "a=sendrecv", "")
 	return []byte(strings.Join(lines, "\r\n"))
 }
 
@@ -154,9 +182,11 @@ func BuildOffer(local net.IP, port int) []byte {
 		"s=VoCat",
 		fmt.Sprintf("c=IN %s %s", family, local.String()),
 		"t=0 0",
-		fmt.Sprintf("m=audio %d RTP/AVP %d %d", port, payloadPCMU, payloadPCMA),
+		fmt.Sprintf("m=audio %d RTP/AVP %d %d %d", port, payloadPCMU, payloadPCMA, payloadEvent),
 		fmt.Sprintf("a=rtpmap:%d PCMU/%d", payloadPCMU, clockRate),
 		fmt.Sprintf("a=rtpmap:%d PCMA/%d", payloadPCMA, clockRate),
+		fmt.Sprintf("a=rtpmap:%d telephone-event/%d", payloadEvent, clockRate),
+		fmt.Sprintf("a=fmtp:%d 0-15", payloadEvent),
 		"a=ptime:20",
 		"a=sendrecv",
 		"",
