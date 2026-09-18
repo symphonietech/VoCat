@@ -1098,7 +1098,7 @@ func TestParseRPDUExtractsServiceCentreAddress(t *testing.T) {
 	originator := []byte{0x91, 0x68, 0x31, 0x08, 0x10, 0x00, 0x05, 0xF0}
 	frame := []byte{0x01, 0x2A, byte(len(originator))}
 	frame = append(frame, originator...)
-	frame = append(frame, 0x00)       // RP-DA length 0
+	frame = append(frame, 0x00)             // RP-DA length 0
 	frame = append(frame, 0x02, 0xAB, 0xCD) // RP-UD length 2 + TPDU
 
 	parsed, err := parseRPDU(frame)
