@@ -159,8 +159,8 @@ func (s *Server) saveSMSTestEndpoint(w http.ResponseWriter, r *http.Request, id 
 		// A header or body parameter named like a credential is write-only
 		// too: blank keeps what is stored, exactly as the endpoint password
 		// does.
-		Headers:    smstest.MergePairSecrets(request.Headers, existing.Headers),
-		BodyParams: smstest.MergePairSecrets(request.BodyParams, existing.BodyParams),
+		Headers:    mergeSMSTestPairSecrets(request.Headers, existing.Headers),
+		BodyParams: mergeSMSTestPairSecrets(request.BodyParams, existing.BodyParams),
 		CreatedAt:  existing.CreatedAt,
 	})
 	if err != nil {
@@ -409,8 +409,8 @@ func smsTestEndpointResponse(value store.SMSTestEndpoint) map[string]any {
 		// password is. A gateway that wants a password in a body parameter
 		// calls it one, and nothing else distinguishes it from the recipient
 		// number beside it.
-		"headers":     smstest.RedactPairs(value.Headers),
-		"body_params": smstest.RedactPairs(value.BodyParams),
+		"headers":     redactSMSTestPairs(value.Headers),
+		"body_params": redactSMSTestPairs(value.BodyParams),
 		"created_at":  value.CreatedAt.Format(time.RFC3339),
 		"updated_at":  value.UpdatedAt.Format(time.RFC3339),
 	}

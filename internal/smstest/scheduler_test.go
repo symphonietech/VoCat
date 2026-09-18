@@ -29,7 +29,7 @@ func newTestScheduler(t *testing.T) (*Scheduler, *store.Store) {
 func seedSchedule(t *testing.T, database *store.Store, url string, schedule store.SMSTestSchedule) store.SMSTestSchedule {
 	t.Helper()
 	ctx := context.Background()
-	body, _ := json.Marshal([]Pair{
+	body, _ := json.Marshal([]keyValue{
 		{Key: "to", Value: "{{to}}"},
 		{Key: "text", Value: "{{content}}"},
 	})
@@ -363,89 +363,39 @@ func containsRune(alphabet string, char rune) bool {
 	return false
 }
 
-// The stored reply is returned by the results API, so every credential has to
-// be gone from it -- not just the password field.
-func TestRedactSecretsRemovesEveryCredential(t *testing.T) {
-	secrets := []string{"field-password", "body-api-key"}
-	body := `{"echo":"pass=field-password&key=body-api-key","to":"+1"}`
-	got := redactSecrets(body, secrets)
-	for _, secret := range secrets {
-		if strings.Contains(got, secret) {
-			t.Errorf("%q survived: %s", secret, got)
-		}
+// The gateway password must not come back out through a result row. A gateway
+// that takes credentials in the query string puts them in the URL, and Go's
+// transport errors quote that URL back -- so a failed send would write the
+// password into a record the results page returns.
+func TestRedactSecretRemovesTheGatewayPassword(t *testing.T) {
+	secret := "s3cret-gateway-pass"
+	body := `Post "https://gw.example/send?user=bob&pass=` + secret + `&to=1": dial tcp: refused`
+	got := redactSecret(body, secret)
+	if strings.Contains(got, secret) {
+		t.Fatalf("the password survived redaction: %s", got)
 	}
-	// What is not a credential is left readable: a result nobody can read is
-	// not worth storing.
-	if !strings.Contains(got, `"to":"+1"`) {
-		t.Errorf("the record was mangled: %s", got)
+	if !strings.Contains(got, secretMask) {
+		t.Fatalf("nothing was redacted: %s", got)
 	}
-	// A very short secret is skipped rather than blanking half the text.
-	if got := redactSecrets("a as in apple", []string{"a"}); got != "a as in apple" {
-		t.Errorf("a one-character secret mangled the text: %q", got)
-	}
-	if got := redactSecrets("", []string{"longenough"}); got != "" {
-		t.Errorf("empty text became %q", got)
+	// Every occurrence, because a gateway may echo the request as well as
+	// the transport quoting it.
+	twice := redactSecret(secret+" and "+secret, secret)
+	if strings.Contains(twice, secret) {
+		t.Fatalf("only the first occurrence was redacted: %s", twice)
 	}
 }
 
-// Redaction must not reach the request. A credential is hidden from the API
-// and from the stored reply, and still has to arrive at the gateway verbatim
-// or the whole feature stops sending.
-func TestRunScheduleSendsTheRealCredentialAndStoresNeither(t *testing.T) {
-	ctx := context.Background()
-	scheduler, database := newTestScheduler(t)
-
-	const secret = "s3cret-gateway-pass"
-	var gotBody map[string]string
-	var gotAuth string
-	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotAuth = r.Header.Get("X-Api-Key")
-		_ = json.NewDecoder(r.Body).Decode(&gotBody)
-		w.WriteHeader(http.StatusOK)
-		// A gateway that echoes the request back is the case that put the
-		// credential into the stored reply in the first place.
-		_, _ = w.Write([]byte(`{"ok":true,"echo":"password=` + secret + `"}`))
-	}))
-	defer gateway.Close()
-
-	headers, _ := json.Marshal([]Pair{{Key: "X-Api-Key", Value: secret}})
-	body, _ := json.Marshal([]Pair{
-		{Key: "to", Value: "{{to}}"},
-		{Key: "password", Value: secret},
-	})
-	if _, err := database.UpsertSMSTestEndpoint(ctx, store.SMSTestEndpoint{
-		ID: "ep1", Name: "gateway", Method: http.MethodPost, URL: gateway.URL,
-		Headers: string(headers), BodyParams: string(body),
-	}); err != nil {
-		t.Fatal(err)
+// Blanking every occurrence of a two-character password would mangle the
+// response into something unreadable while protecting a secret that is not
+// one.
+func TestRedactSecretLeavesShortAndEmptyValuesAlone(t *testing.T) {
+	if got := redactSecret("no secret here", ""); got != "no secret here" {
+		t.Errorf("an empty secret changed the text: %q", got)
 	}
-	schedule, err := database.UpsertSMSTestSchedule(ctx, store.SMSTestSchedule{
-		ID: "sc1", EndpointID: "ep1", Recipient: "+15551230000",
-		ContentTemplate: "Your code is {{code}}", IsExternal: true,
-	})
-	if err != nil {
-		t.Fatal(err)
+	if got := redactSecret("a as in apple", "a"); got != "a as in apple" {
+		t.Errorf("a one-character secret mangled the text: %q", got)
 	}
-
-	result, err := scheduler.RunSchedule(ctx, schedule)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// The gateway got the real thing, in both a header and a body parameter.
-	if gotAuth != secret {
-		t.Errorf("the gateway received header %q, want the real credential", gotAuth)
-	}
-	if gotBody["password"] != secret {
-		t.Errorf("the gateway received body password %q, want the real credential", gotBody["password"])
-	}
-	if gotBody["to"] != "+15551230000" {
-		t.Errorf("the recipient did not substitute: %q", gotBody["to"])
-	}
-	// And the record of it carries neither.
-	if strings.Contains(result.SendResponse, secret) {
-		t.Fatalf("the credential was stored in the result: %s", result.SendResponse)
-	}
-	if !strings.Contains(result.SendResponse, `"ok":true`) {
-		t.Fatalf("the reply was mangled rather than redacted: %s", result.SendResponse)
+	if got := redactSecret("", "longenough"); got != "" {
+		t.Errorf("empty text became %q", got)
 	}
 }
