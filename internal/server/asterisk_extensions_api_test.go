@@ -315,3 +315,141 @@ func TestAsteriskExtensionsReturnsTheInternalPreview(t *testing.T) {
 		t.Fatalf("internal preview = %q", preview)
 	}
 }
+
+func putInbound(t *testing.T, server *Server, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodPut, "/api/asterisk/inbound", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.handlePutAsteriskInbound(response, request)
+	return response
+}
+
+// Saving the mode has to write the dialplan too, or the page shows one thing
+// and Asterisk does another until the next unrelated save.
+func TestAsteriskInboundWritesTheDialplan(t *testing.T) {
+	server, _, dir := extensionsTestServer(t)
+	putExtensions(t, server,
+		`{"extensions":[{"name":"13105557777","password":"correct-horse-battery","max_contacts":2}]}`)
+	if code := putInbound(t, server, `{"mode":"did","ring_seconds":30}`).Code; code != http.StatusOK {
+		t.Fatalf("status = %d", code)
+	}
+	inbound, err := os.ReadFile(filepath.Join(dir, inboundFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(inbound), "exten => 13105557777,1,Dial(PJSIP/13105557777,30)") {
+		t.Fatalf("the per-number rule was not written:\n%s", inbound)
+	}
+	if !strings.Contains(string(inbound), "exten => +13105557777,1,") {
+		t.Fatalf("the E.164 form was not written:\n%s", inbound)
+	}
+}
+
+// A ring group naming an account that does not exist rings nothing, and a
+// caller who never reaches anyone is the only signal.
+func TestAsteriskInboundRefusesAnUnknownExtension(t *testing.T) {
+	server, _, _ := extensionsTestServer(t)
+	putExtensions(t, server, `{"extensions":[{"name":"1001","password":"correct-horse-battery","max_contacts":2}]}`)
+	response := putInbound(t, server, `{"mode":"hunt","ring_seconds":30,"hunt_seconds":15,"extensions":["1001","9999"]}`)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), "9999") {
+		t.Fatalf("the refusal does not name the extension: %s", response.Body.String())
+	}
+}
+
+// Deleting an extension a ring group names must not leave a file that rings
+// nothing. Falling back to ringing everything is wrong in a smaller way.
+func TestAsteriskInboundFallsBackWhenAnExtensionIsRemoved(t *testing.T) {
+	server, _, dir := extensionsTestServer(t)
+	putExtensions(t, server,
+		`{"extensions":[{"name":"1001","password":"correct-horse-battery","max_contacts":2},`+
+			`{"name":"1002","password":"correct-horse-battery","max_contacts":2}]}`)
+	if code := putInbound(t, server,
+		`{"mode":"hunt","ring_seconds":30,"hunt_seconds":15,"extensions":["1001","1002"]}`).Code; code != http.StatusOK {
+		t.Fatal("a valid hunt plan was refused")
+	}
+	// 1002 goes away; the stored plan still names it.
+	if code := putExtensions(t, server, `{"extensions":[{"name":"1001","max_contacts":2}]}`).Code; code != http.StatusOK {
+		t.Fatal("removing an extension was refused")
+	}
+	inbound, err := os.ReadFile(filepath.Join(dir, inboundFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(inbound), "1002") {
+		t.Fatalf("the dialplan still rings a deleted extension:\n%s", inbound)
+	}
+	if !strings.Contains(string(inbound), "Dial(PJSIP/1001,") {
+		t.Fatalf("nothing rings after the fallback:\n%s", inbound)
+	}
+}
+
+// VoCat already learns each SIM's number. Copying them between two screens is
+// how a digit gets transposed and a DID silently rings nothing.
+func TestAsteriskExtensionCandidatesComeFromTheSIMNumbers(t *testing.T) {
+	server, database, _ := extensionsTestServer(t)
+	ctx := context.Background()
+	for iccid, number := range map[string]string{
+		"8901111": "+1 310 555 7777",
+		"8902222": "12125551234",
+	} {
+		if err := database.UpsertPhoneAssociation(ctx, store.PhoneAssociation{
+			ICCID: iccid, DeviceID: "slot1", Number: number, Source: "ims",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	putExtensions(t, server, `{"extensions":[{"name":"12125551234","password":"correct-horse-battery","max_contacts":2}]}`)
+
+	response := httptest.NewRecorder()
+	server.handleAsteriskExtensionCandidates(response,
+		httptest.NewRequest(http.MethodGet, "/api/asterisk/extensions/candidates", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+	var body struct {
+		Data struct {
+			Candidates []asteriskExtensionCandidate `json:"candidates"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Data.Candidates) != 2 {
+		t.Fatalf("candidates = %+v", body.Data.Candidates)
+	}
+	found := map[string]bool{}
+	for _, candidate := range body.Data.Candidates {
+		found[candidate.Number] = candidate.Exists
+	}
+	// A number with spaces and a "+" still has to become a usable section
+	// name, which is digits only.
+	if exists, ok := found["13105557777"]; !ok || exists {
+		t.Fatalf("the formatted number was not normalised or is wrongly marked: %+v", found)
+	}
+	// One that already has an extension is still listed, marked, rather than
+	// hidden -- otherwise "where did my SIM go" has no answer.
+	if exists, ok := found["12125551234"]; !ok || !exists {
+		t.Fatalf("an existing extension was not marked: %+v", found)
+	}
+}
+
+// A number VoCat cannot reduce to a section name must be skipped rather than
+// offered as an extension that would fail to save.
+func TestNormalizeExtensionNumberRefusesWhatCannotBeAName(t *testing.T) {
+	for input, want := range map[string]string{
+		"+1 (310) 555-7777":          "13105557777",
+		"12125551234":                "12125551234",
+		"12":                         "",
+		"":                           "",
+		"unknown":                    "",
+		"+1234567890123456789012345": "",
+	} {
+		if got := normalizeExtensionNumber(input); got != want {
+			t.Errorf("normalizeExtensionNumber(%q) = %q, want %q", input, got, want)
+		}
+	}
+}

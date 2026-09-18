@@ -1,8 +1,15 @@
 import { useCallback, useEffect, useState } from "react";
-import { AddRegular, DeleteRegular, ArrowSyncRegular, KeyRegular } from "@fluentui/react-icons";
+import {
+  AddRegular,
+  DeleteRegular,
+  ArrowSyncRegular,
+  KeyRegular,
+  SimRegular,
+} from "@fluentui/react-icons";
 import {
   apiMessage,
   getAsteriskExtensions,
+  getAsteriskExtensionCandidates,
   saveAsteriskExtensions,
   applyAsteriskExtensions,
 } from "../../api";
@@ -33,6 +40,12 @@ export function ExtensionEditor() {
   const [extensions, setExtensions] = useState<AsteriskExtension[]>([]);
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
+  // Which rows are ticked, for deleting several at once. Keyed by name
+  // because the index shifts as rows are removed.
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  // Set after a batch import, because those passwords are visible exactly
+  // once: they are write-only the moment they are saved.
+  const [imported, setImported] = useState(0);
 
   const load = useCallback((keepEdits: boolean) => {
     getAsteriskExtensions()
@@ -47,6 +60,52 @@ export function ExtensionEditor() {
     load(false);
   }, [load]);
 
+  // Create one extension per SIM number VoCat already knows, each with its own
+  // generated password. The rows are filled in rather than saved, so the
+  // passwords can be copied before they become unreadable.
+  const importFromSIMs = async () => {
+    setBusy(true);
+    try {
+      const { candidates } = await getAsteriskExtensionCandidates();
+      const taken = new Set(extensions.map((extension) => extension.name.toLowerCase()));
+      const fresh = candidates
+        .filter((candidate) => !candidate.exists && !taken.has(candidate.number.toLowerCase()))
+        .map((candidate) => ({
+          name: candidate.number,
+          password: generatePassword(),
+          callerId: "",
+          maxContacts: DEFAULT_CONTACTS,
+          comment: candidate.deviceName || candidate.deviceId || "",
+        }));
+      if (fresh.length === 0) {
+        message.info(t("没有可导入的号码：每张 SIM 的号码都已有分机。"));
+        return;
+      }
+      setExtensions((current) => [...current, ...fresh]);
+      setImported(fresh.length);
+      setDirty(true);
+    } catch (error) {
+      message.error(apiMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const toggle = (name: string) => {
+    setSelected((current) => {
+      const next = new Set(current);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  };
+
+  const deleteSelected = () => {
+    setExtensions((current) => current.filter((extension) => !selected.has(extension.name)));
+    setSelected(new Set());
+    setDirty(true);
+  };
+
   const update = (index: number, patch: Partial<AsteriskExtension>) => {
     setExtensions((current) =>
       current.map((extension, at) => (at === index ? { ...extension, ...patch } : extension)),
@@ -59,6 +118,8 @@ export function ExtensionEditor() {
     try {
       await saveAsteriskExtensions(extensions, replaceSeeded);
       setDirty(false);
+      setSelected(new Set());
+      setImported(0);
       // Passwords are write-only, so what was typed cannot be read back --
       // say so at the moment it stops being visible rather than later.
       message.success(t("已保存。密码只写入 Asterisk，之后无法再读取。"));
@@ -108,6 +169,14 @@ export function ExtensionEditor() {
           >
             {t("添加分机")}
           </Button>
+          <Button icon={<SimRegular />} loading={busy} onClick={() => void importFromSIMs()}>
+            {t("从 SIM 号码导入")}
+          </Button>
+          {selected.size > 0 ? (
+            <Button variant="danger" icon={<DeleteRegular />} onClick={deleteSelected}>
+              {t("删除所选")} ({selected.size})
+            </Button>
+          ) : null}
           <Button variant="primary" loading={busy} disabled={!dirty} onClick={() => save()}>
             {t("保存")}
           </Button>
@@ -121,6 +190,12 @@ export function ExtensionEditor() {
           </Button>
         </div>
       </div>
+
+      {imported > 0 ? (
+        <p className="mb-2 rounded-lg bg-sky-50 p-2 text-xs text-sky-700 dark:bg-sky-500/10 dark:text-sky-300">
+          {t("已按 SIM 号码生成分机，密码只在保存前可见，请先复制再保存。")}
+        </p>
+      ) : null}
 
       {state?.seeded ? (
         <p className="mb-2 rounded-lg bg-amber-50 p-2 text-xs text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">
@@ -141,7 +216,16 @@ export function ExtensionEditor() {
           </p>
         ) : null}
         {extensions.map((extension, index) => (
-          <div key={index} className="grid gap-2 p-3 sm:grid-cols-[8rem_1fr_8rem_4rem_auto]">
+          <div key={index} className="grid gap-2 p-3 sm:grid-cols-[1.5rem_8rem_1fr_8rem_4rem_auto]">
+            <label className="flex items-center justify-center">
+              <input
+                type="checkbox"
+                className="size-4"
+                checked={selected.has(extension.name)}
+                disabled={!extension.name}
+                onChange={() => toggle(extension.name)}
+              />
+            </label>
             <Input
               value={extension.name}
               placeholder="1001"

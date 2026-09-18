@@ -109,3 +109,35 @@ func (s *Store) PhoneNumberForICCID(ctx context.Context, iccid string) (string, 
 	}
 	return strings.TrimSpace(number), nil
 }
+
+// ListPhoneAssociations returns every number VoCat has learned, newest first.
+// It is what lets the Asterisk page offer to create an extension per SIM
+// rather than making someone copy numbers between two screens.
+func (s *Store) ListPhoneAssociations(ctx context.Context) ([]PhoneAssociation, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT iccid, device_id, number, source, created_at, updated_at
+		FROM phone_associations
+		ORDER BY updated_at DESC, iccid
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("list phone associations: %w", err)
+	}
+	defer rows.Close()
+	values := make([]PhoneAssociation, 0)
+	for rows.Next() {
+		var value PhoneAssociation
+		var createdAt, updatedAt int64
+		if err := rows.Scan(
+			&value.ICCID, &value.DeviceID, &value.Number, &value.Source, &createdAt, &updatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan phone association: %w", err)
+		}
+		value.CreatedAt = time.Unix(createdAt, 0).UTC()
+		value.UpdatedAt = time.Unix(updatedAt, 0).UTC()
+		values = append(values, value)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list phone associations: %w", err)
+	}
+	return values, nil
+}

@@ -836,8 +836,9 @@ two `X-VoCat-Device` headers name the SIM, the same header the outbound
 direction reads, in the opposite direction.
 
 Asterisk's `[vocat] type=identify match=127.0.0.1` is what places the call in
-`[from-vocat]`, which today rings `$ASTERISK_SIP_USER`. Rename that account in
-the web UI and this line needs the same edit until per-SIM routing lands.
+`[from-vocat]`, which includes the generated `[vocat-inbound]`. What that
+rings is a mode chosen on the Asterisk page — see
+[Inbound routing](#inbound-routing).
 
 ### The SIM is answered last
 
@@ -876,6 +877,90 @@ The SDP offer lists **both** G.711 flavours, unlike the answer the outbound
 direction sends. The trunk is asking rather than agreeing here, and which one
 a PBX prefers is its own configuration; the RTP leg takes its codec from
 whichever the answer picks.
+
+## Inbound routing
+
+Where a call arriving on a SIM rings is a mode on the Asterisk page, not a
+mapping table. The three are exclusive — there is no fallback between them,
+because a fallback is exactly what makes "why did that call ring the wrong
+phone" unanswerable.
+
+### Ring the extension named after the number
+
+The DID *is* the extension name, so this needs no configuration at all: VoCat
+puts the dialled number in the request URI, and the generated context has one
+exact rule per extension.
+
+```
+exten => 13105557777,1,Dial(PJSIP/13105557777,30)
+exten => +13105557777,1,Dial(PJSIP/13105557777,30)
+```
+
+Both forms are matched because which one the carrier sends is its choice, not
+something an operator should have to guess at. A number with no extension of
+its own is rejected with cause 1, "unallocated number" — true, and more useful
+to the carrier than a silent drop.
+
+The side effect is worth knowing: `[vocat-internal]` is consulted before the
+outbound routes, so once extension `13105557777` exists, another handset
+dialling that number reaches the desk phone rather than going out over the
+SIM. For your own number that is the right answer; it does mean never naming
+an extension after a number you do not own.
+
+### Ring every extension at once
+
+Ignores what was dialled. An empty ring group means *every* configured
+extension, so a handset added later joins without a second edit; naming a
+group explicitly overrides that.
+
+This is the default, and deliberately so: it is the mode least likely to lose
+a call, which matters for whatever runs before anyone configures anything.
+
+### Ring the list in order
+
+Each in turn, moving on when one does not answer. The generated context checks
+`DIALSTATUS` between steps:
+
+```
+ same => n,Dial(PJSIP/1001,15)
+ same => n,GotoIf($["${DIALSTATUS}" = "ANSWER"]?done)
+ same => n,Dial(PJSIP/1002,15)
+ same => n(done),Hangup()
+```
+
+Without that check the next handset would start ringing the moment the first
+one hung up — `Dial` returns when an answered call *ends*, not only when it
+fails.
+
+There is no round-robin. Round-robin distributes load; inbound wants someone
+to answer, and a rotation will send a call to the one handset nobody is near
+while the others sit idle. A real one also needs persistent state in the
+dialplan, which is racy under concurrent calls and resets on reload. That is
+what `app_queue` is for.
+
+### When a ring group loses an extension
+
+A group naming an account that does not exist rings nothing, and a caller who
+reaches no one is the only signal. So the plan is validated against the
+configured extensions when it is saved, and revalidated whenever the extension
+list changes: deleting an extension a group names falls back to ringing
+everything rather than leaving a file that rings nothing.
+
+### Creating an extension per SIM
+
+VoCat already learns each SIM's own number from IMS registration, so the
+extension editor offers them directly — copying numbers between two screens is
+how a digit gets transposed and a DID silently rings nothing.
+
+**Import from SIM numbers** adds a row per number that has no extension yet,
+each with its own generated password, reduced to digits so it can be a PJSIP
+section name. The rows are filled in rather than saved: those passwords are
+visible exactly once, because they are write-only the moment they are stored.
+Copy them, then Save.
+
+Rows carry a checkbox for deleting several at once. Deleting every extension
+is allowed — the inbound file then rejects calls with the same truthful cause
+rather than the save being refused as if it were a mistake.
 
 ## Keypad digits
 

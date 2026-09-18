@@ -30,6 +30,12 @@ const endpointsFileName = "endpoints.conf"
 // subsystems with two different reloads, not because they have two sources.
 const internalFileName = "internal.conf"
 
+// inboundFileName holds where a call arriving on a SIM rings.
+const inboundFileName = "inbound.conf"
+
+// asteriskInboundKey holds the inbound plan in the app settings table.
+const asteriskInboundKey = "asterisk.inbound"
+
 // asteriskExtension is the wire shape. The password is write-only: it is
 // accepted on PUT and never returned, so a browser session that can read the
 // page cannot read the SIP credentials out of it.
@@ -78,6 +84,14 @@ func (s *Server) routeAsteriskExtensionsAPI(w http.ResponseWriter, r *http.Reque
 	case "asterisk/extensions/apply":
 		if requireMethod(w, r, http.MethodPost) {
 			s.handleApplyAsteriskExtensions(w, r)
+		}
+		return true
+	case "asterisk/extensions/candidates":
+		s.handleAsteriskExtensionCandidates(w, r)
+		return true
+	case "asterisk/inbound":
+		if requireMethod(w, r, http.MethodPut) {
+			s.handlePutAsteriskInbound(w, r)
 		}
 		return true
 	}
@@ -141,33 +155,120 @@ func (s *Server) asteriskInternalPath() string {
 	return filepath.Join(s.asteriskDialplanDir, internalFileName)
 }
 
+func (s *Server) asteriskInboundPath() string {
+	if strings.TrimSpace(s.asteriskDialplanDir) == "" {
+		return ""
+	}
+	return filepath.Join(s.asteriskDialplanDir, inboundFileName)
+}
+
+// asteriskInboundPlan reads the saved plan, falling back to the default.
+// A stored plan that no longer validates -- an extension in the ring group was
+// deleted, say -- also falls back rather than leaving the file unwritable:
+// ringing everything is wrong in a smaller way than ringing nothing.
+func (s *Server) asteriskInboundPlan(ctx context.Context, configured []asteriskconf.Extension) asteriskconf.InboundPlan {
+	plan := asteriskconf.DefaultInboundPlan()
+	setting, err := s.store.AppSetting(ctx, asteriskInboundKey)
+	if err != nil || len(setting.Value) == 0 {
+		return plan
+	}
+	var stored asteriskInbound
+	if err := json.Unmarshal(setting.Value, &stored); err != nil {
+		s.logger.Warn("the stored Asterisk inbound plan is unreadable",
+			"category", "siptrunk", "error", err)
+		return plan
+	}
+	candidate := stored.toConfig()
+	if err := candidate.Validate(configured); err != nil {
+		s.logger.Warn("the stored Asterisk inbound plan no longer applies",
+			"category", "siptrunk", "error", err)
+		return plan
+	}
+	return candidate
+}
+
+// asteriskInbound is the wire shape of the plan.
+type asteriskInbound struct {
+	Mode        string   `json:"mode"`
+	Extensions  []string `json:"extensions,omitempty"`
+	RingSeconds int      `json:"ring_seconds"`
+	HuntSeconds int      `json:"hunt_seconds"`
+}
+
+func (i asteriskInbound) toConfig() asteriskconf.InboundPlan {
+	plan := asteriskconf.InboundPlan{
+		Mode:        asteriskconf.InboundMode(strings.TrimSpace(i.Mode)),
+		RingSeconds: i.RingSeconds,
+		HuntSeconds: i.HuntSeconds,
+	}
+	for _, name := range i.Extensions {
+		if name = strings.TrimSpace(name); name != "" {
+			plan.Extensions = append(plan.Extensions, name)
+		}
+	}
+	if plan.RingSeconds == 0 {
+		plan.RingSeconds = asteriskconf.DefaultRingSeconds
+	}
+	if plan.HuntSeconds == 0 {
+		plan.HuntSeconds = asteriskconf.DefaultHuntSeconds
+	}
+	return plan
+}
+
+func inboundToWire(plan asteriskconf.InboundPlan) asteriskInbound {
+	return asteriskInbound{
+		Mode:        string(plan.Mode),
+		Extensions:  plan.Extensions,
+		RingSeconds: plan.RingSeconds,
+		HuntSeconds: plan.HuntSeconds,
+	}
+}
+
 // renderAsteriskExtensions produces both generated files. They always move
 // together: an account that exists in one and not the other registers fine
 // and is not dialable, with nothing anywhere saying why.
-func renderAsteriskExtensions(extensions []asteriskExtension) (endpoints, internal string, err error) {
+type asteriskFiles struct {
+	endpoints string
+	internal  string
+	inbound   string
+}
+
+func renderAsteriskExtensions(extensions []asteriskExtension, plan asteriskconf.InboundPlan) (asteriskFiles, error) {
 	config := toConfigExtensions(extensions)
-	if endpoints, err = asteriskconf.RenderExtensions(config); err != nil {
-		return "", "", err
+	endpoints, err := asteriskconf.RenderExtensions(config)
+	if err != nil {
+		return asteriskFiles{}, err
 	}
-	if internal, err = asteriskconf.RenderInternalDialplan(config); err != nil {
-		return "", "", err
+	internal, err := asteriskconf.RenderInternalDialplan(config)
+	if err != nil {
+		return asteriskFiles{}, err
 	}
-	return endpoints, internal, nil
+	inbound, err := asteriskconf.RenderInbound(plan, config)
+	if err != nil {
+		return asteriskFiles{}, err
+	}
+	return asteriskFiles{endpoints: endpoints, internal: internal, inbound: inbound}, nil
 }
 
 // writeAsteriskExtensionFiles writes both, endpoints first. Neither ordering
 // is atomic across the pair, and this one fails on the side that is merely
 // unreachable rather than the side that would let a stale account register.
-func (s *Server) writeAsteriskExtensionFiles(endpoints, internal string) error {
+func (s *Server) writeAsteriskExtensionFiles(files asteriskFiles) error {
 	if path := s.asteriskEndpointsPath(); path != "" {
-		if err := writeAsteriskSecretFile(path, endpoints); err != nil {
+		if err := writeAsteriskSecretFile(path, files.endpoints); err != nil {
 			return err
 		}
 	}
-	if path := s.asteriskInternalPath(); path != "" {
-		// No secret in this one, so it matches the routes file rather than
-		// the endpoints file.
-		if err := writeAsteriskRoutesFile(path, internal); err != nil {
+	// No secret in the dialplan halves, so they match the routes file rather
+	// than the endpoints file.
+	for path, contents := range map[string]string{
+		s.asteriskInternalPath(): files.internal,
+		s.asteriskInboundPath():  files.inbound,
+	} {
+		if path == "" {
+			continue
+		}
+		if err := writeAsteriskRoutesFile(path, contents); err != nil {
 			return err
 		}
 	}
@@ -176,10 +277,11 @@ func (s *Server) writeAsteriskExtensionFiles(endpoints, internal string) error {
 
 // asteriskExtensionFilesDiffer reports whether either generated file is out
 // of step with what the stored accounts render to.
-func (s *Server) asteriskExtensionFilesDiffer(endpoints, internal string) bool {
+func (s *Server) asteriskExtensionFilesDiffer(files asteriskFiles) bool {
 	for path, want := range map[string]string{
-		s.asteriskEndpointsPath(): endpoints,
-		s.asteriskInternalPath():  internal,
+		s.asteriskEndpointsPath(): files.endpoints,
+		s.asteriskInternalPath():  files.internal,
+		s.asteriskInboundPath():   files.inbound,
 	} {
 		if path == "" {
 			continue
@@ -216,17 +318,20 @@ func (s *Server) handleGetAsteriskExtensions(w http.ResponseWriter, r *http.Requ
 		"can_apply":           strings.TrimSpace(s.asteriskAMI.Address) != "",
 		"min_password_length": asteriskconf.MinPasswordLength,
 	}
-	endpoints, internal, err := renderAsteriskExtensions(extensions)
+	plan := s.asteriskInboundPlan(r.Context(), toConfigExtensions(extensions))
+	payload["inbound"] = inboundToWire(plan)
+	files, err := renderAsteriskExtensions(extensions, plan)
 	if err != nil {
 		payload["error"] = err.Error()
 	} else {
-		payload["preview"] = redactPasswords(endpoints)
-		// The dialplan half has no secret in it, so it is shown whole. It is
-		// also the half someone reads to answer "why can 1001 not reach
-		// 1003", which is the question this file exists for.
-		payload["internal_preview"] = internal
+		payload["preview"] = redactPasswords(files.endpoints)
+		// The dialplan halves have no secret in them, so they are shown
+		// whole. They are also what someone reads to answer "why can 1001
+		// not reach 1003" and "why did that call not ring anything".
+		payload["internal_preview"] = files.internal
+		payload["inbound_preview"] = files.inbound
 		if s.asteriskDialplanDir != "" {
-			payload["pending"] = s.asteriskExtensionFilesDiffer(endpoints, internal)
+			payload["pending"] = s.asteriskExtensionFilesDiffer(files)
 		}
 	}
 	if path := s.asteriskEndpointsPath(); path != "" {
@@ -292,7 +397,11 @@ func (s *Server) handlePutAsteriskExtensions(w http.ResponseWriter, r *http.Requ
 	}
 	// Render before storing. A rejected account must not be saved, or the
 	// page would show one that can never be applied.
-	rendered, internal, err := renderAsteriskExtensions(merged)
+	// The inbound plan is validated against the new list, so removing an
+	// extension that a ring group names falls back to ringing everything
+	// rather than rendering a file that rings nothing.
+	plan := s.asteriskInboundPlan(r.Context(), toConfigExtensions(merged))
+	files, err := renderAsteriskExtensions(merged, plan)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_extension", err.Error())
 		return
@@ -310,7 +419,7 @@ func (s *Server) handlePutAsteriskExtensions(w http.ResponseWriter, r *http.Requ
 	}
 	written := false
 	if s.asteriskDialplanDir != "" {
-		if err := s.writeAsteriskExtensionFiles(rendered, internal); err != nil {
+		if err := s.writeAsteriskExtensionFiles(files); err != nil {
 			s.logger.Error("could not write the Asterisk extension files",
 				"category", "siptrunk", "dir", s.asteriskDialplanDir, "error", err)
 			writeError(w, http.StatusInternalServerError, "write_failed", err.Error())
@@ -322,8 +431,9 @@ func (s *Server) handlePutAsteriskExtensions(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{
 		"saved": true, "written": written,
 		"extensions":       withoutPasswords(merged),
-		"preview":          redactPasswords(rendered),
-		"internal_preview": internal,
+		"preview":          redactPasswords(files.endpoints),
+		"internal_preview": files.internal,
+		"inbound_preview":  files.inbound,
 	}})
 }
 
@@ -361,7 +471,8 @@ func (s *Server) handleApplyAsteriskExtensions(w http.ResponseWriter, r *http.Re
 		return
 	}
 	extensions := s.storedAsteriskExtensions(r.Context())
-	rendered, internal, err := renderAsteriskExtensions(extensions)
+	plan := s.asteriskInboundPlan(r.Context(), toConfigExtensions(extensions))
+	files, err := renderAsteriskExtensions(extensions, plan)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_extension", err.Error())
 		return
@@ -370,7 +481,7 @@ func (s *Server) handleApplyAsteriskExtensions(w http.ResponseWriter, r *http.Re
 	// from what is stored would reload a stale account list and report
 	// success.
 	if s.asteriskDialplanDir != "" {
-		if err := s.writeAsteriskExtensionFiles(rendered, internal); err != nil {
+		if err := s.writeAsteriskExtensionFiles(files); err != nil {
 			writeError(w, http.StatusInternalServerError, "write_failed", err.Error())
 			return
 		}

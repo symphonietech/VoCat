@@ -674,6 +674,28 @@ export type AsteriskExtension = {
   hasPassword?: boolean;
 };
 
+// Where a call arriving on a SIM rings.
+export type AsteriskInbound = {
+  // "did" rings the extension named after the dialled number, "ring_all"
+  // rings everything at once, "hunt" rings the list in order.
+  mode: "did" | "ring_all" | "hunt";
+  // In hunt mode this is the order and is required. In ring-all an empty list
+  // means every configured extension, so a new handset joins without a second
+  // edit.
+  extensions?: string[];
+  ringSeconds: number;
+  huntSeconds: number;
+};
+
+// One SIM number VoCat has learned, offered as an extension to create.
+export type AsteriskExtensionCandidate = {
+  number: string;
+  deviceId?: string;
+  deviceName?: string;
+  iccid?: string;
+  exists: boolean;
+};
+
 export type AsteriskExtensions = {
   extensions: AsteriskExtension[];
   // preview is the PJSIP configuration these render to, with the password
@@ -682,6 +704,9 @@ export type AsteriskExtensions = {
   // internalPreview is the extension-to-extension dialplan generated from the
   // same list. No secret in it, so it is shown whole.
   internalPreview?: string;
+  // inboundPreview is where a call arriving on a SIM rings.
+  inboundPreview?: string;
+  inbound?: AsteriskInbound;
   pending?: boolean;
   path?: string;
   canApply?: boolean;

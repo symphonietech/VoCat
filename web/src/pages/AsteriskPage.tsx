@@ -6,6 +6,7 @@ import { Button, EmptyState, PageHeader, StatusDot, Tag } from "../components/ui
 import type { StatusTone } from "../components/ui";
 import { RouteEditor } from "./asterisk/RouteEditor";
 import { ExtensionEditor } from "./asterisk/ExtensionEditor";
+import { InboundEditor } from "./asterisk/InboundEditor";
 import { usePolling } from "../lib/usePolling";
 import { useI18n } from "../lib/i18n";
 
@@ -121,6 +122,8 @@ export default function AsteriskPage() {
           <RouteEditor />
 
           <ExtensionEditor />
+
+          <InboundEditor />
 
           <Section title={t("中继（VoCat）")}>
             {trunk ? (

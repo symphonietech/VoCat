@@ -49,6 +49,25 @@ export const EN_DICT: Record<string, string> = {
     "characters and are never shown again; the last column is how many devices may register at once. Extensions can dial each other directly.",
   "生成的 PJSIP 配置": "Generated PJSIP configuration",
   "生成的内线拨号方案": "Generated internal dialplan",
+  "从 SIM 号码导入": "Import from SIM numbers",
+  "删除所选": "Delete selected",
+  "没有可导入的号码：每张 SIM 的号码都已有分机。":
+    "Nothing to import: every SIM number already has an extension.",
+  "已按 SIM 号码生成分机，密码只在保存前可见，请先复制再保存。":
+    "Extensions generated from the SIM numbers. The passwords are visible only until you save, so copy them first.",
+  "来电路由": "Inbound routing",
+  "拨给同号码分机": "Ring the extension named after the number",
+  "全部同时振铃": "Ring every extension at once",
+  "按顺序轮询": "Ring the list in order",
+  "振铃秒数": "Ring time in seconds",
+  "按拨入号码振铃与之同名的分机。给每张 SIM 建一个以其号码命名的分机即可，无需额外映射；没有对应分机的号码会被拒接。":
+    "Rings the extension whose name matches the number that was dialled. Create one extension per SIM, named after its number, and no mapping table is needed; a number with no matching extension is rejected.",
+  "按此顺序依次振铃，前一个无人接听才轮到下一个。":
+    "Rings in this order, moving on only when one does not answer.",
+  "留空表示所有分机，新增分机会自动加入。":
+    "Empty means every extension, so a new one joins automatically.",
+  "还没有分机": "No extensions yet",
+  "生成的来电拨号方案": "Generated inbound dialplan",
   "拨号键盘": "Keypad",
   "通话记录": "Call history",
   "按号码搜索": "Search by number",
@@ -216,7 +235,6 @@ export const EN_DICT: Record<string, string> = {
   "添加所选": "Add selected",
   添加: "Add",
   全选: "Select all",
-  "删除所选": "Delete selected",
   "设备 ID": "Device ID",
   "Profile 名称": "Profile Name",
   "已绑定此代理": "Bound to this proxy",

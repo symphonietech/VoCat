@@ -309,6 +309,11 @@ Set `VOCAT_SIP_TRUNK_PBX` to empty to keep inbound calls off the PBX
 entirely. The one thing that cannot be shared is a single call's audio, so
 connecting browser audio to a call the trunk is carrying returns `409`.
 
+Inbound routing is a mode on the Asterisk page: ring the extension named after
+the dialled number, ring every extension at once, or ring a list in order. The
+extension editor can create one account per SIM straight from the numbers
+VoCat already learned, each with its own generated password.
+
 Every call is recorded — browser, trunk or automatic task alike — with its
 direction, numbers, SIM, timings, duration and outcome. History is on the
 Calls page, filterable by number and outcome, and pruned after 90 days.

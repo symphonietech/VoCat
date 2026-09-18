@@ -1,7 +1,9 @@
 import type {
   ApiErrorBody,
   AsteriskExtension,
+  AsteriskExtensionCandidate,
   AsteriskExtensions,
+  AsteriskInbound,
   AsteriskRoute,
   AsteriskRoutes,
   AsteriskStatus,
@@ -260,6 +262,22 @@ export function saveAsteriskExtensions(extensions: AsteriskExtension[], replaceS
     "/asterisk/extensions",
     { method: "PUT", body: { extensions, replaceSeeded } },
   );
+}
+
+// Where a call arriving on a SIM rings. Validated against the configured
+// extensions server-side: a ring group naming an account that does not exist
+// rings nothing, and a caller who reaches no one is the only other signal.
+export function saveAsteriskInbound(inbound: AsteriskInbound) {
+  return api<{ saved: boolean; written: boolean; inbound: AsteriskInbound; inboundPreview: string }>(
+    "/asterisk/inbound",
+    { method: "PUT", body: inbound },
+  );
+}
+
+// The numbers VoCat already learned from each SIM's IMS registration, so an
+// extension per SIM does not mean copying digits between two screens.
+export function getAsteriskExtensionCandidates() {
+  return api<{ candidates: AsteriskExtensionCandidate[] }>("/asterisk/extensions/candidates");
 }
 
 // Applying reloads res_pjsip, which is what owns endpoints, auths and AORs.
