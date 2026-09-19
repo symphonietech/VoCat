@@ -89,24 +89,36 @@ rules produce five copies of the same patterns. That is acceptable precisely
 because the file is generated: the GUI holds each trunk's rules once, and
 duplication in generated output buys isolation for nothing.
 
-A per-trunk **"also allow the shared outbound routes"** checkbox may be offered,
-emitting `include => vocat-routes` into that context. It defaults to **off**: it
-re-opens the path the private context closes.
+A per-trunk **"also allow the shared outbound routes"** checkbox **ships in v1**,
+emitting `include => vocat-routes` into that context. It defaults to **off**,
+and that default is not cosmetic: ticking it lets the trunk reach every route
+pattern configured for internal use, which is the path the private context
+exists to close. The GUI should say that at the checkbox rather than in a help
+page.
 
 ---
 
 ## Admission control: three separate limits
 
 These are often conflated. They answer different questions and are enforced in
-different places. A call must pass all three.
+different places, and a call must pass every one that is in force.
 
-| Limit | Question | Where enforced |
-| --- | --- | --- |
-| Per trunk | Has *this peer* exceeded its share? | Asterisk dialplan, `GROUP_COUNT` |
-| Per SIM pool | Are two trunks oversubscribing shared cards? | Asterisk dialplan, `GROUP_COUNT` |
-| Per SIM (always 1) | Can any card actually take this call? | VoCat, `ResolveDevice` |
+| Limit | Question | Where enforced | In v1 |
+| --- | --- | --- | --- |
+| Per trunk | Has *this peer* exceeded its share? | Asterisk dialplan, `GROUP_COUNT` | yes |
+| Per SIM pool | Are two trunks oversubscribing shared cards? | Asterisk dialplan, `GROUP_COUNT` | **no, deferred** |
+| Per SIM (always 1) | Can any card actually take this call? | VoCat, `ResolveDevice` | yes |
 
-### Why `GROUP_COUNT` for the first two
+The pool cap is **deferred**. It is the least necessary of the three: the
+per-trunk cap does the anti-fraud job and the idle filter does the correctness
+job, so a pool cap only turns a late rejection into an early one. It earns its
+place in exactly one case neither of the others can cover —
+**reservation**, holding a card back for browser calls however hard the trunks
+push — and it costs a "pool" concept that exists nowhere in the
+codebase today: a named grouping of SIMs in the data model, the GUI and the
+renderer. Revisit if reserving capacity becomes a requirement.
+
+### Why `GROUP_COUNT` for the dialplan caps
 
 `GROUP()` tags the current channel; `GROUP_COUNT()` counts live channels with
 that tag. The useful property is that a channel leaves its group automatically
@@ -287,12 +299,15 @@ endpoint=trunk-acme
 match=203.0.113.10
 ```
 
-Three authentication modes, in likely order of need. Ship the first two:
+Three authentication modes, in likely order of need. **v1 ships the first two:**
 
 1. **IP identify** — the provider sends from a fixed address (`type=identify`).
 2. **Inbound auth** — the provider authenticates with credentials (`type=auth`).
 3. **Outbound registration** — VoCat's Asterisk registers to them
-   (`type=registration`). Add when someone needs it.
+   (`type=registration`). **Deferred.** It is a different PJSIP object with its
+   own retry and lifecycle behaviour, and no current provider needs it. Adding
+   it later touches only the renderer and the editor's auth-mode selector, so
+   nothing here has to be designed around it now.
 
 ---
 
@@ -356,21 +371,30 @@ bulk of it.
 
 ## Decisions taken
 
-1. **One private context per trunk**, sharing no includes. Settled.
+All settled. Nothing in this document is waiting on an answer.
+
+1. **One private context per trunk**, sharing no includes.
 2. **All non-terminal call states count as busy**, tested via `EndedAt == nil`.
-   Settled.
-3. **`GROUP_COUNT` for per-trunk and per-pool caps**; the per-SIM limit stays in
-   VoCat. Settled.
+3. **`GROUP_COUNT` for the per-trunk cap**; the per-SIM limit stays in VoCat.
 4. **No pushed registration state.** VoCat evaluates at dial time, which is
    fresher than any push and has no staleness window.
+5. **No per-pool cap in v1.** Reasoning under
+   [Admission control](#admission-control-three-separate-limits).
+6. **The shared-outbound-routes checkbox ships**, defaulting to off.
+7. **Outbound registration is deferred**; v1 does IP identify and inbound auth.
+8. **All SIMs busy returns `503 Service Unavailable`**, not `486 Busy Here`.
 
-## Open questions
+### On the 503
 
-1. Does the per-SIM-pool cap ship in the first version, or only the per-trunk
-   one?
-2. Does the "also allow shared outbound routes" checkbox ship at all, or wait
-   for someone to ask?
-3. Outbound registration (`type=registration`) — first version or later?
-4. When every permitted SIM is busy, is `503` right, or should the trunk get
-   `486 Busy Here` so the peer's own failover treats it as congestion rather
-   than an outage?
+`486 Busy Here` says *this particular destination* is busy, which is not what
+happened — the destination was never reached. `503` says the gateway
+is out of capacity, which is exactly what happened, and RFC 3261 has proxies try
+the next hop on it. An upstream with a second route will therefore use it, which
+is the useful behaviour.
+
+The consequence to know: some providers answer a `503` by taking the trunk out
+of rotation for a cooldown rather than failing just that one call, so a brief
+all-SIMs-busy burst can cost more than the calls it refused. If that shows up in
+practice the lever is a `Retry-After` header on the response, which bounds how
+long the peer holds off instead of leaving it to the peer's own default. Worth
+knowing before the first busy hour; not worth pre-solving.
