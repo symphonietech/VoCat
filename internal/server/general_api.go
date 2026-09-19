@@ -51,6 +51,9 @@ func (s *Server) routeGeneralAPI(w http.ResponseWriter, r *http.Request) bool {
 	if s.routeAsteriskExtensionsAPI(w, r, cleanPath) {
 		return true
 	}
+	if s.routeAsteriskTrunksAPI(w, r, cleanPath) {
+		return true
+	}
 	switch cleanPath {
 	case "calls/records":
 		s.handleCallRecords(w, r)

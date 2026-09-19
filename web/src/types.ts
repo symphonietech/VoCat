@@ -749,6 +749,44 @@ export type AsteriskExtensions = {
   error?: string;
 };
 
+// An external SIP peer whose calls are relayed out through a SIM. The
+// password is write-only: it is sent on save and never returned, so the
+// browser only ever learns whether one is set.
+export type AsteriskTrunk = {
+  name: string;
+  host: string;
+  port: number;
+  transport: string;
+  // Addresses or CIDR prefixes to identify the peer by. Either this or
+  // credentials is required, or anything reaching the port could dial out.
+  match?: string[];
+  username?: string;
+  password?: string;
+  hasPassword?: boolean;
+  // Patterns this trunk may dial. Empty means none: a new trunk reaches
+  // nothing until destinations are added.
+  destinations?: string[];
+  devices: string[];
+  maxConcurrent: number;
+  timeoutSeconds: number;
+  // shareRoutes lets the trunk reach the shared outbound routes as well. Off
+  // by default: those calls also escape this trunk's SIM list and cap.
+  shareRoutes?: boolean;
+  comment?: string;
+};
+
+export type AsteriskTrunks = {
+  trunks: AsteriskTrunk[];
+  preview?: string;
+  routesPreview?: string;
+  pending?: boolean;
+  path?: string;
+  writable?: boolean;
+  canApply?: boolean;
+  unknownDevices?: string[];
+  error?: string;
+};
+
 export type AsteriskRoutes = {
   routes: AsteriskRoute[];
   // preview is the dialplan these routes render to, so a syntax question can

@@ -442,6 +442,33 @@ type Call struct {
 	EndedAt    *time.Time `json:"ended_at,omitempty"`
 }
 
+// CallOccupiesDevice reports whether a call still holds the modem.
+//
+// It exists so every caller agrees, because the obvious test is wrong: the
+// IMS session deliberately keeps finished calls in its list for a short
+// retention window (terminalCallRetention in internal/vowifi/ims), so a
+// device with any calls at all is not a device that is busy. Counting them
+// would report a SIM occupied for half a minute after every call ended.
+//
+// EndedAt rather than a list of state names: the runtime sets it exactly when
+// a call reaches a terminal state and clears it again if the call leaves one,
+// so a state added later is treated as busy by default. An allowlist of
+// names would silently treat a new state as idle, which is the dangerous
+// direction -- it would hand a second call to a modem that cannot take it.
+func CallOccupiesDevice(call Call) bool {
+	return call.EndedAt == nil
+}
+
+// AnyCallOccupiesDevice reports whether any of these calls holds the modem.
+func AnyCallOccupiesDevice(calls []Call) bool {
+	for _, call := range calls {
+		if CallOccupiesDevice(call) {
+			return true
+		}
+	}
+	return false
+}
+
 // CallController is an optional capability of an IMS session. Media remains a
 // separate optional interface so call signalling does not depend on a codec.
 type CallController interface {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"vocat/internal/store"
 	"vocat/internal/vowifi"
@@ -322,5 +323,106 @@ func TestTrunkStillRefusesAnEmptyHint(t *testing.T) {
 		rotationDevices()...)
 	if _, err := gateway.ResolveDevice(""); err == nil {
 		t.Fatal("an empty hint picked a device; rotation must be explicit")
+	}
+}
+
+// setTrunkCalls puts a device's IMS call list in place for the busy filter.
+func setTrunkCalls(t *testing.T, gateway *sipTrunkGateway, calls map[string][]vowifi.Call) {
+	t.Helper()
+	controller, ok := gateway.server.vowifi.(*trunkVoWiFiController)
+	if !ok {
+		t.Fatal("the gateway is not backed by the test controller")
+	}
+	controller.calls = calls
+}
+
+func activeCall() vowifi.Call {
+	return vowifi.Call{ID: "in-progress", State: "active"}
+}
+
+func endedCall() vowifi.Call {
+	ended := time.Now().UTC()
+	return vowifi.Call{ID: "finished", State: "ended", EndedAt: &ended}
+}
+
+// A modem carries one voice call at a time, and no Asterisk dial plan can
+// know that: Asterisk sees one trunk endpoint.
+func TestTrunkSkipsABusyDevice(t *testing.T) {
+	gateway := trunkGatewayForTest(t,
+		map[string]bool{"slot1": true, "slot2": true},
+		store.Device{ID: "slot1", Name: "SLOT1-1", DeviceType: store.DeviceTypePCIeEC20EC25},
+		store.Device{ID: "slot2", Name: "SLOT2-4", DeviceType: store.DeviceTypePCIeEC20EC25},
+	)
+	setTrunkCalls(t, gateway, map[string][]vowifi.Call{"slot1": {activeCall()}})
+
+	// Named explicitly, rotating: the busy one is skipped every time rather
+	// than costing every other call.
+	for attempt := 0; attempt < 4; attempt++ {
+		got, err := gateway.ResolveDevice("slot1 slot2")
+		if err != nil || got != "slot2" {
+			t.Fatalf("attempt %d: ResolveDevice = %q, %v; want slot2", attempt, got, err)
+		}
+	}
+	// With no hint the single idle device is unambiguous, so it is chosen
+	// rather than refused for being one of two registered cards.
+	got, err := gateway.ResolveDevice("")
+	if err != nil || got != "slot2" {
+		t.Fatalf("ResolveDevice(\"\") = %q, %v; want slot2", got, err)
+	}
+}
+
+// The IMS session keeps finished calls in its list for a retention window, so
+// counting calls would report a SIM busy for half a minute after every call.
+func TestTrunkTreatsAnEndedCallAsIdle(t *testing.T) {
+	gateway := trunkGatewayForTest(t,
+		map[string]bool{"slot1": true},
+		store.Device{ID: "slot1", Name: "SLOT1-1", DeviceType: store.DeviceTypePCIeEC20EC25},
+	)
+	setTrunkCalls(t, gateway, map[string][]vowifi.Call{"slot1": {endedCall(), endedCall()}})
+	got, err := gateway.ResolveDevice("slot1")
+	if err != nil || got != "slot1" {
+		t.Fatalf("ResolveDevice = %q, %v; want slot1 -- a finished call is not a busy modem", got, err)
+	}
+}
+
+// Every card busy is temporary and normal, so it gets its own error rather
+// than being reported as a misconfiguration. The trunk turns it into a 503.
+func TestTrunkReportsEveryDeviceBusy(t *testing.T) {
+	gateway := trunkGatewayForTest(t,
+		map[string]bool{"slot1": true, "slot2": true},
+		store.Device{ID: "slot1", Name: "SLOT1-1", DeviceType: store.DeviceTypePCIeEC20EC25},
+		store.Device{ID: "slot2", Name: "SLOT2-4", DeviceType: store.DeviceTypePCIeEC20EC25},
+	)
+	setTrunkCalls(t, gateway, map[string][]vowifi.Call{
+		"slot1": {activeCall()},
+		"slot2": {vowifi.Call{ID: "ringing", State: "ringing"}},
+	})
+	_, err := gateway.ResolveDevice("slot1 slot2")
+	if err == nil {
+		t.Fatal("a call was placed on a device that was already on one")
+	}
+	if !strings.Contains(err.Error(), "already on a call") {
+		t.Errorf("the error does not say the devices are busy: %v", err)
+	}
+}
+
+// Every state that occupies the modem counts, not only "active": a call that
+// is dialling or held is one the card cannot be given away from.
+func TestCallOccupiesDeviceCoversEveryLiveState(t *testing.T) {
+	for _, state := range []string{"dialing", "ringing", "accepted", "active", "held"} {
+		if !vowifi.CallOccupiesDevice(vowifi.Call{State: state}) {
+			t.Errorf("state %q was treated as idle", state)
+		}
+	}
+	ended := time.Now().UTC()
+	for _, state := range []string{"ended", "failed"} {
+		if vowifi.CallOccupiesDevice(vowifi.Call{State: state, EndedAt: &ended}) {
+			t.Errorf("terminal state %q was treated as busy", state)
+		}
+	}
+	// A state nobody has invented yet is busy by default, which is the safe
+	// direction: the alternative hands a second call to an occupied modem.
+	if !vowifi.CallOccupiesDevice(vowifi.Call{State: "transferring"}) {
+		t.Error("an unknown state was treated as idle")
 	}
 }

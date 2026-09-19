@@ -7,6 +7,8 @@ import type {
   AsteriskRegistration,
   AsteriskRoute,
   AsteriskRoutes,
+  AsteriskTrunk,
+  AsteriskTrunks,
   AsteriskStatus,
   Call,
   CallRecordsResponse,
@@ -307,6 +309,25 @@ export function applyAsteriskExtensions() {
     "/asterisk/extensions/apply",
     { method: "POST" },
   );
+}
+
+// External SIP trunks. The credential is write-only like an extension's: a
+// trunk sent with no password keeps whatever is already stored.
+export function getAsteriskTrunks() {
+  return api<AsteriskTrunks>("/asterisk/trunks");
+}
+
+export function saveAsteriskTrunks(trunks: AsteriskTrunk[]) {
+  return api<{ saved: boolean; written: boolean; trunks: AsteriskTrunk[]; preview: string }>(
+    "/asterisk/trunks",
+    { method: "PUT", body: { trunks } },
+  );
+}
+
+// Applying reloads res_pjsip and pbx_config, because one save writes a PJSIP
+// object list and a dialplan.
+export function applyAsteriskTrunks() {
+  return api<{ applied: boolean; at: string }>("/asterisk/trunks/apply", { method: "POST" });
 }
 
 // Digits go into a live call as RFC 4733 telephone events, over the call's own

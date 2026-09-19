@@ -598,6 +598,51 @@ Where a call arriving on a SIM rings. Rendered to `inbound.conf`.
 - `hunt` rings `extensions` in order, moving on when one does not answer.
   The list is required.
 
+### Inbound trunks
+
+An external SIP peer whose calls are relayed **out through a SIM**. This is a
+gateway, not a registrar: the peer terminates on Asterisk, never on VoCat's
+own trunk port.
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/asterisk/trunks` | `data: {trunks: [...], preview, routes_preview, pending, path, writable, can_apply, unknown_devices?, error?}`. **Passwords are never returned** — each trunk carries `has_password` instead, and `preview` renders `password=<hidden>`. |
+| PUT | `/api/asterisk/trunks` | Replace the trunk list. A trunk sent **with no password keeps the stored one**, the same rule extension passwords follow. `400 invalid_trunk` names the offending peer and nothing is stored. |
+| POST | `/api/asterisk/trunks/apply` | Reloads `res_pjsip` **and** `pbx_config`, because one save writes a PJSIP object list and a dialplan. `501 ami_not_configured` when there is no manager interface. |
+
+Trunk body:
+
+```json
+{"name":"acme","host":"203.0.113.10","port":5060,"transport":"udp",
+ "match":["203.0.113.10"],"username":"acme","password":"...",
+ "destinations":["_1NXXNXXXXXX"],"devices":["SLOT1-1","SLOT2-1"],
+ "max_concurrent":4,"timeout_seconds":60,"share_routes":false}
+```
+
+**A trunk that can dial through a SIM spends real money**, so the validation is
+an allowlist and refuses anything that would leave it open:
+
+- **`match` or credentials is required.** Without either, anything that reached
+  the port could dial out. Both together is fine.
+- **`devices` is required.** Unlike an outbound route, an empty list is not
+  "let VoCat choose": which cards an outside party may spend is not something
+  to leave implicit.
+- **`destinations` may be empty**, and that is what a newly created trunk looks
+  like — its context renders, matches nothing, and hangs up. Deny is the
+  starting state.
+- **`max_concurrent`** is enforced in the dialplan with `GROUP_COUNT`, so one
+  peer cannot drain the SIM pool.
+- **`share_routes`** adds `include => vocat-routes` to the trunk's context. Off
+  by default. It lets the trunk dial every pattern the shared routes define,
+  and **those calls use the routes' own SIMs and are not counted by
+  `max_concurrent`** — the cap lives in the extensions the include bypasses.
+
+Each trunk gets its own context, `from-trunk-<name>`, which includes nothing
+else: a trunk cannot dial a softphone extension. Its PJSIP objects are named
+`trunk-<name>` so a trunk called `1001` cannot collide with the account of that
+name — PJSIP answers a duplicate object by refusing it, and can take the rest
+of the file with it.
+
 The current plan is returned by `GET /api/asterisk/extensions` under
 `inbound`, since the two are always edited against the same account list.
 

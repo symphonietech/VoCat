@@ -63,9 +63,11 @@ func (g *sipTrunkGateway) controller() (VoWiFiCallController, error) {
 // have thought about which SIMs may carry which calls. "*" says the same
 // thing about every device that happens to be registered.
 //
-// Rotation skips devices that are not currently IMS-registered rather than
-// handing back a SIM that cannot dial, so a card dropping out costs one
-// device from the rotation rather than every Nth call.
+// Rotation skips devices that cannot take the call -- not IMS-registered, or
+// already carrying one -- rather than handing back a SIM that cannot dial, so
+// a card dropping out or going busy costs one device from the rotation rather
+// than every Nth call. When none is left the error becomes a 503 on the
+// trunk, which a dial plan can act on.
 func (g *sipTrunkGateway) ResolveDevice(hint string) (string, error) {
 	configs, err := g.server.store.ListDevices(context.Background())
 	if err != nil {
@@ -77,7 +79,7 @@ func (g *sipTrunkGateway) ResolveDevice(hint string) (string, error) {
 	if len(names) == 0 {
 		var ready []string
 		for _, config := range configs {
-			if g.server.callTransport(config.ID) == "vowifi" {
+			if g.server.callTransport(config.ID) == "vowifi" && !g.deviceBusy(config.ID) {
 				ready = append(ready, config.ID)
 			}
 		}
@@ -108,7 +110,7 @@ func (g *sipTrunkGateway) ResolveDevice(hint string) (string, error) {
 		}
 	}
 
-	var candidates, unknown, offline []string
+	var candidates, unknown, offline, busy []string
 	for _, name := range names {
 		matched := ""
 		for _, config := range configs {
@@ -122,28 +124,62 @@ func (g *sipTrunkGateway) ResolveDevice(hint string) (string, error) {
 			unknown = append(unknown, name)
 		case g.server.callTransport(matched) != "vowifi":
 			offline = append(offline, matched)
+		case g.deviceBusy(matched):
+			busy = append(busy, matched)
 		default:
 			candidates = append(candidates, matched)
 		}
 	}
 
 	if len(candidates) == 0 {
+		// Busy first and on its own: it is the one of these that is normal,
+		// temporary, and means the caller should try again rather than that
+		// something is misconfigured.
+		if len(busy) > 0 && len(unknown) == 0 && len(offline) == 0 {
+			return "", fmt.Errorf("every named device is already on a call (%s)",
+				strings.Join(busy, ", "))
+		}
 		switch {
-		case len(unknown) > 0 && len(offline) == 0:
+		case len(unknown) > 0 && len(offline) == 0 && len(busy) == 0:
 			return "", fmt.Errorf("no device named %s", strings.Join(unknown, ", "))
-		case len(offline) > 0 && len(unknown) == 0:
+		case len(offline) > 0 && len(unknown) == 0 && len(busy) == 0:
 			return "", fmt.Errorf("no named device is registered for VoWiFi calling (%s)",
 				strings.Join(offline, ", "))
 		default:
 			return "", fmt.Errorf(
-				"no named device can place a call: unknown (%s), not registered for VoWiFi (%s)",
-				strings.Join(unknown, ", "), strings.Join(offline, ", "))
+				"no named device can place a call: unknown (%s), not registered for VoWiFi (%s), busy (%s)",
+				strings.Join(unknown, ", "), strings.Join(offline, ", "), strings.Join(busy, ", "))
 		}
 	}
 	if len(candidates) == 1 {
 		return candidates[0], nil
 	}
 	return candidates[g.server.nextTrunkDevice()%uint64(len(candidates))], nil
+}
+
+// deviceBusy reports whether a SIM is already carrying a call.
+//
+// A modem carries one voice call at a time, so this is the per-SIM limit that
+// no Asterisk dial plan can enforce: Asterisk sees one trunk endpoint and has
+// no idea which cards are occupied.
+//
+// Reading it is an in-memory lookup, not a modem round trip -- the controller
+// keeps the list and Calls() takes no context because it cannot block -- so
+// it is evaluated per INVITE rather than cached. A cache would reintroduce
+// exactly the staleness this check exists to avoid.
+//
+// A device whose calls cannot be read is reported busy rather than idle.
+// Failing open here would hand a call to a modem nobody could ask about.
+func (g *sipTrunkGateway) deviceBusy(deviceID string) bool {
+	controller, err := g.controller()
+	if err != nil {
+		return true
+	}
+	calls, err := controller.Calls(deviceID)
+	if err != nil {
+		return true
+	}
+	return vowifi.AnyCallOccupiesDevice(calls)
 }
 
 // splitDeviceHint accepts commas, spaces or both, so a dial plan can write the

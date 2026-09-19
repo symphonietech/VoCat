@@ -1018,6 +1018,104 @@ Rows carry a checkbox for deleting several at once. Deleting every extension
 is allowed — the inbound file then rejects calls with the same truthful cause
 rather than the save being refused as if it were a mistake.
 
+## Inbound trunks: an outside peer dialling through your SIMs
+
+An external SIP trunk — an ITSP, or another PBX — whose calls VoCat relays out
+through a SIM. Configured under **Asterisk → Inbound trunks**.
+
+The call path is the one that already existed. A call entering Asterisk and
+leaving through a SIM is exactly what `[vocat-routes]` does; the only thing
+that changes is where the call enters. The peer terminates on **Asterisk**,
+never on VoCat's own trunk port, which stays loopback-only.
+
+### This is the configuration attackers look for
+
+A peer that can dial through a SIM can spend real money, and unlike a SIP
+provider there is nobody to claw it back from. The editor is built around
+that:
+
+- **Each trunk gets a private context**, `from-trunk-<name>`, that includes
+  nothing. A trunk cannot dial a softphone extension and cannot reach a route
+  meant for internal use.
+- **Destinations are an allowlist.** `_1NXXNXXXXXX`, not `_.` with exclusions.
+- **SIMs are an allowlist**, and unlike an outbound route the list is
+  required. Which cards an outside party may spend is not left implicit.
+- **A source address or credentials is required.** Without either, anything
+  reaching port 5060 could dial out.
+- **A new trunk reaches nothing** until destinations are added. Deny is the
+  starting state, not an oversight.
+
+The PJSIP objects are named `trunk-<name>`, so a trunk called `1001` cannot
+collide with the softphone account of that name — PJSIP answers a duplicate
+object by refusing it, and can take the rest of the file with it.
+
+### Two limits, and what each one is for
+
+| Limit | Question it answers | Where |
+| --- | --- | --- |
+| **Max concurrent** | Has this peer exceeded its share? | The trunk's context, `GROUP_COUNT` |
+| **Per SIM (always 1)** | Can any card actually take this call? | VoCat, at dial time |
+
+`GROUP_COUNT` knows nothing about SIMs — it would admit a call when every
+modem is busy. VoCat's check knows nothing about which peer is being greedy.
+A call passes both or it does not happen.
+
+The cap is check-then-act rather than an atomic semaphore, so two calls
+arriving in the same instant can both read the count and exceed it by one.
+That is fine for what it is for. The count is in-memory and resets when
+Asterisk restarts.
+
+When every permitted SIM is busy, VoCat refuses and the trunk answers **503
+Service Unavailable**. That is deliberate: the destination was never reached,
+so "out of capacity" is what actually happened, and RFC 3261 has proxies try
+the next hop on a 503. Worth knowing before a busy hour: some providers
+respond to a 503 by taking the whole trunk out of rotation for a cooldown
+rather than failing just that call.
+
+### Sharing the outbound routes
+
+The per-trunk **"also allow the shared outbound routes"** switch adds
+`include => vocat-routes` to that trunk's context. It is off by default, and
+the default is not cosmetic. Turning it on means:
+
+- the trunk can dial every pattern the shared routes define, not only its own
+  destinations; and
+- **those calls use the routes' own SIMs and are not counted by the trunk's
+  cap**, because both live in the extensions the include bypasses.
+
+The generated file says so at the include, so anyone reading the dialplan sees
+it without reading this page.
+
+### It needs an image rebuild
+
+Two generated files are new — `trunks.conf` for the PJSIP objects and
+`trunk-routes.conf` for the contexts — and the entrypoint seeds both on first
+start so their `#include`s always resolve. The entrypoint is baked into the
+image, so:
+
+```sh
+docker compose build asterisk && docker compose up -d asterisk
+```
+
+A template edit alone would only have needed `docker compose restart
+asterisk`; this is the same situation as when the extension and inbound files
+were added.
+
+`trunks.conf` holds SIP passwords in the clear once a trunk uses credentials,
+so it is written `0600` exactly as `endpoints.conf` is. The dialplan half
+holds none and is written `0644`.
+
+### Saving and applying
+
+Save writes both files; **Apply** reloads `res_pjsip` and then `pbx_config`,
+because one save changed a PJSIP object list *and* a dialplan. Reloading only
+the first would leave a peer Asterisk knows about whose context is still the
+old one.
+
+A trunk naming a SIM that no longer exists is flagged on the page. The config
+is valid and Apply succeeds, so without that warning the first symptom is a
+call failing at dial time.
+
 ## Hold and resume
 
 A PBX holds a call with a re-INVITE that changes the media direction, and

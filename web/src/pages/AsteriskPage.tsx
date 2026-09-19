@@ -7,6 +7,7 @@ import type { StatusTone } from "../components/ui";
 import { RouteEditor } from "./asterisk/RouteEditor";
 import { ExtensionEditor } from "./asterisk/ExtensionEditor";
 import { InboundEditor } from "./asterisk/InboundEditor";
+import { TrunkEditor } from "./asterisk/TrunkEditor";
 import { ChannelList } from "./asterisk/ChannelList";
 import { RegistrationHistory } from "./asterisk/RegistrationHistory";
 import { usePolling } from "../lib/usePolling";
@@ -132,6 +133,7 @@ export default function AsteriskPage() {
           <ExtensionEditor />
 
           <InboundEditor />
+          <TrunkEditor />
 
           <Section title={t("中继（VoCat）")}>
             {trunk ? (
