@@ -155,6 +155,14 @@ function formatElapsed(result: SMSTestResult): string {
   return `${(result.elapsedMs / 1000).toFixed(1)} s`;
 }
 
+// A body parameter called "password" is masked in the editor so the value is
+// not left legible on screen. Display only: the value is still loaded, still
+// sent back on save, and the API still returns it -- nothing about how the
+// endpoint is stored or replayed changes.
+function isMaskedParamKey(key: string): boolean {
+  return key.trim().toLowerCase() === "password";
+}
+
 // PairEditor edits the JSON-encoded header and body-parameter lists an
 // endpoint stores. Values may contain {{username}}, {{password}}, {{to}},
 // {{from}} and {{content}} placeholders.
@@ -162,10 +170,13 @@ function PairEditor({
   label,
   pairs,
   onChange,
+  maskSecrets = false,
 }: {
   label: string;
   pairs: KeyValuePair[];
   onChange: (pairs: KeyValuePair[]) => void;
+  // Set on the body-parameter list, where the gateway credential lives.
+  maskSecrets?: boolean;
 }) {
   const { t } = useI18n();
   return (
@@ -197,6 +208,7 @@ function PairEditor({
             />
             <Input
               value={pair.value}
+              type={maskSecrets && isMaskedParamKey(pair.key) ? "password" : "text"}
               placeholder={t("值")}
               onChange={(event) => {
                 const next = [...pairs];
@@ -862,6 +874,7 @@ export default function SmsTestPage() {
             label={t("请求体参数")}
             pairs={endpointForm.bodyParams}
             onChange={(bodyParams) => setEndpointForm({ ...endpointForm, bodyParams })}
+            maskSecrets
           />
           <p className="text-xs text-gray-500 dark:text-gray-400">
             {t("可用占位符：{{username}}、{{password}}、{{to}}、{{from}}、{{content}}")}
