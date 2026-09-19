@@ -35,40 +35,6 @@ type TabKey = "statistics" | "schedules" | "endpoints";
 interface KeyValuePair {
   key: string;
   value: string;
-  // hasValue marks a credential the server is holding. Its value never
-  // travels to the browser, so this is all there is to show.
-  hasValue?: boolean;
-}
-
-// The same names the server treats as credentials (secretParamKeys in
-// internal/server/smstest_secrets.go). Duplicated rather than fetched: the
-// field has to mask itself as the name is typed, and a round trip per
-// keystroke to learn that would be worse than keeping two lists in step.
-const SECRET_PARAM_KEYS = new Set([
-  "password", "passwd", "pwd", "pass",
-  "secret", "apisecret", "appsecret", "clientsecret",
-  "token", "apitoken", "accesstoken", "authtoken",
-  "apikey", "appkey", "accesskey", "secretkey",
-  "auth", "authorization", "credential",
-]);
-
-function isSecretParamKey(key: string): boolean {
-  return SECRET_PARAM_KEYS.has(key.toLowerCase().replace(/[^a-z0-9]/g, ""));
-}
-
-// A value that is nothing but {{placeholders}} is a reference, not a
-// credential: the secret it names lives in the endpoint's own password field,
-// which the server never returns. Masking the reference protects nothing and
-// hides how the endpoint is wired -- mirrors isPlaceholderValue in
-// internal/server/smstest_secrets.go.
-function isPlaceholderValue(value: string): boolean {
-  if (value.trim() === "") return false;
-  return value.replace(/{{\s*[A-Za-z0-9_]+\s*}}/g, "").trim() === "";
-}
-
-// A pair is masked only when there is a literal secret to hide.
-function isMaskedPair(pair: KeyValuePair): boolean {
-  return isSecretParamKey(pair.key) && !isPlaceholderValue(pair.value);
 }
 
 const EMPTY_ENDPOINT_FORM = {
@@ -106,24 +72,14 @@ function parsePairs(raw: string): KeyValuePair[] {
     if (!Array.isArray(parsed)) return [];
     return parsed
       .filter((item) => item && typeof item === "object")
-      .map((item) => ({
-        key: String(item.key ?? ""),
-        value: String(item.value ?? ""),
-        hasValue: Boolean(item.has_value),
-      }));
+      .map((item) => ({ key: String(item.key ?? ""), value: String(item.value ?? "") }));
   } catch {
     return [];
   }
 }
 
-// Key and value only: hasValue is the server's marker coming the other way,
-// and sending it back would store it.
 function serializePairs(pairs: KeyValuePair[]): string {
-  return JSON.stringify(
-    pairs
-      .filter((pair) => pair.key.trim() !== "")
-      .map((pair) => ({ key: pair.key, value: pair.value })),
-  );
+  return JSON.stringify(pairs.filter((pair) => pair.key.trim() !== ""));
 }
 
 const STATUS_LABELS: Record<string, { zh: string; en: string }> = {
@@ -239,19 +195,9 @@ function PairEditor({
                 onChange(next);
               }}
             />
-            {/* A parameter named like a credential is write-only: the server
-                never returns its value, and saving it blank keeps what is
-                stored. */}
             <Input
               value={pair.value}
-              type={isMaskedPair(pair) ? "password" : "text"}
-              placeholder={
-                isMaskedPair(pair)
-                  ? pair.hasValue
-                    ? t("已设置，留空则不修改")
-                    : t("值（保存后不再回显）")
-                  : t("值")
-              }
+              placeholder={t("值")}
               onChange={(event) => {
                 const next = [...pairs];
                 next[index] = { ...next[index], value: event.target.value };

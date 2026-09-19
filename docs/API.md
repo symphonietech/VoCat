@@ -496,79 +496,6 @@ updated_at`.
 
 ---
 
-## SMS delivery testing
-
-`internal/server/smstest_api.go` and `internal/smstest/`. An *endpoint*
-describes an external SMS gateway's HTTP API, a *schedule* submits through it
-on a timer with a one-time code in the text, and a *result* records one send
-plus the inbound message that matched that code — so a SIM's ability to
-receive is measured rather than assumed.
-
-| Method | Path | Description |
-|---|---|---|
-| GET | `/api/smstest/endpoints` | List gateway definitions. |
-| POST | `/api/smstest/endpoints` | Create one. |
-| GET / PUT / PATCH / DELETE | `/api/smstest/endpoints/{id}` | Read, replace or remove one. |
-| GET | `/api/smstest/schedules` | List schedules. |
-| POST | `/api/smstest/schedules` | Create one. |
-| GET / PUT / PATCH / DELETE | `/api/smstest/schedules/{id}` | Read, replace or remove one. |
-| GET | `/api/smstest/results` | Results, newest first. Query: `hours` (default 24, capped at 2160), `limit` (default 500), `schedule_id`. |
-
-**Endpoint body** — `{id, name, method, url, username, password, headers, body_params}`.
-`headers` and `body_params` are JSON *strings* holding a list of
-`{"key":"...","value":"..."}` pairs. Values in the URL, headers and body
-parameters may contain `{{username}}`, `{{password}}`, `{{to}}`, `{{from}}`
-and `{{content}}`, substituted at send time.
-
-### Credentials are write-only
-
-Three of them, all with the same rule: **sent on save, never returned, and a
-blank value on update keeps what is stored.**
-
-1. The endpoint `password`. The response carries `has_password` instead.
-2. Any **header or body parameter whose name looks like a credential** — its
-   value is removed and the entry is marked `"has_value": true`. A gateway
-   that wants a password in a body parameter calls it one, and nothing else
-   distinguishes it from the recipient number beside it.
-3. The gateway's own reply, stored per result in `send_response`, has the
-   endpoint password removed **before it is stored** — a gateway that takes
-   credentials in the query string puts them in the URL, and Go's transport
-   errors quote that URL back.
-
-Names treated as credentials, matched with case and punctuation ignored so
-`API-Key`, `api_key` and `apikey` are one entry:
-
-```
-password passwd pwd pass
-secret apisecret appsecret clientsecret
-token apitoken accesstoken authtoken
-apikey appkey accesskey secretkey
-auth authorization credential
-```
-
-`key` and `sign` are deliberately **not** on the list: one is too common a
-name for something harmless, the other is usually a value computed from a
-secret rather than the secret. Redacting a field that is not a credential
-costs the operator the ability to read their own configuration back.
-
-A value that is **nothing but `{{placeholders}}`** is exempt whatever the
-parameter is called: `{"key":"password","value":"{{password}}"}` comes back
-in full. That value is a reference, not a credential — the secret it names is
-the endpoint `password` field, which is already write-only — so hiding it
-protects nothing and leaves the operator an empty password box where a
-working template used to be, whose obvious repair is to type a literal secret
-over it. Only a value made entirely of substitutions qualifies: text beside a
-placeholder (`Bearer {{password}}`, `{{username}}:s3cret`) is exactly where a
-second, literal credential would sit, so it is still redacted.
-
-`has_value` is an output marker only. Sending it back is ignored, and it is
-never stored.
-
-The stored values themselves are not encrypted — they have to be replayed to
-the gateway verbatim, so a database backup contains them.
-
----
-
 ## Call records
 
 `internal/server/call_records_api.go`. Every call is recorded — placed from
@@ -752,6 +679,5 @@ No endpoints were found or skipped due to genuine ambiguity beyond the
 above — every route reachable from `handleAPI` (via `routeDeviceAPI` and
 `routeGeneralAPI`, transitively including `routeSettingsAPI`,
 `routeSMSAPI`, `routeProxyAPI`, `routeExportProxyAPI`,
-`routeAutomaticTasksAPI`, `routeExtensionAPI`, `routeSMSTestAPI`,
-`routeAsteriskRoutesAPI` and `routeAsteriskExtensionsAPI`) is documented
-above.
+`routeAutomaticTasksAPI`, `routeExtensionAPI`, `routeAsteriskRoutesAPI`
+and `routeAsteriskExtensionsAPI`) is documented above.
