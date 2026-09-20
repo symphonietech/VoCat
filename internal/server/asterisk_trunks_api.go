@@ -236,10 +236,19 @@ func (s *Server) handlePutAsteriskTrunks(w http.ResponseWriter, r *http.Request)
 		trunk.HasPassword = false
 		trunk.HasOutboundPassword = false
 		previous := existing[strings.ToLower(strings.TrimSpace(trunk.Name))]
-		if trunk.Password == "" {
+		// A blank password keeps the stored one, which is what makes the
+		// field write-only usable. Clearing the *username* is the way to
+		// remove the credential altogether: without that there is no way
+		// back, and a trunk left with a stored password and no username
+		// fails validation on every subsequent save.
+		if strings.TrimSpace(trunk.Username) == "" {
+			trunk.Password = ""
+		} else if trunk.Password == "" {
 			trunk.Password = previous.inbound
 		}
-		if trunk.OutboundPassword == "" {
+		if strings.TrimSpace(trunk.OutboundUsername) == "" {
+			trunk.OutboundPassword = ""
+		} else if trunk.OutboundPassword == "" {
 			trunk.OutboundPassword = previous.outbound
 		}
 		if trunk.Port == 0 {
@@ -250,6 +259,11 @@ func (s *Server) handlePutAsteriskTrunks(w http.ResponseWriter, r *http.Request)
 		}
 		if trunk.MaxConcurrent == 0 {
 			trunk.MaxConcurrent = asteriskconf.DefaultTrunkConcurrent
+		}
+		// The only numeric field that had no default, so a body omitting it
+		// was refused while port, transport and the cap were filled in.
+		if trunk.TimeoutSeconds == 0 {
+			trunk.TimeoutSeconds = asteriskconf.DefaultTrunkTimeoutSeconds
 		}
 		merged = append(merged, trunk)
 	}
@@ -284,6 +298,13 @@ func (s *Server) handlePutAsteriskTrunks(w http.ResponseWriter, r *http.Request)
 		}
 		written = true
 	}
+	// Deleting a trunk a forward plan points at leaves inbound.conf dialling an
+	// endpoint that no longer exists. Reading the plan already falls back in
+	// that case, but the file on disk does not rewrite itself, so every call
+	// on every SIM would keep dialling the dead trunk until something else
+	// happened to save the extensions.
+	s.rewriteInboundAfterTrunkChange(r.Context(), merged)
+
 	s.recordAudit(r.Context(), "admin", "asterisk.trunks.save", "asterisk", "trunks", "success", "")
 	writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{
 		"saved": true, "written": written,
@@ -405,4 +426,48 @@ func (s *Server) unknownTrunkDevices(ctx context.Context, trunks []asteriskTrunk
 		return nil
 	}
 	return unknown
+}
+
+// rewriteInboundAfterTrunkChange re-renders the extension files when the
+// stored inbound plan forwards to a trunk that the new list no longer has.
+//
+// Only then: rewriting on every trunk save would touch endpoints.conf, which
+// holds SIP passwords, for an edit that has nothing to do with it.
+func (s *Server) rewriteInboundAfterTrunkChange(ctx context.Context, trunks []asteriskTrunk) {
+	if s.asteriskDialplanDir == "" {
+		return
+	}
+	setting, err := s.store.AppSetting(ctx, asteriskInboundKey)
+	if err != nil || len(setting.Value) == 0 {
+		return
+	}
+	var stored asteriskInbound
+	if err := json.Unmarshal(setting.Value, &stored); err != nil {
+		return
+	}
+	if asteriskconf.InboundMode(strings.TrimSpace(stored.Mode)) != asteriskconf.InboundForward {
+		return
+	}
+	want := strings.ToLower(strings.TrimSpace(stored.ForwardTrunk))
+	for _, trunk := range trunks {
+		if strings.ToLower(strings.TrimSpace(trunk.Name)) == want {
+			return
+		}
+	}
+
+	extensions := s.storedAsteriskExtensions(ctx)
+	plan := s.asteriskInboundPlan(ctx, toConfigExtensions(extensions))
+	files, err := renderAsteriskExtensions(extensions, plan)
+	if err != nil {
+		s.logger.Error("could not re-render the inbound dialplan after a trunk was removed",
+			"category", "siptrunk", "error", err)
+		return
+	}
+	if err := s.writeAsteriskExtensionFiles(files); err != nil {
+		s.logger.Error("could not rewrite the inbound dialplan after a trunk was removed",
+			"category", "siptrunk", "error", err)
+		return
+	}
+	s.logger.Warn("a forwarded inbound plan lost its trunk; inbound routing fell back",
+		"category", "siptrunk", "trunk", strings.TrimSpace(stored.ForwardTrunk))
 }

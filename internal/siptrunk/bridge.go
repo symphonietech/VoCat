@@ -28,6 +28,12 @@ type DTMFMedia interface {
 	Digits() <-chan rune
 }
 
+// ErrNoIdleDevice is what ResolveDevice returns when every SIM it was allowed
+// to choose from is already on a call. It is separated from every other
+// resolution failure because it is temporary and means "try again", which the
+// PBX only learns if the trunk answers 503 rather than 404.
+var ErrNoIdleDevice = errors.New("siptrunk: every permitted device is busy")
+
 // Gateway is everything the trunk needs from VoCat's SIM-backed calling. The
 // server implements it against the VoWiFi call controller; tests implement it
 // with a fake, which is the point of it being an interface.
@@ -279,6 +285,14 @@ func (d *dialog) run(ctx context.Context, offer mediaOffer) {
 	}
 	deviceID, err := d.server.gateway.ResolveDevice(d.deviceHint())
 	if err != nil {
+		if errors.Is(err, ErrNoIdleDevice) {
+			// Every permitted SIM is on a call. That is capacity, not a
+			// routing mistake: 404 would tell the peer the number does not
+			// exist and stop it trying another route, where 503 is what makes
+			// a proxy fail over.
+			d.fail(503, "Service Unavailable", err)
+			return
+		}
 		// 404 rather than 500: the PBX asked for a SIM that is not here, which
 		// is a routing mistake on its side.
 		d.fail(404, "Not Found", err)

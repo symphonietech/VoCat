@@ -90,11 +90,24 @@ const (
 	// difference between a bad hour and a bad month if the peer is abused.
 	DefaultTrunkConcurrent = 4
 	DefaultTrunkPort       = 5060
+	// DefaultTrunkTimeoutSeconds matches the outbound route default.
+	DefaultTrunkTimeoutSeconds = 60
 
 	MaxTrunks            = 32
 	MaxTrunkDestinations = 64
 	MaxTrunkMatches      = 32
 )
+
+// contactHost renders the host part of a contact URI. An IPv6 literal has to
+// be bracketed, or the colons in the address run into the port and the URI
+// does not parse -- hostRune allows ":" precisely so IPv6 can be entered.
+func contactHost(host string) string {
+	host = strings.TrimSpace(host)
+	if strings.Contains(host, ":") {
+		return "[" + host + "]"
+	}
+	return host
+}
 
 // hostRune matches a hostname or an address. No spaces, no semicolons, and
 // nothing that could end the value: this lands in a PJSIP contact URI.
@@ -148,14 +161,23 @@ func (t Trunk) Validate() error {
 		return errors.New(`transport must be "udp" or "tcp"`)
 	}
 
-	// One of the two has to hold, or the endpoint would accept an INVITE from
-	// anywhere that guessed the host -- which is the whole attack.
-	hasMatch := len(t.Match) > 0
-	hasAuth := strings.TrimSpace(t.Username) != "" || t.Password != ""
-	if !hasMatch && !hasAuth {
-		return errors.New("a trunk needs an address to match on, credentials, or both; " +
-			"without either, anything that reaches this port could dial through a SIM")
+	// An address is required, and credentials alone are not a substitute.
+	//
+	// PJSIP identifies an inbound INVITE by source address, or by matching the
+	// From user against the *endpoint name*. A trunk's endpoint is named
+	// trunk-<name>, which is not what a provider puts in From, so a
+	// credentials-only trunk would never be identified and every call it sent
+	// would be rejected as anonymous. Accepting that configuration meant
+	// advertising something that cannot work.
+	//
+	// Credentials stay useful on top: they authenticate the peer that the
+	// address has already identified.
+	if len(t.Match) == 0 {
+		return errors.New("an address or CIDR to match the peer on is required; " +
+			"credentials alone cannot identify an inbound call, because PJSIP matches " +
+			"the From user against the endpoint name rather than the auth username")
 	}
+	hasAuth := strings.TrimSpace(t.Username) != "" || t.Password != ""
 	if len(t.Match) > MaxTrunkMatches {
 		return errors.New("too many match addresses")
 	}
@@ -218,7 +240,11 @@ func (t Trunk) Validate() error {
 	// unfinished one: a trunk used only as a destination -- a call arriving
 	// on a SIM forwarded out to a provider -- needs its endpoint to exist and
 	// needs nothing to be able to come in through it.
-	if len(t.Devices) == 0 && len(t.Destinations) > 0 {
+	//
+	// Sharing the extension routes counts as being able to dial in: that
+	// include reaches every pattern those routes define, so a trunk with no
+	// destinations of its own still places calls when it is set.
+	if len(t.Devices) == 0 && (len(t.Destinations) > 0 || t.ShareRoutes) {
 		return errors.New("at least one SIM is required for a trunk that can dial in")
 	}
 	if len(t.Devices) > 32 {
@@ -378,7 +404,7 @@ func RenderTrunks(trunks []Trunk) (string, error) {
 		out.WriteString("rtp_symmetric=yes\nforce_rport=yes\nrewrite_contact=yes\n\n")
 
 		fmt.Fprintf(&out, "[%s]\ntype=aor\n", object)
-		fmt.Fprintf(&out, "contact=sip:%s:%d\n", strings.TrimSpace(trunk.Host), trunk.Port)
+		fmt.Fprintf(&out, "contact=sip:%s:%d\n", contactHost(trunk.Host), trunk.Port)
 		out.WriteString("qualify_frequency=60\n\n")
 
 		if strings.TrimSpace(trunk.Username) != "" {

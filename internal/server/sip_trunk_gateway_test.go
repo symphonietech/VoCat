@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"vocat/internal/siptrunk"
 	"vocat/internal/store"
 	"vocat/internal/vowifi"
 )
@@ -363,11 +364,32 @@ func TestTrunkSkipsABusyDevice(t *testing.T) {
 			t.Fatalf("attempt %d: ResolveDevice = %q, %v; want slot2", attempt, got, err)
 		}
 	}
-	// With no hint the single idle device is unambiguous, so it is chosen
-	// rather than refused for being one of two registered cards.
-	got, err := gateway.ResolveDevice("")
-	if err != nil || got != "slot2" {
-		t.Fatalf("ResolveDevice(\"\") = %q, %v; want slot2", got, err)
+	// With no hint, two registered cards still means VoCat refuses to choose,
+	// whether or not one of them happens to be busy at this instant. Letting
+	// busy narrow the field would turn "refuse to guess" into silently
+	// billing whichever card was free.
+	if _, err := gateway.ResolveDevice(""); err == nil {
+		t.Fatal("an unhinted call was placed while two cards were registered")
+	}
+}
+
+// A sole registered card that is busy is capacity, not a missing
+// registration, and the two must not read the same.
+func TestTrunkReportsASoleBusyDeviceAsBusy(t *testing.T) {
+	gateway := trunkGatewayForTest(t,
+		map[string]bool{"slot1": true},
+		store.Device{ID: "slot1", Name: "SLOT1-1", DeviceType: store.DeviceTypePCIeEC20EC25},
+	)
+	setTrunkCalls(t, gateway, map[string][]vowifi.Call{"slot1": {activeCall()}})
+	_, err := gateway.ResolveDevice("")
+	if err == nil {
+		t.Fatal("a call was placed on the only card while it was busy")
+	}
+	if !errors.Is(err, siptrunk.ErrNoIdleDevice) {
+		t.Fatalf("a busy card was not reported as busy: %v", err)
+	}
+	if strings.Contains(err.Error(), "registered for VoWiFi") {
+		t.Errorf("a busy card was reported as unregistered: %v", err)
 	}
 }
 
@@ -401,8 +423,10 @@ func TestTrunkReportsEveryDeviceBusy(t *testing.T) {
 	if err == nil {
 		t.Fatal("a call was placed on a device that was already on one")
 	}
-	if !strings.Contains(err.Error(), "already on a call") {
-		t.Errorf("the error does not say the devices are busy: %v", err)
+	// Wrapped, so the trunk answers 503 rather than 404: this is capacity, and
+	// a proxy told 404 stops looking for another route.
+	if !errors.Is(err, siptrunk.ErrNoIdleDevice) {
+		t.Errorf("the error is not recognisable as busy: %v", err)
 	}
 }
 

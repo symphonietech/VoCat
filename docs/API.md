@@ -603,6 +603,8 @@ Where a call arriving on a SIM rings. Rendered to `inbound.conf`.
   dialled number through** — which is what a provider routing by DID expects.
   A trunk that is not configured is `400 invalid_inbound`, refused at save
   rather than at call time where the only signal is a caller hearing nothing.
+  The name is matched case-insensitively and **stored in the trunk list's own
+  spelling**, because the dial string is rendered verbatim.
   A stored forward plan whose trunk is later deleted falls back to the default
   on read, the same way a ring group naming a deleted extension does.
 
@@ -631,8 +633,13 @@ Trunk body:
 **A trunk that can dial through a SIM spends real money**, so the validation is
 an allowlist and refuses anything that would leave it open:
 
-- **`match` or credentials is required.** Without either, anything that reached
-  the port could dial out. Both together is fine.
+- **`match` is required.** Credentials are **not** an alternative: PJSIP
+  identifies an inbound INVITE by source address, or by matching the From user
+  against the *endpoint name*, and a trunk's endpoint is `trunk-<name>` — not
+  what a provider sends. A credentials-only trunk would never be identified and
+  every call it sent would be rejected as anonymous, so it is refused at save
+  rather than accepted and silently broken. Credentials on top are optional and
+  authenticate the peer the address has already identified.
 - **Two credential pairs, independent.** `username`/`password` authenticate
   what the peer *sends*; `outbound_username`/`outbound_password` answer a
   challenge to an INVITE *this side* sends, which is what a provider does when
@@ -643,7 +650,9 @@ an allowlist and refuses anything that would leave it open:
   served by a single field at all. Each is write-only on its own — rotating one
   and leaving the other blank keeps the other. The response carries
   `has_password` and `has_outbound_password`.
-- **`devices` is required whenever `destinations` is non-empty.** Unlike an
+- **`devices` is required whenever the trunk can dial in** — that is, whenever
+  `destinations` is non-empty **or** `share_routes` is set, since the shared
+  routes reach every pattern they define. Unlike an
   outbound route, an empty list is not "let VoCat choose": which cards an
   outside party may spend is not something to leave implicit. A trunk with no
   destinations can dial nothing and so needs none — that is a **forward-only
@@ -658,6 +667,7 @@ an allowlist and refuses anything that would leave it open:
   by default. It lets the trunk dial every pattern the shared routes define,
   and **those calls use the routes' own SIMs and are not counted by
   `max_concurrent`** — the cap lives in the extensions the include bypasses.
+  Setting it therefore requires `devices` even with no destinations of its own.
 
 Each trunk gets its own context, `from-trunk-<name>`, which includes nothing
 else: a trunk cannot dial a softphone extension. Its PJSIP objects are named

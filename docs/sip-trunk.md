@@ -1053,10 +1053,17 @@ that:
   nothing. A trunk cannot dial a softphone extension and cannot reach a route
   meant for internal use.
 - **Destinations are an allowlist.** `_1NXXNXXXXXX`, not `_.` with exclusions.
-- **SIMs are an allowlist**, and unlike an outbound route the list is
-  required. Which cards an outside party may spend is not left implicit.
-- **A source address or inbound credentials is required.** Without either,
-  anything reaching port 5060 could dial out.
+- **SIMs are an allowlist**, and unlike an extension route the list is
+  required whenever the trunk can dial in — including when it shares the
+  extension routes, which reach every pattern those routes define. Which cards
+  an outside party may spend is not left implicit. A trunk that can dial
+  nothing needs none; that is a forward-only trunk.
+- **A source address is required**, and credentials are not a substitute for
+  it. PJSIP matches an inbound INVITE by source address, or by the From user
+  against the endpoint name — and a trunk's endpoint is `trunk-<name>`, which
+  is not what a provider sends. A credentials-only trunk would never be
+  identified at all, so it is refused rather than accepted and silently
+  broken.
 - **The outbound credential is separate.** The inbound pair authenticates what
   the peer sends; the outbound pair answers a challenge to what this side
   sends, which is what a provider does when a call is forwarded out to it. A
@@ -1136,6 +1143,7 @@ what a provider routing by DID expects. Nothing local rings.
 A trunk used only as a forwarding destination needs **no SIMs and no
 destinations**: with an empty destination list it can dial nothing, so nothing
 can come in through it, while its endpoint still exists to be dialled out to.
+It does still need an address to match on, like any other trunk.
 Fill in the **outbound** credential for any provider that challenges an INVITE,
 or the forwarded call dies at 401.
 

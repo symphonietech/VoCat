@@ -49,7 +49,12 @@ function spaceDeltaText(delta?: { bytes?: number; direction?: string }): string 
   if (!delta) return "";
   const s = fmtSpace(delta.bytes ?? 0);
   if (!s) return "";
-  return delta.direction === "releasedt(" ? `刚刚释放约 ${s}` : delta.direction === ")consumedt(" ? `刚刚占用约 ${s}` : ")";
+  // The server sends "reclaimed" or "consumed" (internal/server/esim_api.go).
+  return delta.direction === "reclaimed"
+    ? `刚刚释放约 ${s}`
+    : delta.direction === "consumed"
+      ? `刚刚占用约 ${s}`
+      : "";
 }
 function selectDefaultAid(chip: EsimChipInfo | null, preferAid?: string): string {
   const eids = chip?.eids || [];

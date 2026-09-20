@@ -77,17 +77,24 @@ func (g *sipTrunkGateway) ResolveDevice(hint string) (string, error) {
 
 	// No hint: the historical behaviour, and still the safe default.
 	if len(names) == 0 {
-		var ready []string
+		// Registered, not idle. Whether a SIM happens to be on a call right
+		// now must not decide how many there are to choose between: with two
+		// registered and one busy, filtering first would turn "refuse to
+		// guess" into silently billing whichever one was free.
+		var registered []string
 		for _, config := range configs {
-			if g.server.callTransport(config.ID) == "vowifi" && !g.deviceBusy(config.ID) {
-				ready = append(ready, config.ID)
+			if g.server.callTransport(config.ID) == "vowifi" {
+				registered = append(registered, config.ID)
 			}
 		}
-		switch len(ready) {
+		switch len(registered) {
 		case 0:
 			return "", errors.New("no device is registered for VoWiFi calling")
 		case 1:
-			return ready[0], nil
+			if g.deviceBusy(registered[0]) {
+				return "", fmt.Errorf("%w: %s", siptrunk.ErrNoIdleDevice, registered[0])
+			}
+			return registered[0], nil
 		default:
 			// Naming them matters: the operator has to pick, and the whole
 			// point of refusing is that VoCat must not. Sending them off to
@@ -97,7 +104,7 @@ func (g *sipTrunkGateway) ResolveDevice(hint string) (string, error) {
 				"%d devices are registered for VoWiFi calling (%s); name one with an "+
 					"X-VoCat-Device header or a device= URI parameter, several to rotate "+
 					"between them, or * for all of them",
-				len(ready), strings.Join(ready, ", "))
+				len(registered), strings.Join(registered, ", "))
 		}
 	}
 
@@ -136,8 +143,9 @@ func (g *sipTrunkGateway) ResolveDevice(hint string) (string, error) {
 		// temporary, and means the caller should try again rather than that
 		// something is misconfigured.
 		if len(busy) > 0 && len(unknown) == 0 && len(offline) == 0 {
-			return "", fmt.Errorf("every named device is already on a call (%s)",
-				strings.Join(busy, ", "))
+			// Wrapped so the trunk can answer 503 rather than 404: this is
+			// capacity, and a proxy told 404 stops looking for another route.
+			return "", fmt.Errorf("%w (%s)", siptrunk.ErrNoIdleDevice, strings.Join(busy, ", "))
 		}
 		switch {
 		case len(unknown) > 0 && len(offline) == 0 && len(busy) == 0:

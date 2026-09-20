@@ -270,7 +270,7 @@ export function TrunkEditor() {
       </div>
 
       <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
-        {t("必须填写来源地址或呼入凭据之一；转发呼叫到对端需要呼出凭据；目标模式以 _ 开头")}
+        {t("必须填写来源地址；凭据只是额外校验，不能替代来源地址。转发呼叫到对端需要呼出凭据；目标模式以 _ 开头")}
         {state?.path ? ` · ${state.path}` : ""}
       </p>
 

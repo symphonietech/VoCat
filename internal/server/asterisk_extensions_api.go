@@ -189,30 +189,35 @@ func (s *Server) asteriskInboundPlan(ctx context.Context, configured []asteriskc
 	// dial to an endpoint Asterisk has never heard of, which fails at call
 	// time with nothing pointing at why. Same reasoning as the extension
 	// check above: fall back rather than generate it.
-	if err := s.inboundTrunkExists(ctx, candidate); err != nil {
+	name, err := s.resolveInboundTrunk(ctx, candidate)
+	if err != nil {
 		s.logger.Warn("the stored Asterisk inbound plan names a trunk that is gone",
 			"category", "siptrunk", "error", err)
 		return plan
 	}
+	candidate.ForwardTrunk = name
 	return candidate
 }
 
-// inboundTrunkExists checks a forward plan against the configured trunks.
+// resolveInboundTrunk checks a forward plan against the configured trunks.
 //
 // It lives here rather than in asteriskconf because that package renders one
 // file at a time and has no view of the trunk list, while the reason to
 // refuse is precisely that two separately edited lists disagree.
-func (s *Server) inboundTrunkExists(ctx context.Context, plan asteriskconf.InboundPlan) error {
+// It returns the trunk's stored spelling, because the match is
+// case-insensitive while the dial string is rendered verbatim: "ACME" would
+// otherwise validate and then dial @trunk-ACME against a [trunk-acme] section.
+func (s *Server) resolveInboundTrunk(ctx context.Context, plan asteriskconf.InboundPlan) (string, error) {
 	if plan.Mode != asteriskconf.InboundForward {
-		return nil
+		return plan.ForwardTrunk, nil
 	}
 	want := strings.ToLower(strings.TrimSpace(plan.ForwardTrunk))
 	for _, trunk := range s.storedAsteriskTrunks(ctx) {
 		if strings.ToLower(strings.TrimSpace(trunk.Name)) == want {
-			return nil
+			return strings.TrimSpace(trunk.Name), nil
 		}
 	}
-	return fmt.Errorf("trunk %s is not configured", strings.TrimSpace(plan.ForwardTrunk))
+	return "", fmt.Errorf("trunk %s is not configured", strings.TrimSpace(plan.ForwardTrunk))
 }
 
 // asteriskInbound is the wire shape of the plan.

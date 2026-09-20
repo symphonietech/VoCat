@@ -52,7 +52,7 @@ func storedTrunks(t *testing.T, database *store.Store) []asteriskTrunk {
 }
 
 const trunkWithSecret = `{"trunks":[{"name":"acme","host":"203.0.113.10","port":5060,` +
-	`"transport":"udp","username":"acme","password":"a-long-enough-secret",` +
+	`"transport":"udp","match":["203.0.113.10"],"username":"acme","password":"a-long-enough-secret",` +
 	`"destinations":["_1NXXNXXXXXX"],"devices":["slot1"],` +
 	`"max_concurrent":4,"timeout_seconds":60}]}`
 
@@ -73,7 +73,8 @@ func TestTrunkPasswordIsWriteOnly(t *testing.T) {
 	}
 
 	edited := `{"trunks":[{"name":"acme","host":"203.0.113.10","port":5060,"transport":"udp",` +
-		`"username":"acme","destinations":["_1NXXNXXXXXX","_44X."],"devices":["slot1"],` +
+		`"match":["203.0.113.10"],"username":"acme",` +
+		`"destinations":["_1NXXNXXXXXX","_44X."],"devices":["slot1"],` +
 		`"max_concurrent":4,"timeout_seconds":60}]}`
 	if response := putTrunks(t, server, edited); response.Code != http.StatusOK {
 		t.Fatalf("edit status = %d, body = %s", response.Code, response.Body.String())
@@ -112,7 +113,8 @@ func TestTrunkGetNeverReturnsThePassword(t *testing.T) {
 	}
 }
 
-// A peer that would accept an INVITE from anywhere is the whole attack.
+// A peer with no address to match on could never be identified at all, so it
+// is refused rather than stored as a trunk that can never carry a call.
 func TestTrunkSaveRefusesAnUnidentifiedPeer(t *testing.T) {
 	server, database, _ := trunksTestServer(t)
 	body := `{"trunks":[{"name":"acme","host":"203.0.113.10","port":5060,"transport":"udp",` +
@@ -201,7 +203,7 @@ func TestTrunkOutboundPasswordIsWriteOnlyAndIndependent(t *testing.T) {
 	server, database, _ := trunksTestServer(t)
 
 	both := `{"trunks":[{"name":"acme","host":"203.0.113.10","port":5060,"transport":"udp",` +
-		`"username":"acme","password":"inbound-long-secret",` +
+		`"match":["203.0.113.10"],"username":"acme","password":"inbound-long-secret",` +
 		`"outbound_username":"acme-out","outbound_password":"outbound-long-secret",` +
 		`"destinations":["_1NXXNXXXXXX"],"devices":["slot1"],` +
 		`"max_concurrent":4,"timeout_seconds":60}]}`
@@ -221,7 +223,7 @@ func TestTrunkOutboundPasswordIsWriteOnlyAndIndependent(t *testing.T) {
 	// Rotate only the outbound credential. The inbound one is blank in this
 	// request because the browser never had it.
 	rotated := `{"trunks":[{"name":"acme","host":"203.0.113.10","port":5060,"transport":"udp",` +
-		`"username":"acme","outbound_username":"acme-out","outbound_password":"a-new-long-secret",` +
+		`"match":["203.0.113.10"],"username":"acme","outbound_username":"acme-out","outbound_password":"a-new-long-secret",` +
 		`"destinations":["_1NXXNXXXXXX"],"devices":["slot1"],` +
 		`"max_concurrent":4,"timeout_seconds":60}]}`
 	if response := putTrunks(t, server, rotated); response.Code != http.StatusOK {
@@ -316,5 +318,104 @@ func TestStoredForwardPlanFallsBackWhenTheTrunkGoes(t *testing.T) {
 	plan := server.asteriskInboundPlan(ctx, nil)
 	if plan.Mode == "forward" {
 		t.Fatalf("a forward plan survived the deletion of its trunk: %+v", plan)
+	}
+}
+
+// A credential has to be removable. Clearing the username is what removes it:
+// without that there is no way back from a stored password, and a trunk left
+// holding one with no username fails validation on every subsequent save.
+func TestTrunkCredentialCanBeCleared(t *testing.T) {
+	server, database, _ := trunksTestServer(t)
+	if r := putTrunks(t, server, trunkWithSecret); r.Code != http.StatusOK {
+		t.Fatal(r.Body.String())
+	}
+	cleared := `{"trunks":[{"name":"acme","host":"203.0.113.10","port":5060,"transport":"udp",` +
+		`"match":["203.0.113.10"],"destinations":["_1NXXNXXXXXX"],"devices":["slot1"],` +
+		`"max_concurrent":4,"timeout_seconds":60}]}`
+	if r := putTrunks(t, server, cleared); r.Code != http.StatusOK {
+		t.Fatalf("clearing the username was refused: %s", r.Body.String())
+	}
+	stored := storedTrunks(t, database)
+	if len(stored) != 1 || stored[0].Password != "" || stored[0].Username != "" {
+		t.Fatalf("the credential survived being cleared: %+v", stored)
+	}
+}
+
+// Every other numeric field is defaulted, so a body omitting the timeout must
+// not be the one that is refused.
+func TestTrunkSaveDefaultsTheTimeout(t *testing.T) {
+	server, database, _ := trunksTestServer(t)
+	body := `{"trunks":[{"name":"acme","host":"203.0.113.10","match":["203.0.113.10"],` +
+		`"destinations":["_1NXXNXXXXXX"],"devices":["slot1"]}]}`
+	if r := putTrunks(t, server, body); r.Code != http.StatusOK {
+		t.Fatalf("a body with only the required fields was refused: %s", r.Body.String())
+	}
+	stored := storedTrunks(t, database)
+	if len(stored) != 1 {
+		t.Fatalf("stored = %+v", stored)
+	}
+	if stored[0].TimeoutSeconds == 0 || stored[0].Port == 0 ||
+		stored[0].MaxConcurrent == 0 || stored[0].Transport == "" {
+		t.Fatalf("a field was left unset: %+v", stored[0])
+	}
+}
+
+// The trunk is matched case-insensitively but the dial string is rendered
+// verbatim, so it is stored in the trunk list's own spelling.
+func TestInboundForwardNormalisesTheTrunkName(t *testing.T) {
+	server, _, _ := trunksTestServer(t)
+	if r := putTrunks(t, server, trunkWithSecret); r.Code != http.StatusOK {
+		t.Fatal(r.Body.String())
+	}
+	body := `{"mode":"forward","forward_trunk":"ACME","forward_number":"2001","ring_seconds":60}`
+	request := httptest.NewRequest(http.MethodPut, "/api/asterisk/inbound", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.handlePutAsteriskInbound(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), "trunk-ACME") {
+		t.Fatalf("the dial string names a section that does not exist: %s", response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), "PJSIP/2001@trunk-acme") {
+		t.Fatalf("the trunk name was not normalised: %s", response.Body.String())
+	}
+}
+
+// Deleting a trunk a forward plan points at must not leave inbound.conf
+// dialling an endpoint that no longer exists: the reader falls back, but the
+// file on disk does not rewrite itself.
+func TestDeletingAForwardedTrunkRewritesInbound(t *testing.T) {
+	server, _, _ := trunksTestServer(t)
+
+	if r := putTrunks(t, server, trunkWithSecret); r.Code != http.StatusOK {
+		t.Fatal(r.Body.String())
+	}
+	body := `{"mode":"forward","forward_trunk":"acme","forward_number":"2001","ring_seconds":60}`
+	request := httptest.NewRequest(http.MethodPut, "/api/asterisk/inbound", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.handlePutAsteriskInbound(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatal(response.Body.String())
+	}
+	onDisk, err := os.ReadFile(server.asteriskInboundPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(onDisk), "trunk-acme") {
+		t.Fatalf("the forward was never written:\n%s", onDisk)
+	}
+
+	if r := putTrunks(t, server, `{"trunks":[]}`); r.Code != http.StatusOK {
+		t.Fatal(r.Body.String())
+	}
+	onDisk, err = os.ReadFile(server.asteriskInboundPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(onDisk), "trunk-acme") {
+		t.Fatalf("inbound.conf still dials a trunk that was deleted:\n%s", onDisk)
 	}
 }

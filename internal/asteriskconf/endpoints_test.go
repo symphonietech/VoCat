@@ -254,3 +254,21 @@ func TestRenderInternalDialplanRefusesWhatEndpointsRefuse(t *testing.T) {
 		t.Fatal("a duplicate was rendered into the dialplan")
 	}
 }
+
+// An external trunk's PJSIP objects are named trunk-<name>, so an extension
+// called trunk-acme would be the same section name as the trunk called acme.
+// PJSIP answers a duplicate object by refusing it and can take the rest of the
+// file with it, which is what the prefix exists to prevent.
+func TestExtensionNamesCannotTakeTheTrunkPrefix(t *testing.T) {
+	for _, name := range []string{"trunk-acme", "TRUNK-acme", "trunkout-acme"} {
+		extension := Extension{Name: name, Password: "a-long-enough-secret", MaxContacts: 1}
+		if err := extension.Validate(); err == nil {
+			t.Errorf("%q was accepted and would collide with an external trunk", name)
+		}
+	}
+	// A name that merely contains it is fine; only the prefix is reserved.
+	ordinary := Extension{Name: "a-trunk-1", Password: "a-long-enough-secret", MaxContacts: 1}
+	if err := ordinary.Validate(); err != nil {
+		t.Errorf("an ordinary name was refused: %v", err)
+	}
+}

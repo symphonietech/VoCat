@@ -129,6 +129,16 @@ func (e Extension) Validate() error {
 		return errors.New("extension name is too long")
 	case reservedNames[strings.ToLower(name)]:
 		return fmt.Errorf("%q is reserved by the shipped configuration", name)
+	case strings.HasPrefix(strings.ToLower(name), trunkObjectPrefix),
+		strings.HasPrefix(strings.ToLower(name), trunkOutboundAuthPrefix):
+		// An external trunk's PJSIP objects are named with these prefixes, so
+		// an extension called trunk-acme would be the same section name as the
+		// trunk called acme. PJSIP answers a duplicate object by refusing it
+		// and can take the rest of the file with it -- which is what the
+		// prefixes exist to prevent, and they only work if nothing else may
+		// use them.
+		return fmt.Errorf("%q starts with %q, which is reserved for external trunks",
+			name, trunkObjectPrefix)
 	case emergencyNames[name]:
 		return fmt.Errorf("%q is an emergency number; an extension with that name would "+
 			"shadow the route that reaches it", name)

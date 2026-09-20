@@ -21,21 +21,31 @@ func sampleTrunk() Trunk {
 
 // A peer that can dial through a SIM spends real money, so an endpoint that
 // would accept an INVITE from anywhere reaching the port is refused.
-func TestTrunkRequiresAnIdentityCheck(t *testing.T) {
+//
+// Credentials are not an alternative to the address. PJSIP matches an inbound
+// INVITE by source address or by the From user against the endpoint name, and
+// a trunk's endpoint is trunk-<name>, which is not what a provider sends -- so
+// a credentials-only trunk would never be identified at all.
+func TestTrunkRequiresAnAddressToMatchOn(t *testing.T) {
 	trunk := sampleTrunk()
 	trunk.Match = nil
 	err := trunk.Validate()
 	if err == nil {
-		t.Fatal("a trunk with neither a match address nor credentials was accepted")
+		t.Fatal("a trunk with no address to match on was accepted")
 	}
-	if !strings.Contains(err.Error(), "credentials") {
+	if !strings.Contains(err.Error(), "address") {
 		t.Errorf("the error does not say what is missing: %v", err)
 	}
-	// Either one alone is enough.
+	// Credentials alone still do not satisfy it.
 	trunk.Username = "acme"
 	trunk.Password = "a-long-enough-secret"
+	if err := trunk.Validate(); err == nil {
+		t.Error("credentials alone were accepted as an identity check")
+	}
+	// Address alone is enough; credentials on top are optional.
+	trunk.Match = []string{"203.0.113.10"}
 	if err := trunk.Validate(); err != nil {
-		t.Errorf("credentials alone were refused: %v", err)
+		t.Errorf("an address with credentials was refused: %v", err)
 	}
 }
 
@@ -351,5 +361,46 @@ func TestTrunkNeedsNoSIMWhenItCannotDialIn(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "dial in") {
 		t.Errorf("the error does not explain when a SIM is needed: %v", err)
+	}
+}
+
+// Sharing the extension routes reaches every pattern those routes define, so
+// it is a way to dial in and must not escape the SIM allowlist the way an
+// empty destination list legitimately does.
+func TestTrunkSharingRoutesStillNeedsASIM(t *testing.T) {
+	trunk := sampleTrunk()
+	trunk.Destinations = nil
+	trunk.Devices = nil
+	trunk.ShareRoutes = true
+	if err := trunk.Validate(); err == nil {
+		t.Fatal("a trunk sharing the extension routes was accepted with no SIMs")
+	}
+	// Without sharing it is a forward-only trunk again, which needs none.
+	trunk.ShareRoutes = false
+	if err := trunk.Validate(); err != nil {
+		t.Errorf("a forward-only trunk was refused: %v", err)
+	}
+}
+
+// An IPv6 literal has to be bracketed, or the colons in the address run into
+// the port and the contact URI does not parse.
+func TestRenderTrunksBracketsAnIPv6Contact(t *testing.T) {
+	trunk := sampleTrunk()
+	trunk.Host = "2001:db8::1"
+	trunk.Match = []string{"2001:db8::1"}
+	rendered, err := RenderTrunks([]Trunk{trunk})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(rendered, "contact=sip:[2001:db8::1]:5060") {
+		t.Fatalf("the IPv6 contact is not bracketed:\n%s", rendered)
+	}
+	// IPv4 and hostnames are left alone.
+	plain, err := RenderTrunks([]Trunk{sampleTrunk()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(plain, "contact=sip:203.0.113.10:5060") {
+		t.Fatalf("an IPv4 contact was mangled:\n%s", plain)
 	}
 }
