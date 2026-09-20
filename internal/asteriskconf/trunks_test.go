@@ -225,3 +225,94 @@ func TestRenderTrunksHandlesAnEmptyList(t *testing.T) {
 		}
 	}
 }
+
+// auth= only authenticates what arrives. A call forwarded out to a provider
+// that challenges dies at 401 without outbound_auth, and nothing in the
+// configuration points at why.
+func TestRenderTrunksEmitsOutboundAuth(t *testing.T) {
+	trunk := sampleTrunk()
+	trunk.OutboundUsername = "acme-out"
+	trunk.OutboundPassword = "another-long-secret"
+	rendered, err := RenderTrunks([]Trunk{trunk})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"outbound_auth=trunkout-acme",
+		"[trunkout-acme]",
+		"username=acme-out",
+		"password=another-long-secret",
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Errorf("missing %q:\n%s", want, rendered)
+		}
+	}
+	// Identified by address with no outbound credential: an unauthenticated
+	// peer stays unauthenticated rather than gaining an empty auth object.
+	plain, err := RenderTrunks([]Trunk{sampleTrunk()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(plain, "outbound_auth") {
+		t.Errorf("outbound_auth was emitted with no credential:\n%s", plain)
+	}
+}
+
+// The two credentials are independent: a peer identified by address may still
+// have to authenticate when this side forwards a call out to it.
+func TestTrunkOutboundCredentialIsIndependent(t *testing.T) {
+	trunk := sampleTrunk()
+	trunk.OutboundUsername = "acme-out"
+	trunk.OutboundPassword = "another-long-secret"
+	if err := trunk.Validate(); err != nil {
+		t.Fatalf("an outbound credential without an inbound one was refused: %v", err)
+	}
+	// A password with no username is a typo, not a configuration.
+	trunk.OutboundUsername = ""
+	err := trunk.Validate()
+	if err == nil {
+		t.Fatal("an outbound password with no username was accepted")
+	}
+	// The error has to say which of the two pairs is wrong.
+	if !strings.Contains(err.Error(), "outbound") {
+		t.Errorf("the error does not name the outbound pair: %v", err)
+	}
+	trunk.OutboundUsername = "acme-out"
+	trunk.OutboundPassword = "short"
+	if err := trunk.Validate(); err == nil {
+		t.Fatal("a short outbound password was accepted")
+	}
+	trunk.OutboundPassword = "has;a semicolon in it"
+	if err := trunk.Validate(); err == nil {
+		t.Fatal("an outbound password that would cut the config line was accepted")
+	}
+}
+
+// With a "-out" suffix, trunk "acme" and a trunk actually named "acme-out"
+// would produce the same auth object name, and PJSIP answers a duplicate by
+// refusing it.
+func TestTrunkOutboundAuthNameCannotCollide(t *testing.T) {
+	plain := Trunk{Name: "acme"}
+	suffixed := Trunk{Name: "acme-out"}
+	if plain.OutboundAuthName() == suffixed.ObjectName() {
+		t.Fatalf("the outbound auth object collides with another trunk's inbound auth: %s",
+			plain.OutboundAuthName())
+	}
+	// Both render together without either disappearing.
+	first := sampleTrunk()
+	first.OutboundUsername = "one"
+	first.OutboundPassword = "a-long-enough-secret"
+	second := sampleTrunk()
+	second.Name = "acme-out"
+	second.Username = "two"
+	second.Password = "a-long-enough-secret"
+	rendered, err := RenderTrunks([]Trunk{first, second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"[trunkout-acme]", "[trunk-acme-out]"} {
+		if !strings.Contains(rendered, want) {
+			t.Errorf("missing %q:\n%s", want, rendered)
+		}
+	}
+}

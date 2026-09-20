@@ -21,6 +21,8 @@ function blankTrunk(): AsteriskTrunk {
     port: DEFAULT_PORT,
     transport: "udp",
     match: [],
+    outboundUsername: "",
+    outboundPassword: "",
     destinations: [],
     devices: [],
     maxConcurrent: DEFAULT_CONCURRENT,
@@ -181,27 +183,46 @@ export function TrunkEditor() {
               />
             </div>
 
+            <Input
+              value={(trunk.match ?? []).join(" ")}
+              placeholder={t("允许的来源地址或网段")}
+              onChange={(event) => update(index, { match: splitList(event.target.value) })}
+            />
+
+            {/* Two credential pairs, deliberately separate. The inbound one
+                authenticates what the peer sends; the outbound one answers a
+                challenge to what this side sends, which is what a provider
+                does when a call is forwarded out to it. A provider using one
+                credential for both directions gets it entered twice. */}
             <div className="grid gap-2 sm:grid-cols-2">
               <Input
-                value={(trunk.match ?? []).join(" ")}
-                placeholder={t("允许的来源地址或网段")}
-                onChange={(event) => update(index, { match: splitList(event.target.value) })}
+                value={trunk.username ?? ""}
+                placeholder={t("呼入用户名（可选）")}
+                onChange={(event) => update(index, { username: event.target.value })}
               />
-              <div className="grid gap-2 sm:grid-cols-2">
-                <Input
-                  value={trunk.username ?? ""}
-                  placeholder={t("用户名（可选）")}
-                  onChange={(event) => update(index, { username: event.target.value })}
-                />
-                <Input
-                  type="password"
-                  value={trunk.password ?? ""}
-                  placeholder={
-                    trunk.hasPassword ? t("已设置，留空则不修改") : t("密码（保存后不再回显）")
-                  }
-                  onChange={(event) => update(index, { password: event.target.value })}
-                />
-              </div>
+              <Input
+                type="password"
+                value={trunk.password ?? ""}
+                placeholder={
+                  trunk.hasPassword ? t("已设置，留空则不修改") : t("呼入密码（保存后不再回显）")
+                }
+                onChange={(event) => update(index, { password: event.target.value })}
+              />
+              <Input
+                value={trunk.outboundUsername ?? ""}
+                placeholder={t("呼出用户名（可选）")}
+                onChange={(event) => update(index, { outboundUsername: event.target.value })}
+              />
+              <Input
+                type="password"
+                value={trunk.outboundPassword ?? ""}
+                placeholder={
+                  trunk.hasOutboundPassword
+                    ? t("已设置，留空则不修改")
+                    : t("呼出密码（保存后不再回显）")
+                }
+                onChange={(event) => update(index, { outboundPassword: event.target.value })}
+              />
             </div>
 
             <div className="grid gap-2 sm:grid-cols-[2fr_2fr_5rem_5rem]">
@@ -249,7 +270,7 @@ export function TrunkEditor() {
       </div>
 
       <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
-        {t("必须填写来源地址或凭据之一；目标模式以 _ 开头；并发上限与超时单位为秒")}
+        {t("必须填写来源地址或呼入凭据之一；转发呼叫到对端需要呼出凭据；目标模式以 _ 开头")}
         {state?.path ? ` · ${state.path}` : ""}
       </p>
 

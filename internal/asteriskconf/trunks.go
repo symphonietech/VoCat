@@ -34,6 +34,15 @@ type Trunk struct {
 	// peer is identified by address instead.
 	Username string
 	Password string
+	// OutboundUsername and OutboundPassword answer a challenge to an INVITE
+	// this side sends, which is what a provider does when a call is
+	// forwarded out to it. Kept separate from the inbound pair rather than
+	// reused: a provider that issues one credential for both directions is
+	// served by entering it twice, while one that issues two cannot be
+	// served at all by a single field. Empty means no outbound_auth is
+	// emitted, so an unauthenticated peer stays unauthenticated.
+	OutboundUsername string
+	OutboundPassword string
 	// Destinations are the extension patterns this trunk may dial. Empty
 	// means none: the context is rendered, matches nothing, and hangs up.
 	Destinations []string
@@ -63,6 +72,14 @@ const (
 	// account of that name, and PJSIP answers a duplicate object by refusing
 	// it -- taking the rest of the file with it.
 	trunkObjectPrefix = "trunk-"
+	// trunkOutboundAuthPrefix names the outbound credential's auth object.
+	//
+	// A prefix rather than a "-out" suffix, and that is not cosmetic: with a
+	// suffix, trunk "acme" would produce trunk-acme-out and a trunk actually
+	// named "acme-out" would produce the same name for its inbound auth.
+	// These two prefixes cannot collide, because they differ at their sixth
+	// character ("-" against "o") whatever follows.
+	trunkOutboundAuthPrefix = "trunkout-"
 	// trunkGroupCategory is the GROUP() category the per-trunk cap counts in.
 	trunkGroupCategory = "trunk"
 
@@ -157,24 +174,16 @@ func (t Trunk) Validate() error {
 		}
 	}
 	if hasAuth {
-		if strings.TrimSpace(t.Username) == "" {
-			return errors.New("a username is required alongside a password")
+		if err := validateTrunkCredential("", t.Username, t.Password); err != nil {
+			return err
 		}
-		for _, value := range strings.TrimSpace(t.Username) {
-			if !extensionRune(value) {
-				return fmt.Errorf("username contains %q, which is not allowed", value)
-			}
-		}
-		switch {
-		case len(t.Password) < MinPasswordLength:
-			return fmt.Errorf("password must be at least %d characters", MinPasswordLength)
-		case len(t.Password) > MaxPasswordLength:
-			return errors.New("password is too long")
-		}
-		for _, value := range t.Password {
-			if !passwordRune(value) {
-				return fmt.Errorf("password contains %q, which Asterisk's config parser would cut the line at", value)
-			}
+	}
+	// The outbound pair is independent: a trunk identified by address alone
+	// may still have to authenticate when this side forwards a call out to
+	// it, which is exactly what an inbound call relayed to a provider does.
+	if strings.TrimSpace(t.OutboundUsername) != "" || t.OutboundPassword != "" {
+		if err := validateTrunkCredential("outbound ", t.OutboundUsername, t.OutboundPassword); err != nil {
+			return err
 		}
 	}
 
@@ -239,9 +248,41 @@ func (t Trunk) Validate() error {
 	return nil
 }
 
+// validateTrunkCredential checks one username and password pair. The label
+// names which pair, because a trunk can carry two and an error that does not
+// say which one is an error the operator has to guess at.
+func validateTrunkCredential(label, username, password string) error {
+	if strings.TrimSpace(username) == "" {
+		return fmt.Errorf("an %susername is required alongside a %spassword", label, label)
+	}
+	for _, value := range strings.TrimSpace(username) {
+		if !extensionRune(value) {
+			return fmt.Errorf("%susername contains %q, which is not allowed", label, value)
+		}
+	}
+	switch {
+	case len(password) < MinPasswordLength:
+		return fmt.Errorf("%spassword must be at least %d characters", label, MinPasswordLength)
+	case len(password) > MaxPasswordLength:
+		return fmt.Errorf("%spassword is too long", label)
+	}
+	for _, value := range password {
+		if !passwordRune(value) {
+			return fmt.Errorf("%spassword contains %q, which Asterisk's config parser would cut the line at",
+				label, value)
+		}
+	}
+	return nil
+}
+
 // ObjectName is what this trunk's PJSIP sections are called.
 func (t Trunk) ObjectName() string {
 	return trunkObjectPrefix + strings.TrimSpace(t.Name)
+}
+
+// OutboundAuthName is the auth object holding the outbound credential.
+func (t Trunk) OutboundAuthName() string {
+	return trunkOutboundAuthPrefix + strings.TrimSpace(t.Name)
 }
 
 // ContextName is the dial plan context this trunk's calls arrive in.
@@ -317,6 +358,13 @@ func RenderTrunks(trunks []Trunk) (string, error) {
 		if strings.TrimSpace(trunk.Username) != "" {
 			fmt.Fprintf(&out, "auth=%s\n", object)
 		}
+		// outbound_auth answers a challenge to an INVITE this side sends,
+		// which auth= does not: that one only authenticates what arrives.
+		// Without it a forwarded call dies at 401 with nothing in the
+		// configuration to point at.
+		if strings.TrimSpace(trunk.OutboundUsername) != "" {
+			fmt.Fprintf(&out, "outbound_auth=%s\n", trunk.OutboundAuthName())
+		}
 		fmt.Fprintf(&out, "transport=transport-%s\n", transport)
 		// An external peer is on the far side of something. Unlike the
 		// loopback trunk to VoCat, symmetric RTP and contact rewriting are
@@ -331,6 +379,12 @@ func RenderTrunks(trunks []Trunk) (string, error) {
 			fmt.Fprintf(&out, "[%s]\ntype=auth\nauth_type=userpass\n", object)
 			fmt.Fprintf(&out, "username=%s\npassword=%s\n\n",
 				strings.TrimSpace(trunk.Username), trunk.Password)
+		}
+
+		if strings.TrimSpace(trunk.OutboundUsername) != "" {
+			fmt.Fprintf(&out, "[%s]\ntype=auth\nauth_type=userpass\n", trunk.OutboundAuthName())
+			fmt.Fprintf(&out, "username=%s\npassword=%s\n\n",
+				strings.TrimSpace(trunk.OutboundUsername), trunk.OutboundPassword)
 		}
 
 		if len(trunk.Match) > 0 {

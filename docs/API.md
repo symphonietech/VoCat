@@ -615,6 +615,7 @@ Trunk body:
 ```json
 {"name":"acme","host":"203.0.113.10","port":5060,"transport":"udp",
  "match":["203.0.113.10"],"username":"acme","password":"...",
+ "outbound_username":"acme-out","outbound_password":"...",
  "destinations":["_1NXXNXXXXXX"],"devices":["SLOT1-1","SLOT2-1"],
  "max_concurrent":4,"timeout_seconds":60,"share_routes":false}
 ```
@@ -624,6 +625,16 @@ an allowlist and refuses anything that would leave it open:
 
 - **`match` or credentials is required.** Without either, anything that reached
   the port could dial out. Both together is fine.
+- **Two credential pairs, independent.** `username`/`password` authenticate
+  what the peer *sends*; `outbound_username`/`outbound_password` answer a
+  challenge to an INVITE *this side* sends, which is what a provider does when
+  a call is forwarded out to it. Without the outbound pair a forwarded call
+  dies at 401 with nothing in the configuration to point at. They are separate
+  fields rather than one: a provider issuing a single credential for both
+  directions is served by entering it twice, while one issuing two cannot be
+  served by a single field at all. Each is write-only on its own — rotating one
+  and leaving the other blank keeps the other. The response carries
+  `has_password` and `has_outbound_password`.
 - **`devices` is required.** Unlike an outbound route, an empty list is not
   "let VoCat choose": which cards an outside party may spend is not something
   to leave implicit.

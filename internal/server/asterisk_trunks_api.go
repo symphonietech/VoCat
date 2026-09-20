@@ -31,39 +31,47 @@ const (
 // asteriskTrunk is one external peer as the browser sees it. The password is
 // accepted on the way in and never returned.
 type asteriskTrunk struct {
-	Name           string   `json:"name"`
-	Host           string   `json:"host"`
-	Port           int      `json:"port"`
-	Transport      string   `json:"transport"`
-	Match          []string `json:"match,omitempty"`
-	Username       string   `json:"username,omitempty"`
-	Password       string   `json:"password,omitempty"`
-	Destinations   []string `json:"destinations,omitempty"`
-	Devices        []string `json:"devices"`
-	MaxConcurrent  int      `json:"max_concurrent"`
-	TimeoutSeconds int      `json:"timeout_seconds"`
-	ShareRoutes    bool     `json:"share_routes,omitempty"`
-	Comment        string   `json:"comment,omitempty"`
-	// HasPassword is what the browser gets instead of the password: enough to
-	// render "set" versus "not set" and nothing more.
-	HasPassword bool `json:"has_password,omitempty"`
+	Name      string   `json:"name"`
+	Host      string   `json:"host"`
+	Port      int      `json:"port"`
+	Transport string   `json:"transport"`
+	Match     []string `json:"match,omitempty"`
+	Username  string   `json:"username,omitempty"`
+	Password  string   `json:"password,omitempty"`
+	// The outbound pair answers a challenge to an INVITE this side sends,
+	// which is what a provider does when a call is forwarded out to it.
+	OutboundUsername string   `json:"outbound_username,omitempty"`
+	OutboundPassword string   `json:"outbound_password,omitempty"`
+	Destinations     []string `json:"destinations,omitempty"`
+	Devices          []string `json:"devices"`
+	MaxConcurrent    int      `json:"max_concurrent"`
+	TimeoutSeconds   int      `json:"timeout_seconds"`
+	ShareRoutes      bool     `json:"share_routes,omitempty"`
+	Comment          string   `json:"comment,omitempty"`
+	// HasPassword and HasOutboundPassword are what the browser gets instead
+	// of the passwords: enough to render "set" versus "not set" and nothing
+	// more.
+	HasPassword         bool `json:"has_password,omitempty"`
+	HasOutboundPassword bool `json:"has_outbound_password,omitempty"`
 }
 
 func (t asteriskTrunk) toConfig() asteriskconf.Trunk {
 	return asteriskconf.Trunk{
-		Name:           strings.TrimSpace(t.Name),
-		Host:           strings.TrimSpace(t.Host),
-		Port:           t.Port,
-		Transport:      strings.TrimSpace(t.Transport),
-		Match:          t.Match,
-		Username:       strings.TrimSpace(t.Username),
-		Password:       t.Password,
-		Destinations:   t.Destinations,
-		Devices:        t.Devices,
-		MaxConcurrent:  t.MaxConcurrent,
-		TimeoutSeconds: t.TimeoutSeconds,
-		ShareRoutes:    t.ShareRoutes,
-		Comment:        strings.TrimSpace(t.Comment),
+		Name:             strings.TrimSpace(t.Name),
+		Host:             strings.TrimSpace(t.Host),
+		Port:             t.Port,
+		Transport:        strings.TrimSpace(t.Transport),
+		Match:            t.Match,
+		Username:         strings.TrimSpace(t.Username),
+		Password:         t.Password,
+		OutboundUsername: strings.TrimSpace(t.OutboundUsername),
+		OutboundPassword: t.OutboundPassword,
+		Destinations:     t.Destinations,
+		Devices:          t.Devices,
+		MaxConcurrent:    t.MaxConcurrent,
+		TimeoutSeconds:   t.TimeoutSeconds,
+		ShareRoutes:      t.ShareRoutes,
+		Comment:          strings.TrimSpace(t.Comment),
 	}
 }
 
@@ -79,7 +87,9 @@ func withoutTrunkPasswords(trunks []asteriskTrunk) []asteriskTrunk {
 	out := make([]asteriskTrunk, 0, len(trunks))
 	for _, trunk := range trunks {
 		trunk.HasPassword = trunk.Password != ""
+		trunk.HasOutboundPassword = trunk.OutboundPassword != ""
 		trunk.Password = ""
+		trunk.OutboundPassword = ""
 		out = append(out, trunk)
 	}
 	return out
@@ -211,16 +221,26 @@ func (s *Server) handlePutAsteriskTrunks(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	existing := map[string]string{}
+	// Both credentials are kept, and independently: an operator rotating the
+	// outbound one must not have the inbound one wiped for being blank.
+	type storedSecrets struct{ inbound, outbound string }
+	existing := map[string]storedSecrets{}
 	for _, trunk := range s.storedAsteriskTrunks(r.Context()) {
-		existing[strings.ToLower(strings.TrimSpace(trunk.Name))] = trunk.Password
+		existing[strings.ToLower(strings.TrimSpace(trunk.Name))] = storedSecrets{
+			inbound: trunk.Password, outbound: trunk.OutboundPassword,
+		}
 	}
 	merged := make([]asteriskTrunk, 0, len(request.Trunks))
 	for _, trunk := range request.Trunks {
-		// has_password is an output marker; it must never be stored.
+		// The has_* fields are output markers; they must never be stored.
 		trunk.HasPassword = false
+		trunk.HasOutboundPassword = false
+		previous := existing[strings.ToLower(strings.TrimSpace(trunk.Name))]
 		if trunk.Password == "" {
-			trunk.Password = existing[strings.ToLower(strings.TrimSpace(trunk.Name))]
+			trunk.Password = previous.inbound
+		}
+		if trunk.OutboundPassword == "" {
+			trunk.OutboundPassword = previous.outbound
 		}
 		if trunk.Port == 0 {
 			trunk.Port = asteriskconf.DefaultTrunkPort

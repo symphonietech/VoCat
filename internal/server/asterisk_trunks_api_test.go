@@ -194,3 +194,59 @@ func TestTrunkPendingCoversBothFiles(t *testing.T) {
 		t.Fatalf("a stale dialplan did not report as pending: %s", response.Body.String())
 	}
 }
+
+// Two credentials, kept independently: rotating one must not wipe the other
+// for being blank, and neither may come back out.
+func TestTrunkOutboundPasswordIsWriteOnlyAndIndependent(t *testing.T) {
+	server, database, _ := trunksTestServer(t)
+
+	both := `{"trunks":[{"name":"acme","host":"203.0.113.10","port":5060,"transport":"udp",` +
+		`"username":"acme","password":"inbound-long-secret",` +
+		`"outbound_username":"acme-out","outbound_password":"outbound-long-secret",` +
+		`"destinations":["_1NXXNXXXXXX"],"devices":["slot1"],` +
+		`"max_concurrent":4,"timeout_seconds":60}]}`
+	created := putTrunks(t, server, both)
+	if created.Code != http.StatusOK {
+		t.Fatalf("save status = %d, body = %s", created.Code, created.Body.String())
+	}
+	for _, secret := range []string{"inbound-long-secret", "outbound-long-secret"} {
+		if strings.Contains(created.Body.String(), secret) {
+			t.Fatalf("%s came back out: %s", secret, created.Body.String())
+		}
+	}
+	if !strings.Contains(created.Body.String(), "has_outbound_password") {
+		t.Errorf("the editor cannot tell an outbound password is stored: %s", created.Body.String())
+	}
+
+	// Rotate only the outbound credential. The inbound one is blank in this
+	// request because the browser never had it.
+	rotated := `{"trunks":[{"name":"acme","host":"203.0.113.10","port":5060,"transport":"udp",` +
+		`"username":"acme","outbound_username":"acme-out","outbound_password":"a-new-long-secret",` +
+		`"destinations":["_1NXXNXXXXXX"],"devices":["slot1"],` +
+		`"max_concurrent":4,"timeout_seconds":60}]}`
+	if response := putTrunks(t, server, rotated); response.Code != http.StatusOK {
+		t.Fatalf("rotate status = %d, body = %s", response.Code, response.Body.String())
+	}
+	stored := storedTrunks(t, database)
+	if len(stored) != 1 {
+		t.Fatalf("stored = %+v", stored)
+	}
+	if stored[0].Password != "inbound-long-secret" {
+		t.Errorf("rotating the outbound credential wiped the inbound one: %q", stored[0].Password)
+	}
+	if stored[0].OutboundPassword != "a-new-long-secret" {
+		t.Errorf("the outbound credential was not rotated: %q", stored[0].OutboundPassword)
+	}
+	if stored[0].HasPassword || stored[0].HasOutboundPassword {
+		t.Errorf("an output marker was stored: %+v", stored[0])
+	}
+
+	// The preview must redact both, not only the first.
+	response := httptest.NewRecorder()
+	server.handleGetAsteriskTrunks(response, httptest.NewRequest(http.MethodGet, "/api/asterisk/trunks", nil))
+	for _, secret := range []string{"inbound-long-secret", "a-new-long-secret"} {
+		if strings.Contains(response.Body.String(), secret) {
+			t.Errorf("%s is readable through the API: %s", secret, response.Body.String())
+		}
+	}
+}

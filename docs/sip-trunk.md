@@ -1040,8 +1040,12 @@ that:
 - **Destinations are an allowlist.** `_1NXXNXXXXXX`, not `_.` with exclusions.
 - **SIMs are an allowlist**, and unlike an outbound route the list is
   required. Which cards an outside party may spend is not left implicit.
-- **A source address or credentials is required.** Without either, anything
-  reaching port 5060 could dial out.
+- **A source address or inbound credentials is required.** Without either,
+  anything reaching port 5060 could dial out.
+- **The outbound credential is separate.** The inbound pair authenticates what
+  the peer sends; the outbound pair answers a challenge to what this side
+  sends, which is what a provider does when a call is forwarded out to it. A
+  provider using one credential for both directions takes it entered twice.
 - **A new trunk reaches nothing** until destinations are added. Deny is the
   starting state, not an oversight.
 
@@ -1104,6 +1108,47 @@ were added.
 `trunks.conf` holds SIP passwords in the clear once a trunk uses credentials,
 so it is written `0600` exactly as `endpoints.conf` is. The dialplan half
 holds none and is written `0644`.
+
+### Forwarding a call from a SIM out to a trunk
+
+The reverse direction. An inbound call arriving on a SIM normally rings an
+extension, chosen by the inbound mode; sending it out to a trunk instead is a
+template edit rather than a GUI setting.
+
+`vocat-inbound` is generated and only ever dials extensions, and editing it is
+pointless because the next Apply overwrites it. The hook is `[from-vocat]` in
+`asterisk/templates/extensions.conf`, which is **not** generated:
+
+```ini
+[from-vocat]
+; Forward this SIM's number out to the upstream trunk. Specific patterns
+; only -- a _. here matches everything and the include below would never be
+; reached.
+exten => 15551230000,1,Dial(PJSIP/2001@trunk-acme,60)
+ same => n,Hangup()
+; Which form the carrier sends is its choice, so match both.
+exten => +15551230000,1,Goto(15551230000,1)
+
+include => vocat-inbound
+```
+
+This works because Asterisk walks a context's includes **only when the context
+itself matches nothing**: a specific pattern wins for those numbers and every
+other number still falls through to `vocat-inbound`. It is the same property
+the comment in that context warns about, used deliberately. A `_.` there would
+disable inbound routing entirely.
+
+`trunk-acme` is the endpoint from the trunk list — an ordinary PJSIP endpoint
+with a static AOR, so it can be dialled as well as received from. **Fill in the
+outbound credential** for any provider that challenges an INVITE, or the
+forwarded call dies at 401.
+
+Templates are bind-mounted, so this is `docker compose restart asterisk`, no
+rebuild.
+
+Worth knowing: a forwarded call holds the SIM for its whole duration, so that
+card counts as busy in the idle filter and will not take a second call in
+either direction while it is up.
 
 ### Saving and applying
 

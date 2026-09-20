@@ -763,6 +763,13 @@ export type AsteriskTrunk = {
   username?: string;
   password?: string;
   hasPassword?: boolean;
+  // The outbound pair answers a challenge to an INVITE this side sends, which
+  // is what a provider does when a call is forwarded out to it. Separate from
+  // the inbound pair: a provider issuing one credential for both is served by
+  // entering it twice, one issuing two cannot be served by a single field.
+  outboundUsername?: string;
+  outboundPassword?: string;
+  hasOutboundPassword?: boolean;
   // Patterns this trunk may dial. Empty means none: a new trunk reaches
   // nothing until destinations are added.
   destinations?: string[];
