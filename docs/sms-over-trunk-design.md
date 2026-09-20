@@ -105,20 +105,15 @@ exten => _.,1,Hangup()
 | --- | --- |
 | `off` | **Default.** Nothing is forwarded. |
 | `did` | Deliver to the extension named after the SIM's number. |
-| `trunk` | Deliver out to a named external trunk. |
 
-`off` is the default deliberately: this is new behaviour and must not switch
-itself on for a deployment that upgrades.
+Two modes, and no more. `off` is the default deliberately: this is new
+behaviour and must not switch itself on for a deployment that upgrades.
 
-`trunk` uses `MessageSend`'s endpoint-and-URI form against the trunk objects
-the external trunk feature already builds:
-
-```ini
-MessageSend(pjsip:trunk-acme/sip:2001@203.0.113.10,${MESSAGE(from)})
-```
-
-There is no `all` mode. Ringing every handset for a call is a reasonable
-fallback; copying every text to every handset is not.
+There is no `all` mode -- ringing every handset for a call is a reasonable
+fallback, copying every text to every handset is not -- and no mode that
+forwards to an external SIP trunk. Reaching an external gateway is a separate
+feature over its **HTTP API**, not SIP, and is out of scope here; see
+[Deliberately not in scope](#deliberately-not-in-scope).
 
 ---
 
@@ -130,15 +125,31 @@ VoCat accepts a MESSAGE from the trunk only when the **sending extension's
 number equals a SIM's number**. It then sends through that SIM. Otherwise it
 refuses.
 
+The constraint is on the sender alone, and the two ends are not symmetric:
+
+| Field | Constraint |
+| --- | --- |
+| **From** -- the sending extension | Must equal the number of a SIM VoCat hosts. This is what selects which SIM pays for and sends the message. |
+| **To** -- the recipient | **Any number the carrier will accept.** An ordinary global destination; it has nothing to do with the SIMs VoCat hosts. |
+
+That asymmetry is the whole point: the message leaves the system. A rule that
+also constrained the recipient would reduce this to SIM-to-SIM texting.
+
 | Outcome | Response |
 | --- | --- |
-| No SIM has that number | `403 Forbidden` |
+| No SIM has the sender's number | `403 Forbidden` |
+| The recipient is not a usable number | `400 Bad Request` |
 | Accepted for delivery | `202 Accepted` |
 
 `403` rather than `404`: the destination exists, the sender is not allowed to
 use it. `202` rather than `200`: VoCat has accepted the message for delivery,
 not delivered it -- the SIM submission and the carrier's delivery both come
 later.
+
+The recipient is not validated by the dial plan, whose `_.` pattern passes it
+through untouched. It is validated where it has to be encoded, by the existing
+send path, which already returns `device.ErrSMSInvalidRecipient`; VoCat maps
+that to the `400` above.
 
 Once accepted it goes to the same send path `/api/sms/send` uses, so
 IMS-or-modem selection, multipart segmentation and history come free.
@@ -334,13 +345,23 @@ it needs a field -- the only storage-adjacent work, and no migration, since
 5. **Delivery reports come back as plain text**, not IMDN.
 6. **The history tab shows whole conversations** with trunk-state badges, not
    only the messages that crossed the trunk.
+7. **The recipient of an outbound message is unconstrained.** Only the sender
+   has to match a hosted SIM.
 
-## Open questions
+## Deliberately not in scope
 
-1. Does the inbound `trunk` mode need a destination number, the way the
-   forward-a-call mode does, or does the SIM's number always pass through?
-2. Should an extension be able to send to a destination the SIM's carrier will
-   reject -- premium numbers, international -- or does outbound want a
-   destination allowlist like an external trunk has?
-3. Is a rate limit needed per extension? A compromised handset credential can
-   currently spend a SIM's SMS allowance as fast as it can send.
+Nothing here is waiting on an answer. Three things were considered and
+excluded, and the reasons are worth keeping so they are not reopened by
+accident:
+
+- **SMS to or from an external gateway over SIP.** Both directions are wanted
+  eventually -- receiving SMS from a gateway and load-sharing it across the
+  SIMs, and routing SMS out to a gateway -- but over the gateway's **HTTP
+  API**, not SIP MESSAGE. That is a separate feature with its own design, and
+  keeping it out of this one is why the inbound modes are `off` and `did` only.
+- **A destination allowlist for outbound.** Not needed: an extension already
+  has to hold a SIM's own number to send at all, and the recipient is an
+  ordinary global number by design.
+- **A per-extension rate limit.** Considered and declined. A compromised
+  handset credential can spend that SIM's SMS allowance as fast as it can
+  send; that is accepted.
