@@ -29,7 +29,7 @@ Front to back is the intended order, and the sections build on each other:
 3. **[Enabling it](#enabling-it)** and **[Running Asterisk in a
    container](#running-asterisk-in-a-container)** — getting it up.
 4. **[Asterisk side](#asterisk-side)** — what the shipped config does.
-5. **Configuring:** [outbound routes](#managing-outbound-routes-from-the-web-ui),
+5. **Configuring:** [extension routes](#managing-extension-routes-from-the-web-ui),
    [extensions](#extensions-in-the-web-ui), [inbound
    routing](#inbound-routing), [which SIM places a
    call](#choosing-which-sim-places-a-call).
@@ -543,7 +543,7 @@ the preceding `siptrunk call failed` line carries the reason. No `placed` line
 at all means the INVITE was refused before dialling — the status table above
 says which case that was.
 
-## Managing outbound routes from the web UI
+## Managing extension routes from the web UI
 
 The **Asterisk** page has an outbound route table: a match pattern, the SIMs
 to rotate between, and a ring timeout. Save writes the dialplan; **Apply**
@@ -616,8 +616,22 @@ tomorrow, and deleting the route would lose a rule that was deliberate.
 ## The Asterisk page in VoCat
 
 VoCat can show live PBX state — which extensions are registered, whether the
-trunk is reachable, how many calls are up — on its own **Asterisk** page, next
-to Voice calls. It reads this over Asterisk's manager interface (AMI).
+trunks are reachable, how many calls are up — on its own **Asterisk** page,
+next to Voice calls. It reads this over Asterisk's manager interface (AMI).
+
+The endpoint status is split three ways, and the split is by object name
+rather than by guesswork:
+
+| Section | What is in it |
+| --- | --- |
+| **Internal trunk** | The `vocat` endpoint — the loopback trunk between Asterisk and VoCat |
+| **External trunks** | Every `trunk-*` endpoint, one per peer in the External trunks list |
+| **Extensions** | Everything else: the softphone accounts |
+
+External trunks used to appear under Extensions, because the page knew only
+`vocat` and "everything else". The renderer namespaces a trunk's PJSIP objects
+as `trunk-<name>` precisely so they cannot collide with a softphone account,
+and that prefix is what tells the two apart here.
 
 It is **off unless a secret is set**, and the page says "not configured"
 rather than pretending something is broken:
@@ -1018,10 +1032,11 @@ Rows carry a checkbox for deleting several at once. Deleting every extension
 is allowed — the inbound file then rejects calls with the same truthful cause
 rather than the save being refused as if it were a mistake.
 
-## Inbound trunks: an outside peer dialling through your SIMs
+## External trunks: an outside peer dialling through your SIMs
 
 An external SIP trunk — an ITSP, or another PBX — whose calls VoCat relays out
-through a SIM. Configured under **Asterisk → Inbound trunks**.
+through a SIM, and a destination for calls forwarded the other way.
+Configured under **Asterisk → External trunks**.
 
 The call path is the one that already existed. A call entering Asterisk and
 leaving through a SIM is exactly what `[vocat-routes]` does; the only thing
@@ -1112,7 +1127,7 @@ holds none and is written `0644`.
 ### Forwarding a call from a SIM out to a trunk
 
 The reverse direction, and it is a GUI setting: **Asterisk → Inbound routing →
-Forward to a trunk**.
+Forward to an external trunk**.
 
 Pick the trunk and, optionally, a destination number. Leave the number blank
 and the dialled number — the SIM's own — is passed through unchanged, which is

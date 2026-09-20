@@ -114,7 +114,7 @@ export function InboundEditor() {
               { value: "did", label: t("拨给同号码分机") },
               { value: "ring_all", label: t("全部同时振铃") },
               { value: "hunt", label: t("按顺序轮询") },
-              { value: "forward", label: t("转发到呼出中继") },
+              { value: "forward", label: t("转发到外部中继") },
             ]}
           />
           <Input
@@ -147,7 +147,7 @@ export function InboundEditor() {
             </div>
             {trunks.length === 0 ? (
               <p className="rounded-lg bg-amber-50 p-2 text-xs text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">
-                {t("还没有配置中继。先在上面的「呼入中继」中添加一个，保存并应用后才能在这里选择。")}
+                {t("还没有配置外部中继。先在上面的「外部中继」中添加一个，保存并应用后才能在这里选择。")}
               </p>
             ) : null}
           </div>

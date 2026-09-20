@@ -96,7 +96,7 @@ export function TrunkEditor() {
   return (
     <div className="mb-4">
       <div className="mb-2 flex flex-wrap items-center gap-2">
-        <h2 className="text-sm font-medium text-slate-600 dark:text-slate-300">{t("呼入中继")}</h2>
+        <h2 className="text-sm font-medium text-slate-600 dark:text-slate-300">{t("外部中继")}</h2>
         {dirty ? <Tag type="warning">{t("未保存")}</Tag> : null}
         {!dirty && state?.pending ? <Tag type="warning">{t("待应用")}</Tag> : null}
         <div className="ml-auto flex flex-wrap gap-2">
@@ -107,7 +107,7 @@ export function TrunkEditor() {
               setDirty(true);
             }}
           >
-            {t("添加中继")}
+            {t("添加外部中继")}
           </Button>
           <Button variant="primary" loading={busy} disabled={!dirty} onClick={save}>
             {t("保存")}
@@ -126,12 +126,12 @@ export function TrunkEditor() {
       </div>
 
       <p className="mb-2 rounded-lg bg-amber-50 p-2 text-xs text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">
-        {t("呼入中继可以通过 SIM 卡拨出，产生真实话费。只填写确实需要的目标号码和 SIM 卡。")}
+        {t("外部中继可以通过 SIM 卡拨出，产生真实话费。只填写确实需要的目标号码和 SIM 卡。")}
       </p>
 
       {state?.unknownDevices?.length ? (
         <p className="mb-2 rounded-lg bg-amber-50 p-2 text-xs text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">
-          {t("这些设备已不存在，使用它们的中继在拨号时会失败")}: {state.unknownDevices.join(", ")}
+          {t("这些设备已不存在，使用它们的外部中继在拨号时会失败")}: {state.unknownDevices.join(", ")}
         </p>
       ) : null}
 
@@ -144,7 +144,7 @@ export function TrunkEditor() {
       <div className="ui-card divide-y divide-slate-100 dark:divide-slate-800">
         {trunks.length === 0 ? (
           <p className="p-3 text-sm text-slate-500 dark:text-slate-400">
-            {t("没有呼入中继。外部 SIP 对端无法接入。")}
+            {t("没有外部中继。外部 SIP 对端无法接入，也无法作为转发目标。")}
           </p>
         ) : null}
         {trunks.map((trunk, index) => (
@@ -262,7 +262,7 @@ export function TrunkEditor() {
               <span className="text-xs text-slate-500 dark:text-slate-400">
                 {/* Not a convenience toggle: it is the isolation this trunk's
                     own context provides, switched off. */}
-                {t("同时允许使用共享外呼路由（这些呼叫不受上面的 SIM 限制和并发上限约束）")}
+                {t("同时允许使用分机路由（这些呼叫不受上面的 SIM 限制和并发上限约束）")}
               </span>
             </div>
           </div>

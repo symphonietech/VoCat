@@ -71,7 +71,7 @@ export function RouteEditor() {
   return (
     <div className="mb-4">
       <div className="mb-2 flex flex-wrap items-center gap-2">
-        <h2 className="text-sm font-medium text-slate-600 dark:text-slate-300">{t("外呼路由")}</h2>
+        <h2 className="text-sm font-medium text-slate-600 dark:text-slate-300">{t("分机路由")}</h2>
         {dirty ? <Tag type="warning">{t("未保存")}</Tag> : null}
         {!dirty && state?.pending ? <Tag type="warning">{t("待应用")}</Tag> : null}
         <div className="ml-auto flex flex-wrap gap-2">
@@ -115,7 +115,7 @@ export function RouteEditor() {
       <div className="ui-card divide-y divide-slate-100 dark:divide-slate-800">
         {routes.length === 0 ? (
           <p className="p-3 text-sm text-slate-500 dark:text-slate-400">
-            {t("没有路由。没有任何路由时，所有外呼都会被 Asterisk 拒绝。")}
+            {t("没有分机路由。没有任何路由时，分机的外呼都会被 Asterisk 拒绝。")}
           </p>
         ) : null}
         {routes.map((route, index) => (

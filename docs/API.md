@@ -549,7 +549,7 @@ what a wrong setting does: [docs/sip-trunk.md](sip-trunk.md).
 
 Each endpoint in `status`: `{name, aor, state, active_channels, transport, contacts: [{uri, status, roundtrip_ms, expires, user_agent, via_address, fields}], registered, reachable, fields}`. `fields` on both is the raw AMI message, so a key that moved between Asterisk versions stays visible rather than blanking a row.
 
-### Outbound routes
+### Extension routes
 
 Which dialled numbers leave through which SIMs. Rendered to `routes.conf`.
 
@@ -606,7 +606,7 @@ Where a call arriving on a SIM rings. Rendered to `inbound.conf`.
   A stored forward plan whose trunk is later deleted falls back to the default
   on read, the same way a ring group naming a deleted extension does.
 
-### Inbound trunks
+### External trunks
 
 An external SIP peer whose calls are relayed **out through a SIM**. This is a
 gateway, not a registrar: the peer terminates on Asterisk, never on VoCat's

@@ -16,6 +16,12 @@ import { useI18n } from "../lib/i18n";
 // The trunk endpoint is the one VoCat itself answers. Naming it here keeps
 // the page honest about which row is the SIM path rather than a phone.
 const TRUNK_ENDPOINT = "vocat";
+// External trunk objects are namespaced by the renderer (trunkObjectPrefix in
+// internal/asteriskconf/trunks.go) so they cannot collide with a softphone
+// account. That same prefix is what tells them apart here, which is why the
+// two lists below are three-way rather than "vocat and everything else":
+// without it every external peer was listed as an extension.
+const EXTERNAL_TRUNK_PREFIX = "trunk-";
 
 function endpointTone(endpoint: AsteriskEndpoint): StatusTone {
   if (endpoint.reachable) return "success";
@@ -63,13 +69,19 @@ export default function AsteriskPage() {
 
   const endpoints = status?.endpoints ?? [];
   const trunk = endpoints.find((entry) => entry.name === TRUNK_ENDPOINT);
-  const phones = endpoints.filter((entry) => entry.name !== TRUNK_ENDPOINT);
+  const externalTrunks = endpoints.filter((entry) =>
+    entry.name.startsWith(EXTERNAL_TRUNK_PREFIX),
+  );
+  const phones = endpoints.filter(
+    (entry) =>
+      entry.name !== TRUNK_ENDPOINT && !entry.name.startsWith(EXTERNAL_TRUNK_PREFIX),
+  );
 
   return (
     <div className="p-4 sm:p-6">
       <PageHeader
         title={t("Asterisk")}
-        subtitle={t("查看前置 PBX 的实时状态：分机注册情况与中继可达性")}
+        subtitle={t("查看前置 PBX 的实时状态：分机注册情况与内外中继可达性")}
         actions={
           <Button icon={<ArrowClockwiseRegular />} onClick={refresh}>
             {t("刷新")}
@@ -135,7 +147,7 @@ export default function AsteriskPage() {
           <InboundEditor />
           <TrunkEditor />
 
-          <Section title={t("中继（VoCat）")}>
+          <Section title={t("内部中继")}>
             {trunk ? (
               <EndpointRow
                 endpoint={trunk}
@@ -146,6 +158,24 @@ export default function AsteriskPage() {
             ) : (
               <p className="p-3 text-sm text-slate-500 dark:text-slate-400">
                 {t("Asterisk 中没有名为 vocat 的中继端点")}
+              </p>
+            )}
+          </Section>
+
+          <Section title={t("外部中继")}>
+            {externalTrunks.length ? (
+              externalTrunks.map((endpoint) => (
+                <EndpointRow
+                  key={endpoint.name}
+                  endpoint={endpoint}
+                  expanded={expanded}
+                  onToggle={setExpanded}
+                  t={t}
+                />
+              ))
+            ) : (
+              <p className="p-3 text-sm text-slate-500 dark:text-slate-400">
+                {t("没有外部中继端点")}
               </p>
             )}
           </Section>
