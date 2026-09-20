@@ -316,3 +316,40 @@ func TestTrunkOutboundAuthNameCannotCollide(t *testing.T) {
 		}
 	}
 }
+
+// A trunk with no destinations can dial nothing and so spends no SIM. It is a
+// real configuration -- one used only as a destination for calls arriving on
+// a SIM -- rather than an unfinished one.
+func TestTrunkNeedsNoSIMWhenItCannotDialIn(t *testing.T) {
+	trunk := sampleTrunk()
+	trunk.Destinations = nil
+	trunk.Devices = nil
+	if err := trunk.Validate(); err != nil {
+		t.Fatalf("a forward-only trunk was refused: %v", err)
+	}
+	rendered, err := RenderTrunks([]Trunk{trunk})
+	if err != nil {
+		t.Fatalf("RenderTrunks() error = %v", err)
+	}
+	// The endpoint still has to exist, or it cannot be dialled out to.
+	if !strings.Contains(rendered, "[trunk-acme]") {
+		t.Fatalf("the endpoint is missing:\n%s", rendered)
+	}
+	routes, err := RenderTrunkRoutes([]Trunk{trunk})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(routes, "Dial(") {
+		t.Errorf("a trunk with no destinations dialled something:\n%s", routes)
+	}
+
+	// The moment it can dial in, the SIM list is required again.
+	trunk.Destinations = []string{"_1NXXNXXXXXX"}
+	err = trunk.Validate()
+	if err == nil {
+		t.Fatal("a trunk that can dial in was accepted with no SIMs")
+	}
+	if !strings.Contains(err.Error(), "dial in") {
+		t.Errorf("the error does not explain when a SIM is needed: %v", err)
+	}
+}

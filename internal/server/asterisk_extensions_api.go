@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -184,7 +185,34 @@ func (s *Server) asteriskInboundPlan(ctx context.Context, configured []asteriskc
 			"category", "siptrunk", "error", err)
 		return plan
 	}
+	// A forward plan naming a trunk that has since been deleted renders a
+	// dial to an endpoint Asterisk has never heard of, which fails at call
+	// time with nothing pointing at why. Same reasoning as the extension
+	// check above: fall back rather than generate it.
+	if err := s.inboundTrunkExists(ctx, candidate); err != nil {
+		s.logger.Warn("the stored Asterisk inbound plan names a trunk that is gone",
+			"category", "siptrunk", "error", err)
+		return plan
+	}
 	return candidate
+}
+
+// inboundTrunkExists checks a forward plan against the configured trunks.
+//
+// It lives here rather than in asteriskconf because that package renders one
+// file at a time and has no view of the trunk list, while the reason to
+// refuse is precisely that two separately edited lists disagree.
+func (s *Server) inboundTrunkExists(ctx context.Context, plan asteriskconf.InboundPlan) error {
+	if plan.Mode != asteriskconf.InboundForward {
+		return nil
+	}
+	want := strings.ToLower(strings.TrimSpace(plan.ForwardTrunk))
+	for _, trunk := range s.storedAsteriskTrunks(ctx) {
+		if strings.ToLower(strings.TrimSpace(trunk.Name)) == want {
+			return nil
+		}
+	}
+	return fmt.Errorf("trunk %s is not configured", strings.TrimSpace(plan.ForwardTrunk))
 }
 
 // asteriskInbound is the wire shape of the plan.
@@ -193,13 +221,19 @@ type asteriskInbound struct {
 	Extensions  []string `json:"extensions,omitempty"`
 	RingSeconds int      `json:"ring_seconds"`
 	HuntSeconds int      `json:"hunt_seconds"`
+	// Forward mode only: which trunk to send the call out to, and what to
+	// dial there. An empty number passes the dialled number through.
+	ForwardTrunk  string `json:"forward_trunk,omitempty"`
+	ForwardNumber string `json:"forward_number,omitempty"`
 }
 
 func (i asteriskInbound) toConfig() asteriskconf.InboundPlan {
 	plan := asteriskconf.InboundPlan{
-		Mode:        asteriskconf.InboundMode(strings.TrimSpace(i.Mode)),
-		RingSeconds: i.RingSeconds,
-		HuntSeconds: i.HuntSeconds,
+		Mode:          asteriskconf.InboundMode(strings.TrimSpace(i.Mode)),
+		RingSeconds:   i.RingSeconds,
+		HuntSeconds:   i.HuntSeconds,
+		ForwardTrunk:  strings.TrimSpace(i.ForwardTrunk),
+		ForwardNumber: strings.TrimSpace(i.ForwardNumber),
 	}
 	for _, name := range i.Extensions {
 		if name = strings.TrimSpace(name); name != "" {
@@ -217,10 +251,12 @@ func (i asteriskInbound) toConfig() asteriskconf.InboundPlan {
 
 func inboundToWire(plan asteriskconf.InboundPlan) asteriskInbound {
 	return asteriskInbound{
-		Mode:        string(plan.Mode),
-		Extensions:  plan.Extensions,
-		RingSeconds: plan.RingSeconds,
-		HuntSeconds: plan.HuntSeconds,
+		Mode:          string(plan.Mode),
+		Extensions:    plan.Extensions,
+		RingSeconds:   plan.RingSeconds,
+		HuntSeconds:   plan.HuntSeconds,
+		ForwardTrunk:  plan.ForwardTrunk,
+		ForwardNumber: plan.ForwardNumber,
 	}
 }
 

@@ -209,11 +209,17 @@ func (t Trunk) Validate() error {
 		}
 	}
 
-	// Required, unlike an outbound route where an empty list asks VoCat to
-	// choose. A trunk is an outside party; which cards it may spend is not
-	// something to leave implicit.
-	if len(t.Devices) == 0 {
-		return errors.New("at least one SIM is required")
+	// Required whenever the trunk can dial in, unlike an outbound route where
+	// an empty list asks VoCat to choose. A trunk is an outside party; which
+	// cards it may spend is not something to leave implicit.
+	//
+	// Not required when it has no destinations, because then it can dial
+	// nothing and spends no SIM. That is a real configuration rather than an
+	// unfinished one: a trunk used only as a destination -- a call arriving
+	// on a SIM forwarded out to a provider -- needs its endpoint to exist and
+	// needs nothing to be able to come in through it.
+	if len(t.Devices) == 0 && len(t.Destinations) > 0 {
+		return errors.New("at least one SIM is required for a trunk that can dial in")
 	}
 	if len(t.Devices) > 32 {
 		return errors.New("too many SIMs")

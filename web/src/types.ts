@@ -708,14 +708,19 @@ export type AsteriskExtension = {
 // Where a call arriving on a SIM rings.
 export type AsteriskInbound = {
   // "did" rings the extension named after the dialled number, "ring_all"
-  // rings everything at once, "hunt" rings the list in order.
-  mode: "did" | "ring_all" | "hunt";
+  // rings everything at once, "hunt" rings the list in order, "forward"
+  // sends the call straight back out to a trunk without ringing anything.
+  mode: "did" | "ring_all" | "hunt" | "forward";
   // In hunt mode this is the order and is required. In ring-all an empty list
   // means every configured extension, so a new handset joins without a second
   // edit.
   extensions?: string[];
   ringSeconds: number;
   huntSeconds: number;
+  // Forward mode only. An empty forwardNumber passes the dialled number
+  // through, which is what a provider routing by DID expects.
+  forwardTrunk?: string;
+  forwardNumber?: string;
 };
 
 // One SIM number VoCat has learned, offered as an extension to create.

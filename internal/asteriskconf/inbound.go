@@ -21,6 +21,10 @@ const (
 	// InboundHunt rings the list in order, moving on when one does not
 	// answer.
 	InboundHunt InboundMode = "hunt"
+	// InboundForward sends the call straight back out to an external SIP
+	// trunk instead of ringing anything here. The SIM becomes a way in to
+	// somewhere else.
+	InboundForward InboundMode = "forward"
 )
 
 const (
@@ -50,6 +54,14 @@ type InboundPlan struct {
 	RingSeconds int
 	// HuntSeconds is how long each step of a hunt rings before the next.
 	HuntSeconds int
+	// ForwardTrunk names the trunk to send the call out to in forward mode,
+	// as it is called in the trunk list rather than as its PJSIP object.
+	ForwardTrunk string
+	// ForwardNumber is what to dial at the far end. Empty passes the dialled
+	// number through unchanged, which is what a provider routing by DID
+	// wants; a value replaces it, which is what a provider expecting one
+	// fixed destination wants.
+	ForwardNumber string
 }
 
 // DefaultInboundPlan is what a deployment gets before anything is configured:
@@ -68,12 +80,35 @@ func DefaultInboundPlan() InboundPlan {
 // morning.
 func (p InboundPlan) Validate(configured []Extension) error {
 	switch p.Mode {
-	case InboundPerNumber, InboundRingAll, InboundHunt:
+	case InboundPerNumber, InboundRingAll, InboundHunt, InboundForward:
 	default:
-		return fmt.Errorf("inbound mode %q is not one of did, ring_all or hunt", p.Mode)
+		return fmt.Errorf("inbound mode %q is not one of did, ring_all, hunt or forward", p.Mode)
 	}
 	if p.RingSeconds < MinRingSeconds || p.RingSeconds > MaxRingSeconds {
 		return fmt.Errorf("ring time must be between %d and %d seconds", MinRingSeconds, MaxRingSeconds)
+	}
+	if p.Mode == InboundForward {
+		trunk := strings.TrimSpace(p.ForwardTrunk)
+		switch {
+		case trunk == "":
+			return errors.New("forward mode needs a trunk to send the call to")
+		case len(trunk) > 48:
+			return errors.New("trunk name is too long")
+		}
+		for _, value := range trunk {
+			if !extensionRune(value) {
+				return fmt.Errorf("trunk name contains %q, which is not allowed", value)
+			}
+		}
+		number := strings.TrimSpace(p.ForwardNumber)
+		if len(number) > 64 {
+			return errors.New("forward number is too long")
+		}
+		for _, value := range number {
+			if !dialTargetRune(value) {
+				return fmt.Errorf("forward number contains %q, which is not allowed", value)
+			}
+		}
 	}
 	if p.Mode == InboundHunt {
 		if p.HuntSeconds < MinRingSeconds || p.HuntSeconds > MaxRingSeconds {
@@ -107,6 +142,19 @@ func (p InboundPlan) Validate(configured []Extension) error {
 		seen[strings.ToLower(name)] = true
 	}
 	return nil
+}
+
+// dialTargetRune matches what may appear as the user part of a dial string.
+// Narrow on purpose: this lands inside Dial(), where a comma would end the
+// argument and a semicolon would truncate the line.
+func dialTargetRune(value rune) bool {
+	switch {
+	case value >= '0' && value <= '9':
+		return true
+	case value >= 'a' && value <= 'z', value >= 'A' && value <= 'Z':
+		return true
+	}
+	return strings.ContainsRune("+-_.*#", value)
 }
 
 // RenderInbound builds the context a call arriving on a SIM lands in.
@@ -176,6 +224,18 @@ func RenderInbound(plan InboundPlan, configured []Extension) (string, error) {
 			out.WriteString(" same => n,GotoIf($[\"${DIALSTATUS}\" = \"ANSWER\"]?done)\n")
 		}
 		out.WriteString(" same => n(done),Hangup()\n")
+	case InboundForward:
+		// Straight back out, without ringing anything here. An empty number
+		// passes ${EXTEN} -- the SIM's own number -- through to the far end,
+		// which is what a provider routing by DID expects.
+		target := strings.TrimSpace(plan.ForwardNumber)
+		if target == "" {
+			target = "${EXTEN}"
+		}
+		out.WriteString("; Forwarded out to a trunk. Nothing here rings.\n")
+		fmt.Fprintf(&out, "exten => _.,1,Dial(PJSIP/%s@%s%s,%d)\n",
+			target, trunkObjectPrefix, strings.TrimSpace(plan.ForwardTrunk), plan.RingSeconds)
+		out.WriteString(" same => n,Hangup()\n")
 	}
 	return out.String(), nil
 }

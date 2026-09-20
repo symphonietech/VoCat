@@ -1491,4 +1491,9 @@ export const EN_DICT: Record<string, string> = {
   "呼出用户名（可选）": "Outbound username (optional)",
   "呼出密码（保存后不再回显）": "Outbound password (never shown again after saving)",
   "必须填写来源地址或呼入凭据之一；转发呼叫到对端需要呼出凭据；目标模式以 _ 开头": "A source address or inbound credentials is required; forwarding a call out to the peer needs outbound credentials; destination patterns start with _",
+  "转发到呼出中继": "Forward to a trunk",
+  "呼入的通话直接转发到所选中继，本地分机不振铃。目标号码留空则把被叫号码原样传给对端。": "The call is forwarded straight to the chosen trunk; no local extension rings. Leave the destination blank to pass the dialled number through unchanged.",
+  "选择中继": "Choose a trunk",
+  "目标号码（留空则透传被叫号码）": "Destination number (blank passes the dialled number through)",
+  "还没有配置中继。先在上面的「呼入中继」中添加一个，保存并应用后才能在这里选择。": "No trunks configured yet. Add one under Inbound trunks above, save and apply, and it becomes selectable here.",
 };

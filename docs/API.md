@@ -588,7 +588,7 @@ Where a call arriving on a SIM rings. Rendered to `inbound.conf`.
 
 | Method | Path | Description |
 |---|---|---|
-| PUT | `/api/asterisk/inbound` | Body: `{"mode":"did"\|"ring_all"\|"hunt", "extensions":["1001","1002"], "ring_seconds":30, "hunt_seconds":15}`. Validated against the configured extensions: a ring group naming an account that does not exist rings nothing, and a caller who reaches no one is the only other signal (`400 invalid_inbound` names it). `data: {saved:true, written, inbound, inbound_preview}` |
+| PUT | `/api/asterisk/inbound` | Body: `{"mode":"did"\|"ring_all"\|"hunt"\|"forward", "extensions":["1001","1002"], "ring_seconds":30, "hunt_seconds":15, "forward_trunk":"acme", "forward_number":"2001"}`. Validated against the configured extensions: a ring group naming an account that does not exist rings nothing, and a caller who reaches no one is the only other signal (`400 invalid_inbound` names it). `data: {saved:true, written, inbound, inbound_preview}` |
 
 - `did` rings the extension **named after the dialled number**. No mapping
   table: VoCat puts the dialled number in the request URI, so the extension
@@ -597,6 +597,14 @@ Where a call arriving on a SIM rings. Rendered to `inbound.conf`.
   configured extension, so a handset added later joins without a second edit.
 - `hunt` rings `extensions` in order, moving on when one does not answer.
   The list is required.
+- `forward` sends the call **straight back out to a trunk** and rings nothing
+  locally. `forward_trunk` names a trunk from the trunk list and is required;
+  `forward_number` is what to dial at the far end, and **blank passes the
+  dialled number through** — which is what a provider routing by DID expects.
+  A trunk that is not configured is `400 invalid_inbound`, refused at save
+  rather than at call time where the only signal is a caller hearing nothing.
+  A stored forward plan whose trunk is later deleted falls back to the default
+  on read, the same way a ring group naming a deleted extension does.
 
 ### Inbound trunks
 
@@ -635,9 +643,12 @@ an allowlist and refuses anything that would leave it open:
   served by a single field at all. Each is write-only on its own — rotating one
   and leaving the other blank keeps the other. The response carries
   `has_password` and `has_outbound_password`.
-- **`devices` is required.** Unlike an outbound route, an empty list is not
-  "let VoCat choose": which cards an outside party may spend is not something
-  to leave implicit.
+- **`devices` is required whenever `destinations` is non-empty.** Unlike an
+  outbound route, an empty list is not "let VoCat choose": which cards an
+  outside party may spend is not something to leave implicit. A trunk with no
+  destinations can dial nothing and so needs none — that is a **forward-only
+  trunk**, used as a destination for `mode: "forward"` while nothing can come
+  in through it.
 - **`destinations` may be empty**, and that is what a newly created trunk looks
   like — its context renders, matches nothing, and hangs up. Deny is the
   starting state.

@@ -27,6 +27,13 @@ func (s *Server) handlePutAsteriskInbound(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "invalid_inbound", err.Error())
 		return
 	}
+	// Refused at save rather than at call time: forwarding to a trunk that
+	// does not exist renders a dial to an endpoint Asterisk has never heard
+	// of, and the only other signal is a caller hearing nothing.
+	if err := s.inboundTrunkExists(r.Context(), plan); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_inbound", err.Error())
+		return
+	}
 	files, err := renderAsteriskExtensions(extensions, plan)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_inbound", err.Error())

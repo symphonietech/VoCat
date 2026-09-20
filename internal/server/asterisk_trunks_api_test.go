@@ -250,3 +250,71 @@ func TestTrunkOutboundPasswordIsWriteOnlyAndIndependent(t *testing.T) {
 		}
 	}
 }
+
+// Forwarding to a trunk that does not exist renders a dial to an endpoint
+// Asterisk has never heard of, so it is refused at save rather than at call
+// time, where the only signal is a caller hearing nothing.
+func TestInboundForwardRequiresAnExistingTrunk(t *testing.T) {
+	server, _, _ := trunksTestServer(t)
+
+	missing := `{"mode":"forward","forward_trunk":"nope","forward_number":"2001","ring_seconds":60}`
+	request := httptest.NewRequest(http.MethodPut, "/api/asterisk/inbound", strings.NewReader(missing))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.handlePutAsteriskInbound(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body = %s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), "not configured") {
+		t.Errorf("the error does not say the trunk is missing: %s", response.Body.String())
+	}
+
+	// With the trunk in place it saves, and forwards without needing a single
+	// extension configured.
+	if created := putTrunks(t, server, trunkWithSecret); created.Code != http.StatusOK {
+		t.Fatal(created.Body.String())
+	}
+	good := `{"mode":"forward","forward_trunk":"acme","forward_number":"2001","ring_seconds":60}`
+	request = httptest.NewRequest(http.MethodPut, "/api/asterisk/inbound", strings.NewReader(good))
+	request.Header.Set("Content-Type", "application/json")
+	response = httptest.NewRecorder()
+	server.handlePutAsteriskInbound(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), "PJSIP/2001@trunk-acme") {
+		t.Fatalf("the preview does not forward to the trunk: %s", response.Body.String())
+	}
+}
+
+// A forward plan whose trunk is later deleted must not keep generating a dial
+// to an endpoint that is gone; the reader falls back the same way it does for
+// a deleted extension.
+func TestStoredForwardPlanFallsBackWhenTheTrunkGoes(t *testing.T) {
+	server, _, _ := trunksTestServer(t)
+	ctx := context.Background()
+
+	if created := putTrunks(t, server, trunkWithSecret); created.Code != http.StatusOK {
+		t.Fatal(created.Body.String())
+	}
+	good := `{"mode":"forward","forward_trunk":"acme","forward_number":"2001","ring_seconds":60}`
+	request := httptest.NewRequest(http.MethodPut, "/api/asterisk/inbound", strings.NewReader(good))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.handlePutAsteriskInbound(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatal(response.Body.String())
+	}
+	if plan := server.asteriskInboundPlan(ctx, nil); plan.Mode != "forward" {
+		t.Fatalf("the saved plan did not survive a read: %+v", plan)
+	}
+
+	// Delete every trunk, as the trunk editor allows.
+	if emptied := putTrunks(t, server, `{"trunks":[]}`); emptied.Code != http.StatusOK {
+		t.Fatal(emptied.Body.String())
+	}
+	plan := server.asteriskInboundPlan(ctx, nil)
+	if plan.Mode == "forward" {
+		t.Fatalf("a forward plan survived the deletion of its trunk: %+v", plan)
+	}
+}

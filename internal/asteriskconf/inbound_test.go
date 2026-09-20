@@ -157,3 +157,70 @@ func TestDefaultInboundPlanRingsEverything(t *testing.T) {
 		t.Fatalf("the default plan does not validate: %v", err)
 	}
 }
+
+// Forward mode sends the call straight back out without ringing anything
+// here, so the SIM becomes a way in to somewhere else.
+func TestRenderInboundForwardsToATrunk(t *testing.T) {
+	plan := InboundPlan{
+		Mode:          InboundForward,
+		ForwardTrunk:  "acme",
+		ForwardNumber: "2001",
+		RingSeconds:   60,
+	}
+	rendered, err := RenderInbound(plan, nil)
+	if err != nil {
+		t.Fatalf("RenderInbound() error = %v", err)
+	}
+	if !strings.Contains(rendered, "Dial(PJSIP/2001@trunk-acme,60)") {
+		t.Fatalf("the call was not forwarded to the trunk:\n%s", rendered)
+	}
+	// It needs no extensions at all, unlike every other mode.
+	if strings.Contains(rendered, "No destination") {
+		t.Errorf("forward mode refused a configuration with no extensions:\n%s", rendered)
+	}
+}
+
+// An empty number passes the dialled number through, which is what a provider
+// routing by DID expects.
+func TestRenderInboundForwardPassesTheDIDThrough(t *testing.T) {
+	rendered, err := RenderInbound(InboundPlan{
+		Mode: InboundForward, ForwardTrunk: "acme", RingSeconds: 60,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(rendered, "Dial(PJSIP/${EXTEN}@trunk-acme,60)") {
+		t.Fatalf("the dialled number was not passed through:\n%s", rendered)
+	}
+}
+
+// The dial target lands inside Dial(), where a comma ends the argument and a
+// semicolon truncates the line.
+func TestInboundForwardRefusesInjection(t *testing.T) {
+	base := InboundPlan{Mode: InboundForward, ForwardTrunk: "acme", RingSeconds: 60}
+	for name, mutate := range map[string]func(*InboundPlan){
+		"no trunk":       func(p *InboundPlan) { p.ForwardTrunk = "" },
+		"trunk sep":      func(p *InboundPlan) { p.ForwardTrunk = "acme,1,System(id)" },
+		"trunk comment":  func(p *InboundPlan) { p.ForwardTrunk = "acme;x" },
+		"number sep":     func(p *InboundPlan) { p.ForwardNumber = "2001,1,System(id)" },
+		"number comment": func(p *InboundPlan) { p.ForwardNumber = "2001;x" },
+		"number expand":  func(p *InboundPlan) { p.ForwardNumber = "${SHELL(id)}" },
+	} {
+		plan := base
+		mutate(&plan)
+		if err := plan.Validate(nil); err == nil {
+			t.Errorf("%s: accepted a value that would escape its field", name)
+		}
+	}
+}
+
+// An unknown mode has to name what is allowed, or the operator has to guess.
+func TestInboundRejectsAnUnknownMode(t *testing.T) {
+	err := InboundPlan{Mode: "sideways", RingSeconds: 30}.Validate(nil)
+	if err == nil {
+		t.Fatal("an unknown mode was accepted")
+	}
+	if !strings.Contains(err.Error(), "forward") {
+		t.Errorf("the error does not list forward as a mode: %v", err)
+	}
+}

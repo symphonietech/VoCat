@@ -1111,13 +1111,28 @@ holds none and is written `0644`.
 
 ### Forwarding a call from a SIM out to a trunk
 
-The reverse direction. An inbound call arriving on a SIM normally rings an
-extension, chosen by the inbound mode; sending it out to a trunk instead is a
-template edit rather than a GUI setting.
+The reverse direction, and it is a GUI setting: **Asterisk → Inbound routing →
+Forward to a trunk**.
 
-`vocat-inbound` is generated and only ever dials extensions, and editing it is
-pointless because the next Apply overwrites it. The hook is `[from-vocat]` in
-`asterisk/templates/extensions.conf`, which is **not** generated:
+Pick the trunk and, optionally, a destination number. Leave the number blank
+and the dialled number — the SIM's own — is passed through unchanged, which is
+what a provider routing by DID expects. Nothing local rings.
+
+A trunk used only as a forwarding destination needs **no SIMs and no
+destinations**: with an empty destination list it can dial nothing, so nothing
+can come in through it, while its endpoint still exists to be dialled out to.
+Fill in the **outbound** credential for any provider that challenges an INVITE,
+or the forwarded call dies at 401.
+
+Two things are checked at save rather than at call time, because the only other
+signal is a caller hearing nothing: the named trunk must exist, and a stored
+forward plan whose trunk is later deleted falls back to the default on read.
+
+#### Doing it by hand instead
+
+If you want something the mode cannot express — forwarding only certain
+numbers, say, while the rest still ring handsets — the hook is `[from-vocat]`
+in `asterisk/templates/extensions.conf`, which is **not** generated:
 
 ```ini
 [from-vocat]
