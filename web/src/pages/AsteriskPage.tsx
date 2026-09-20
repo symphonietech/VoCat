@@ -1,8 +1,8 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ServerRegular, ArrowClockwiseRegular } from "@fluentui/react-icons";
 import { getAsteriskStatus } from "../api";
 import type { AsteriskEndpoint, AsteriskStatus } from "../types";
-import { Button, EmptyState, PageHeader, StatusDot, Tag } from "../components/ui";
+import { Button, EmptyState, PageHeader, StatusDot, Tabs, Tag } from "../components/ui";
 import type { StatusTone } from "../components/ui";
 import { RouteEditor } from "./asterisk/RouteEditor";
 import { ExtensionEditor } from "./asterisk/ExtensionEditor";
@@ -22,6 +22,12 @@ const TRUNK_ENDPOINT = "vocat";
 // two lists below are three-way rather than "vocat and everything else":
 // without it every external peer was listed as an extension.
 const EXTERNAL_TRUNK_PREFIX = "trunk-";
+
+// Status is what the PBX is doing; Configuration is what it was told to do.
+// They are separated because one is read at five-second intervals and the
+// other is a set of forms nobody wants scrolling past live data while they
+// fill them in.
+type TabKey = "status" | "config";
 
 function endpointTone(endpoint: AsteriskEndpoint): StatusTone {
   if (endpoint.reachable) return "success";
@@ -54,6 +60,11 @@ export default function AsteriskPage() {
   const [status, setStatus] = useState<AsteriskStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState<string>("");
+  const [tab, setTab] = useState<TabKey>("status");
+  // Read inside the polling callback, which is installed once: reading the
+  // state directly there would capture the tab it was created with.
+  const tabRef = useRef<TabKey>(tab);
+  tabRef.current = tab;
 
   const refresh = useCallback(() => {
     getAsteriskStatus()
@@ -65,7 +76,18 @@ export default function AsteriskPage() {
       .finally(() => setLoading(false));
   }, []);
 
-  usePolling(refresh, 5000);
+  // Only while the status tab is showing. Every editor below fetches its own
+  // state and none of them need the manager interface, so polling it during a
+  // ten-minute editing session would be an AMI round trip every five seconds
+  // for a view nobody is looking at.
+  usePolling(() => {
+    if (tabRef.current === "status") refresh();
+  }, 5000, false);
+
+  // Immediately on arriving, rather than waiting out the interval.
+  useEffect(() => {
+    if (tab === "status") refresh();
+  }, [tab, refresh]);
 
   const endpoints = status?.endpoints ?? [];
   const trunk = endpoints.find((entry) => entry.name === TRUNK_ENDPOINT);
@@ -81,15 +103,41 @@ export default function AsteriskPage() {
     <div className="p-4 sm:p-6">
       <PageHeader
         title={t("Asterisk")}
-        subtitle={t("查看前置 PBX 的实时状态：分机注册情况与内外中继可达性")}
+        subtitle={t("配置前置 PBX 并查看实时状态：分机、路由、中继与注册情况")}
         actions={
-          <Button icon={<ArrowClockwiseRegular />} onClick={refresh}>
-            {t("刷新")}
-          </Button>
+          tab === "status" ? (
+            <Button icon={<ArrowClockwiseRegular />} onClick={refresh}>
+              {t("刷新")}
+            </Button>
+          ) : undefined
         }
       />
 
-      {!loading && status && !status.configured ? (
+      <Tabs
+        className="mb-6"
+        value={tab}
+        onChange={(key) => setTab(key as TabKey)}
+        tabs={[
+          { key: "status", label: t("运行状态") },
+          { key: "config", label: t("配置") },
+        ]}
+      />
+
+      {/* Configuration does not depend on the manager interface: the editors
+          write files that Asterisk reads at its next reload, and each one says
+          so itself when AMI is missing. Rendering them only when the PBX was
+          reachable -- which is what the single-page version did -- meant a PBX
+          that was down could not be configured back up. */}
+      {tab === "config" ? (
+        <div className="space-y-4">
+          <RouteEditor />
+          <ExtensionEditor />
+          <InboundEditor />
+          <TrunkEditor />
+        </div>
+      ) : null}
+
+      {tab === "status" && !loading && status && !status.configured ? (
         <div className="ui-card p-4">
           <EmptyState
             icon={<ServerRegular />}
@@ -101,7 +149,7 @@ export default function AsteriskPage() {
         </div>
       ) : null}
 
-      {status?.configured && status.error ? (
+      {tab === "status" && status?.configured && status.error ? (
         <div className="ui-card mb-4 p-4">
           <div className="mb-1 flex items-center gap-2">
             <StatusDot tone="danger" />
@@ -111,7 +159,7 @@ export default function AsteriskPage() {
         </div>
       ) : null}
 
-      {status?.reachable ? (
+      {tab === "status" && status?.reachable ? (
         <>
           <div className="ui-card mb-4 p-4">
             <div className="flex flex-wrap items-center gap-3">
@@ -139,13 +187,6 @@ export default function AsteriskPage() {
             error={status.channelsError}
             onChange={refresh}
           />
-
-          <RouteEditor />
-
-          <ExtensionEditor />
-
-          <InboundEditor />
-          <TrunkEditor />
 
           <Section title={t("内部中继")}>
             {trunk ? (

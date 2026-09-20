@@ -1498,4 +1498,5 @@ export const EN_DICT: Record<string, string> = {
   "正在开启...": "Turning on...",
   "正在关闭...": "Turning off...",
   "必须填写来源地址；凭据只是额外校验，不能替代来源地址。转发呼叫到对端需要呼出凭据；目标模式以 _ 开头": "A source address is required; credentials are an extra check, not a substitute for it. Forwarding a call out to the peer needs outbound credentials; destination patterns start with _",
+  "配置前置 PBX 并查看实时状态：分机、路由、中继与注册情况": "Configure the PBX in front and watch it run: extensions, routes, trunks and registrations",
 };
