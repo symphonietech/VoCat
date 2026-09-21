@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -556,6 +557,17 @@ func uriUser(value string) string {
 	user := uri[:at]
 	if index := strings.IndexAny(user, ";?"); index >= 0 {
 		user = user[:index]
+	}
+	// Percent-escapes are decoded because RFC 3261 lets a client escape any
+	// user-part character it likes, and several do escape "+" as %2B even
+	// though the grammar permits it bare. Left encoded, "%2B639..." is not a
+	// number to anything downstream: the SMS encoder rejects the "%" and the
+	// dialler treats it as part of the digits.
+	//
+	// PathUnescape, not QueryUnescape: the latter turns "+" into a space,
+	// which would destroy the very character this exists to recover.
+	if decoded, err := url.PathUnescape(user); err == nil {
+		user = decoded
 	}
 	return user
 }

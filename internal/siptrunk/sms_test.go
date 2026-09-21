@@ -58,3 +58,25 @@ func TestSMSUserPartRejectsAnythingButANumber(t *testing.T) {
 		}
 	}
 }
+
+// A softphone may percent-escape any user-part character, and several escape
+// "+" as %2B even though RFC 3261 permits it bare. Left encoded it is not a
+// number downstream: the SMS encoder rejects the "%" and the whole send fails
+// with a message that blames the modem.
+func TestURIUserDecodesPercentEscapes(t *testing.T) {
+	cases := []struct{ uri, want string }{
+		{"sip:%2B639524451636@127.0.0.1:5062", "+639524451636"},
+		{"<sip:%2B639524451636@host>", "+639524451636"},
+		{"sip:+639524451636@127.0.0.1:5062", "+639524451636"},
+		{"sip:639524451636@127.0.0.1:5062", "639524451636"},
+		// Parameters are still stripped, and stripped before decoding.
+		{"sip:%2B63952@host;user=phone", "+63952"},
+		// A malformed escape is left as-is rather than dropping the address.
+		{"sip:%ZZ639@host", "%ZZ639"},
+	}
+	for _, test := range cases {
+		if got := uriUser(test.uri); got != test.want {
+			t.Fatalf("uriUser(%q) = %q, want %q", test.uri, got, test.want)
+		}
+	}
+}

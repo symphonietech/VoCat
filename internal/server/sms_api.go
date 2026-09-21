@@ -267,6 +267,14 @@ func (s *Server) handleSMSSend(w http.ResponseWriter, r *http.Request) {
 	// Validate the logical message before consuming a global send slot. Both
 	// cellular AT and VoWiFi IMS use this same encoder/validator.
 	if _, err := device.PrepareSMSSubmitTPDUs(request.Phone, request.Message); err != nil {
+		// Before any modem contact, so none of the sms.submission warnings
+		// below are reached. A send rejected here looks identical from the
+		// outside to one the modem refused, and the caller -- a SIP extension
+		// in particular -- has no other way to learn which it was.
+		s.logger.Warn("SMS rejected before submission",
+			"category", "sms", "event", "sms.submission",
+			"device_id", request.DeviceID, "raw_error", err,
+		)
 		s.writeDeviceError(w, err)
 		return
 	}

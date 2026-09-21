@@ -1866,6 +1866,19 @@ func (s *Server) writeDeviceError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusBadRequest, "invalid_apn", "APN must contain only letters, digits, dots, underscores, or hyphens")
 	case errors.Is(err, device.ErrRegionBlocked):
 		writeError(w, http.StatusForbidden, "region_blocked", err.Error())
+	// These three are caller mistakes, not device faults. Without a case they
+	// fell to the default below and were reported as "the device operation
+	// failed" with a 502 -- which blames the modem for a bad recipient and
+	// tells whoever is reading nothing about how to fix it.
+	case errors.Is(err, device.ErrSMSInvalidRecipient):
+		writeError(w, http.StatusBadRequest, "sms_invalid_recipient",
+			"the recipient is not a usable number: digits, optionally a leading +, "+
+				"and at most 20 digits")
+	case errors.Is(err, device.ErrSMSEmpty):
+		writeError(w, http.StatusBadRequest, "sms_empty", "the message is empty")
+	case errors.Is(err, device.ErrSMSTooLong):
+		writeError(w, http.StatusBadRequest, "sms_too_long",
+			"the message is longer than the maximum number of SMS parts allows")
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, modem.ErrCommandTimeout):
 		writeError(w, http.StatusGatewayTimeout, "modem_timeout", "the modem did not answer before the command timeout")
 	case errors.Is(err, context.Canceled):
