@@ -285,7 +285,11 @@ func (s *Server) handleMessage(request *Request, from *net.UDPAddr) bool {
 	case errors.Is(err, ErrSMSBadRecipient):
 		s.reply(request, from, 400, "Bad Request", nil)
 	default:
-		s.log("siptrunk could not send an SMS", "sender", sender, "error", err)
+		// Recipient included because a send that fails for one destination
+		// and not another is a different fault from one that fails for all,
+		// and the sender alone cannot tell those apart.
+		s.log("siptrunk could not send an SMS",
+			"sender", sender, "recipient", recipient, "error", err)
 		s.reply(request, from, 503, "Service Unavailable", nil)
 	}
 	return true

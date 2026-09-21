@@ -330,6 +330,16 @@ func (s *Server) handleSMSSend(w http.ResponseWriter, r *http.Request) {
 		request.Message,
 	)
 	if sendErr != nil && result.PartsAttempted == 0 {
+		// Nothing reached the modem, so there is no row to save and no
+		// part_results to inspect -- and writeDeviceError folds an
+		// unrecognised cause into a generic "device operation failed". Log
+		// the raw error here or it is lost for good, which is what made a
+		// failed send from a SIP extension undiagnosable.
+		s.logger.Warn("SMS submission failed before any part was sent",
+			"category", "sms", "event", "sms.submission",
+			"device_id", request.DeviceID, "transport", "cellular_at",
+			"submission_status", result.SubmissionStatus, "raw_error", sendErr,
+		)
 		s.writeDeviceError(w, sendErr)
 		return
 	}
@@ -467,6 +477,10 @@ func (s *Server) writeIMSSMSSendResult(
 	sendErr error,
 ) {
 	if sendErr != nil && result.PartsAttempted == 0 {
+		s.logger.Warn("SMS submission failed before any part was sent",
+			"category", "sms", "event", "sms.submission",
+			"device_id", deviceID, "transport", "ims", "raw_error", sendErr,
+		)
 		if errors.Is(sendErr, device.ErrSMSInvalidRecipient) ||
 			errors.Is(sendErr, device.ErrSMSEmpty) ||
 			errors.Is(sendErr, device.ErrSMSTooLong) {

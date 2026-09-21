@@ -179,7 +179,7 @@ func (g *sipTrunkGateway) SendSMS(ctx context.Context, sender, recipient, body s
 	}
 	saved, err := g.server.submitTrunkSMS(ctx, deviceID, recipient, body)
 	if err != nil {
-		return err
+		return fmt.Errorf("device %s: %w", deviceID, err)
 	}
 	if saved > 0 {
 		if err := g.server.store.TagSMSTrunkOrigin(ctx, saved,
@@ -314,7 +314,11 @@ func (s *Server) submitTrunkSMS(ctx context.Context, deviceID, recipient, body s
 	decodeErr := json.Unmarshal(recorder.Body.Bytes(), &response)
 	if recorder.Code >= http.StatusBadRequest {
 		if decodeErr == nil && response.Error != nil {
-			return 0, errors.New(response.Error.Message)
+			// The code is carried alongside the prose because the prose is
+			// often the generic "the device operation failed" branch, which
+			// says nothing about which of a dozen causes it was.
+			return 0, fmt.Errorf("%s (%s, HTTP %d)",
+				response.Error.Message, response.Error.Code, recorder.Code)
 		}
 		return 0, fmt.Errorf("the SMS endpoint returned HTTP %d", recorder.Code)
 	}
