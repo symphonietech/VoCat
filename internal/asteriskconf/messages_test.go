@@ -111,3 +111,33 @@ func TestRenderMessagesHandlesNoExtensions(t *testing.T) {
 		t.Fatalf("an outbound context was rendered with no extensions:\n%s", rendered)
 	}
 }
+
+// The bug this guards: VoCat addresses the request URI with the SIM's number
+// exactly as it recorded it, which is normally the +E.164 form, while an
+// extension name cannot contain a "+" at all. Rendering only the bare form
+// sent every such text to the catch-all, where it was dropped without a trace
+// on the handset. Both forms must reach the same endpoint.
+func TestInboundSMSMatchesBothTheBareAndE164Forms(t *testing.T) {
+	out, err := RenderMessages(SMSPerNumber, "127.0.0.1:5062", []Extension{
+		{Name: "639524451636", Password: "abcdefghijkl", MaxContacts: 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"exten => 639524451636,1,",
+		"exten => +639524451636,1,",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("rendered dialplan is missing %q:\n%s", want, out)
+		}
+	}
+	// Both forms deliver to the one PJSIP endpoint, which is named without
+	// the plus because that is the only name the endpoint can have.
+	if got := strings.Count(out, "MessageSend(pjsip:639524451636,${MESSAGE(from)})"); got != 2 {
+		t.Fatalf("MessageSend to the bare endpoint appears %d times, want 2:\n%s", got, out)
+	}
+	if strings.Contains(out, "pjsip:+639524451636") {
+		t.Fatal("MessageSend addressed an endpoint name containing a plus, which cannot exist")
+	}
+}

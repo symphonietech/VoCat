@@ -117,6 +117,16 @@ func RenderMessages(mode SMSMode, trunkHost string, extensions []Extension) (str
 			fmt.Fprintf(&out, "exten => %s,1,NoOp(SMS for %s from ${MESSAGE(from)})\n", name, name)
 			fmt.Fprintf(&out, " same => n,MessageSend(pjsip:%s,${MESSAGE(from)})\n", name)
 			out.WriteString(" same => n,Hangup()\n")
+			// The same number in E.164, matching what the inbound call
+			// dialplan already does. VoCat addresses the request URI with the
+			// SIM's number exactly as it recorded it, and that is usually the
+			// +E.164 form -- while an extension name cannot contain a "+" at
+			// all. Without this line every such text matches the catch-all
+			// below and is dropped, which is silent: the SMS is in VoCat's
+			// history and simply never reaches the handset.
+			fmt.Fprintf(&out, "exten => +%s,1,NoOp(SMS for %s from ${MESSAGE(from)})\n", name, name)
+			fmt.Fprintf(&out, " same => n,MessageSend(pjsip:%s,${MESSAGE(from)})\n", name)
+			out.WriteString(" same => n,Hangup()\n")
 		}
 		out.WriteString("exten => _.,1,NoOp(No extension for ${EXTEN})\n")
 		out.WriteString(" same => n,Hangup()\n")

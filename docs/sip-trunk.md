@@ -1353,6 +1353,12 @@ exten => 15551230000,1,NoOp(SMS for 15551230000 from ${MESSAGE(from)})
 There is no mapping table, for the same reason inbound `did` calls have none:
 the extension name *is* the map.
 
+**Name the extension without the `+`.** An extension name may hold digits,
+letters and `_-.` only, so `+639524451636` is not a legal name — create
+`639524451636`. The dialplan matches both the bare and the `+E.164` form and
+sends both to that one endpoint, because which form VoCat recorded for the SIM
+is not something the operator should have to guess at.
+
 **The original sender is kept as the `From`**, so a handset can reply to
 whoever actually texted rather than to VoCat. A sender that cannot legally be
 a URI user part — `支付宝`, `HSBC`, anything alphanumeric — is carried as a
