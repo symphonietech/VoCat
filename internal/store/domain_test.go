@@ -1130,6 +1130,7 @@ func TestEventsPoliciesAndTraffic(t *testing.T) {
 	if err := database.UpsertCardPolicy(ctx, CardPolicy{
 		ICCID: "89860001", NetworkEnabled: true, VoWiFiEnabled: true,
 		APN: "ims", IPVersion: "ipv4v6", CustomPhoneNumber: "+8613800138000",
+		MBNProfile: "OpenMkt-Commercial-CU",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1139,7 +1140,8 @@ func TestEventsPoliciesAndTraffic(t *testing.T) {
 		t.Fatalf("RF-safe VoWiFi policy was rejected: %v", err)
 	}
 	policy, err := database.CardPolicy(ctx, "89860001")
-	if err != nil || !policy.VoWiFiEnabled || policy.CustomPhoneNumber != "+8613800138000" {
+	if err != nil || !policy.VoWiFiEnabled || policy.CustomPhoneNumber != "+8613800138000" ||
+		policy.MBNProfile != "OpenMkt-Commercial-CU" {
 		t.Fatalf("CardPolicy() = %+v, %v", policy, err)
 	}
 	safePolicy, err := database.CardPolicy(ctx, "89860002")
@@ -1167,6 +1169,46 @@ func TestEventsPoliciesAndTraffic(t *testing.T) {
 		buckets[0].RXBytes != 105 || buckets[0].TXBytes != 35 ||
 		buckets[0].TotalBytes() != 140 {
 		t.Fatalf("traffic buckets = %+v, %v", buckets, err)
+	}
+}
+
+func TestMigration24DuplicateMBNProfileColumnIsIgnored(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "mbn-dup.db")
+	first, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, `PRAGMA user_version = 23`); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	database := openTestStore(t, path)
+	if err := database.UpsertCardPolicy(ctx, CardPolicy{
+		ICCID: "8985200014631193805", IPVersion: "IPV4V6",
+		MBNProfile: "OpenMkt-Commercial-CU",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	policy, err := database.CardPolicy(ctx, "8985200014631193805")
+	if err != nil || policy.MBNProfile != "OpenMkt-Commercial-CU" {
+		t.Fatalf("policy = %+v, %v", policy, err)
+	}
+	var version int
+	if err := database.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != schemaVersion {
+		t.Fatalf("schema version = %d, want %d", version, schemaVersion)
 	}
 }
 

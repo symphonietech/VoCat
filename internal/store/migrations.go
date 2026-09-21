@@ -544,6 +544,17 @@ func migrationStatements(version int) []string {
 			`CREATE INDEX IF NOT EXISTS asterisk_registrations_endpoint_idx
 				ON asterisk_registrations(endpoint, changed_at DESC)`,
 		}
+	case 28:
+		return []string{
+			// Upstream added this as migration 24. This fork had already used
+			// 24 through 27, and a database that ran those is past the point
+			// where a renumbered 24 would ever execute -- so it is re-homed
+			// here, where every existing fork database still reaches it.
+			// Optional per-ICCID MBN override. Empty keeps the HPLMN heuristic
+			// (ROW_Generic_3GPP when a known operator MBN does not match).
+			`ALTER TABLE card_policies
+				ADD COLUMN mbn_profile TEXT NOT NULL DEFAULT ''`,
+		}
 	default:
 		return nil
 	}
