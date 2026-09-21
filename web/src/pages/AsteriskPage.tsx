@@ -8,6 +8,7 @@ import { RouteEditor } from "./asterisk/RouteEditor";
 import { ExtensionEditor } from "./asterisk/ExtensionEditor";
 import { InboundEditor } from "./asterisk/InboundEditor";
 import { TrunkEditor } from "./asterisk/TrunkEditor";
+import { SmsEditor } from "./asterisk/SmsEditor";
 import { ChannelList } from "./asterisk/ChannelList";
 import { RegistrationHistory } from "./asterisk/RegistrationHistory";
 import { usePolling } from "../lib/usePolling";
@@ -26,8 +27,10 @@ const EXTERNAL_TRUNK_PREFIX = "trunk-";
 // Status is what the PBX is doing; Configuration is what it was told to do.
 // They are separated because one is read at five-second intervals and the
 // other is a set of forms nobody wants scrolling past live data while they
-// fill them in.
-type TabKey = "status" | "config";
+// fill them in. SMS is its own tab rather than another form under
+// Configuration because half of it is a message history, which is a reading
+// surface and not a form at all.
+type TabKey = "status" | "config" | "sms";
 
 function endpointTone(endpoint: AsteriskEndpoint): StatusTone {
   if (endpoint.reachable) return "success";
@@ -120,6 +123,7 @@ export default function AsteriskPage() {
         tabs={[
           { key: "status", label: t("运行状态") },
           { key: "config", label: t("配置") },
+          { key: "sms", label: t("短信") },
         ]}
       />
 
@@ -136,6 +140,8 @@ export default function AsteriskPage() {
           <TrunkEditor />
         </div>
       ) : null}
+
+      {tab === "sms" ? <SmsEditor /> : null}
 
       {tab === "status" && !loading && status && !status.configured ? (
         <div className="ui-card p-4">

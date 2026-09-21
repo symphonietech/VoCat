@@ -38,7 +38,7 @@ func (s *Server) handlePutAsteriskInbound(w http.ResponseWriter, r *http.Request
 	// Stored in the trunk list's own spelling, so the rendered dial string
 	// names the section that actually exists.
 	plan.ForwardTrunk = name
-	files, err := renderAsteriskExtensions(extensions, plan)
+	files, err := renderAsteriskExtensions(extensions, plan, s.asteriskSMSMode(r.Context()), s.asteriskTrunkHost())
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_inbound", err.Error())
 		return

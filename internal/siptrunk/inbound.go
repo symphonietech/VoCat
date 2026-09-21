@@ -158,6 +158,11 @@ func (s *Server) deliverResponse(packet []byte) {
 		s.log("siptrunk rejected a malformed response", "error", err)
 		return
 	}
+	// A forwarded SMS is a transaction of its own, not a call, so it is
+	// checked first: its Call-ID is in neither map below.
+	if s.deliverSMSResponse(response) {
+		return
+	}
 	current := s.outboundCall(response.Value("call-id"))
 	if current == nil {
 		return

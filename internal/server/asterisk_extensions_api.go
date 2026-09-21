@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -34,8 +35,18 @@ const internalFileName = "internal.conf"
 // inboundFileName holds where a call arriving on a SIM rings.
 const inboundFileName = "inbound.conf"
 
+// messagesFileName holds the SMS dialplan: where a text from a SIM is
+// delivered, and one context per extension naming that extension as the
+// sender of anything it sends.
+const messagesFileName = "messages.conf"
+
 // asteriskInboundKey holds the inbound plan in the app settings table.
 const asteriskInboundKey = "asterisk.inbound"
+
+// asteriskSMSKey holds where a text arriving on a SIM goes. Separate from the
+// inbound plan above because calls and texts are routed independently: a
+// deployment can ring handsets without also delivering their SMS.
+const asteriskSMSKey = "asterisk.sms"
 
 // asteriskExtension is the wire shape. The password is write-only: it is
 // accepted on PUT and never returned, so a browser session that can read the
@@ -93,6 +104,16 @@ func (s *Server) routeAsteriskExtensionsAPI(w http.ResponseWriter, r *http.Reque
 	case "asterisk/inbound":
 		if requireMethod(w, r, http.MethodPut) {
 			s.handlePutAsteriskInbound(w, r)
+		}
+		return true
+	case "asterisk/sms":
+		if requireMethod(w, r, http.MethodPut) {
+			s.handlePutAsteriskSMS(w, r)
+		}
+		return true
+	case "asterisk/sms/history":
+		if requireMethod(w, r, http.MethodGet) {
+			s.handleAsteriskSMSHistory(w, r)
 		}
 		return true
 	}
@@ -154,6 +175,13 @@ func (s *Server) asteriskInternalPath() string {
 		return ""
 	}
 	return filepath.Join(s.asteriskDialplanDir, internalFileName)
+}
+
+func (s *Server) asteriskMessagesPath() string {
+	if strings.TrimSpace(s.asteriskDialplanDir) == "" {
+		return ""
+	}
+	return filepath.Join(s.asteriskDialplanDir, messagesFileName)
 }
 
 func (s *Server) asteriskInboundPath() string {
@@ -272,9 +300,15 @@ type asteriskFiles struct {
 	endpoints string
 	internal  string
 	inbound   string
+	messages  string
 }
 
-func renderAsteriskExtensions(extensions []asteriskExtension, plan asteriskconf.InboundPlan) (asteriskFiles, error) {
+func renderAsteriskExtensions(
+	extensions []asteriskExtension,
+	plan asteriskconf.InboundPlan,
+	sms asteriskconf.SMSMode,
+	trunkHost string,
+) (asteriskFiles, error) {
 	config := toConfigExtensions(extensions)
 	endpoints, err := asteriskconf.RenderExtensions(config)
 	if err != nil {
@@ -288,7 +322,57 @@ func renderAsteriskExtensions(extensions []asteriskExtension, plan asteriskconf.
 	if err != nil {
 		return asteriskFiles{}, err
 	}
-	return asteriskFiles{endpoints: endpoints, internal: internal, inbound: inbound}, nil
+	messages, err := asteriskconf.RenderMessages(sms, trunkHost, config)
+	if err != nil {
+		return asteriskFiles{}, err
+	}
+	return asteriskFiles{
+		endpoints: endpoints, internal: internal, inbound: inbound, messages: messages,
+	}, nil
+}
+
+// asteriskSMSMode reads the saved SMS mode. Anything unreadable or unknown
+// falls back to off, which forwards nothing: a mode nobody can parse must not
+// start delivering texts to handsets.
+func (s *Server) asteriskSMSMode(ctx context.Context) asteriskconf.SMSMode {
+	setting, err := s.store.AppSetting(ctx, asteriskSMSKey)
+	if err != nil || len(setting.Value) == 0 {
+		return asteriskconf.SMSOff
+	}
+	var stored struct {
+		Mode string `json:"mode"`
+	}
+	if err := json.Unmarshal(setting.Value, &stored); err != nil {
+		s.logger.Warn("the stored Asterisk SMS mode is unreadable",
+			"category", "siptrunk", "error", err)
+		return asteriskconf.SMSOff
+	}
+	mode := asteriskconf.SMSMode(strings.TrimSpace(stored.Mode))
+	if mode.Validate() != nil {
+		return asteriskconf.SMSOff
+	}
+	return mode
+}
+
+// asteriskTrunkHost is where the generated dialplan submits an SMS an
+// extension is sending.
+//
+// A wildcard bind becomes loopback: the two containers share the host network
+// namespace, so that is the address Asterisk can actually reach, and putting
+// "0.0.0.0" in a dial string would produce a request that goes nowhere.
+func (s *Server) asteriskTrunkHost() string {
+	address := strings.TrimSpace(s.sipTrunkAddress)
+	if address == "" {
+		return ""
+	}
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return address
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" || host == "[::]" {
+		host = "127.0.0.1"
+	}
+	return net.JoinHostPort(host, port)
 }
 
 // writeAsteriskExtensionFiles writes both, endpoints first. Neither ordering
@@ -305,6 +389,7 @@ func (s *Server) writeAsteriskExtensionFiles(files asteriskFiles) error {
 	for path, contents := range map[string]string{
 		s.asteriskInternalPath(): files.internal,
 		s.asteriskInboundPath():  files.inbound,
+		s.asteriskMessagesPath(): files.messages,
 	} {
 		if path == "" {
 			continue
@@ -323,6 +408,7 @@ func (s *Server) asteriskExtensionFilesDiffer(files asteriskFiles) bool {
 		s.asteriskEndpointsPath(): files.endpoints,
 		s.asteriskInternalPath():  files.internal,
 		s.asteriskInboundPath():   files.inbound,
+		s.asteriskMessagesPath():  files.messages,
 	} {
 		if path == "" {
 			continue
@@ -361,7 +447,12 @@ func (s *Server) handleGetAsteriskExtensions(w http.ResponseWriter, r *http.Requ
 	}
 	plan := s.asteriskInboundPlan(r.Context(), toConfigExtensions(extensions))
 	payload["inbound"] = inboundToWire(plan)
-	files, err := renderAsteriskExtensions(extensions, plan)
+	payload["sms"] = asteriskSMS{Mode: string(s.asteriskSMSMode(r.Context()))}
+	// An empty host is the one condition that makes SMS unavailable: without
+	// a trunk there is nothing to carry a text in either direction, and the
+	// page says so rather than letting a save fail.
+	payload["trunk_host"] = s.asteriskTrunkHost()
+	files, err := renderAsteriskExtensions(extensions, plan, s.asteriskSMSMode(r.Context()), s.asteriskTrunkHost())
 	if err != nil {
 		payload["error"] = err.Error()
 	} else {
@@ -371,6 +462,7 @@ func (s *Server) handleGetAsteriskExtensions(w http.ResponseWriter, r *http.Requ
 		// not reach 1003" and "why did that call not ring anything".
 		payload["internal_preview"] = files.internal
 		payload["inbound_preview"] = files.inbound
+		payload["sms_preview"] = files.messages
 		if s.asteriskDialplanDir != "" {
 			payload["pending"] = s.asteriskExtensionFilesDiffer(files)
 		}
@@ -442,7 +534,7 @@ func (s *Server) handlePutAsteriskExtensions(w http.ResponseWriter, r *http.Requ
 	// extension that a ring group names falls back to ringing everything
 	// rather than rendering a file that rings nothing.
 	plan := s.asteriskInboundPlan(r.Context(), toConfigExtensions(merged))
-	files, err := renderAsteriskExtensions(merged, plan)
+	files, err := renderAsteriskExtensions(merged, plan, s.asteriskSMSMode(r.Context()), s.asteriskTrunkHost())
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_extension", err.Error())
 		return
@@ -513,7 +605,7 @@ func (s *Server) handleApplyAsteriskExtensions(w http.ResponseWriter, r *http.Re
 	}
 	extensions := s.storedAsteriskExtensions(r.Context())
 	plan := s.asteriskInboundPlan(r.Context(), toConfigExtensions(extensions))
-	files, err := renderAsteriskExtensions(extensions, plan)
+	files, err := renderAsteriskExtensions(extensions, plan, s.asteriskSMSMode(r.Context()), s.asteriskTrunkHost())
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_extension", err.Error())
 		return

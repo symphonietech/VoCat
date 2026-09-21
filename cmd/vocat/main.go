@@ -635,6 +635,9 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 		UpdateToken:         strings.TrimSpace(os.Getenv("GITHUB_TOKEN")),
 		HTTPS:               httpsManager,
 		AsteriskDialplanDir: asteriskDialplanDir,
+		// So the generated SMS dialplan knows where to submit a text an
+		// extension is sending.
+		SIPTrunkAddress: strings.TrimSpace(cfg.SIPTrunkAddress),
 		AsteriskAMI: ami.Options{
 			Address:  strings.TrimSpace(cfg.AsteriskAMIAddress),
 			Username: strings.TrimSpace(cfg.AsteriskAMIUsername),
@@ -667,6 +670,9 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 		}
 		trunk = started
 		defer trunk.Close()
+		// The same trunk carries SMS. Attached rather than passed in because
+		// the forwarder is the server's, and the server exists first.
+		handler.AttachSMSTrunk(trunk)
 		logger.Info("SIP trunk listening",
 			"category", "siptrunk",
 			"address", trunk.LocalAddr().String(),
@@ -712,6 +718,7 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 	handler.StartCellularDataReconciler(pollContext)
 	handler.StartTelegramBot(pollContext)
 	handler.StartSMSNotificationDispatchers(pollContext)
+	handler.StartSMSTrunkForwarder(pollContext)
 	go handler.StartCellularCallMonitor(pollContext)
 	go handler.StartCallRecorder(pollContext)
 	go handler.StartRegistrationRecorder(pollContext)

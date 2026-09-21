@@ -4,6 +4,8 @@ import type {
   AsteriskExtensionCandidate,
   AsteriskExtensions,
   AsteriskInbound,
+  AsteriskSMS,
+  AsteriskSMSMessage,
   AsteriskRegistration,
   AsteriskRoute,
   AsteriskRoutes,
@@ -294,6 +296,23 @@ export function saveAsteriskInbound(inbound: AsteriskInbound) {
     "/asterisk/inbound",
     { method: "PUT", body: inbound },
   );
+}
+
+// Whether SMS crosses the trunk at all. Saving rewrites the generated SMS
+// dialplan, which is built from the extension list as well as the mode, so
+// the server refuses a mode it cannot render a working dialplan for.
+export function saveAsteriskSMS(sms: AsteriskSMS) {
+  return api<{ saved: boolean; written: boolean; sms: AsteriskSMS; smsPreview: string; trunkHost: string }>(
+    "/asterisk/sms",
+    { method: "PUT", body: sms },
+  );
+}
+
+// Only the texts that involved an extension. The SMS page already shows
+// everything a SIM sent or received, and repeating it here would bury the
+// handful of messages this tab exists for.
+export function getAsteriskSMSHistory() {
+  return api<{ messages: AsteriskSMSMessage[]; limit: number }>("/asterisk/sms/history");
 }
 
 // The numbers VoCat already learned from each SIM's IMS registration, so an

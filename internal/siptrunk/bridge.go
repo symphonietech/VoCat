@@ -128,6 +128,8 @@ func (s *Server) dispatch(request *Request, from *net.UDPAddr) bool {
 		return s.handleBye(request, from)
 	case "CANCEL":
 		return s.handleCancel(request, from)
+	case "MESSAGE":
+		return s.handleMessage(request, from)
 	}
 	return false
 }

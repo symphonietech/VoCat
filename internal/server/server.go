@@ -60,6 +60,11 @@ type Options struct {
 	// AsteriskDialplanDir is the directory VoCat writes generated dialplan
 	// into, shared with the Asterisk container. Empty disables editing.
 	AsteriskDialplanDir string
+	// SIPTrunkAddress is where the trunk listens, so the generated dialplan
+	// knows where to send an SMS an extension is submitting. Empty leaves
+	// outbound SMS unrenderable, which is correct: there is nothing to send
+	// it to.
+	SIPTrunkAddress string
 }
 
 // Server is the single HTTP handler for the JSON API and embedded SPA.
@@ -113,6 +118,11 @@ type Server struct {
 	trunkRotation             uint64
 	asteriskAMI               ami.Options
 	asteriskDialplanDir       string
+	sipTrunkAddress           string
+	// smsTrunk is attached after construction: the trunk needs the
+	// server's gateway, so it cannot exist when the server is built.
+	smsTrunkMu sync.Mutex
+	smsTrunk   SMSTrunk
 	// callOrigin remembers which IMS calls the SIP trunk drove, so the call
 	// recorder can say where a call came from. Separate from trunkCalls above,
 	// which is released the moment the trunk hangs up: the recorder sees the
@@ -171,6 +181,7 @@ func New(options Options) (*Server, error) {
 		smsTest:             options.SMSTest,
 		asteriskAMI:         options.AsteriskAMI,
 		asteriskDialplanDir: options.AsteriskDialplanDir,
+		sipTrunkAddress:     options.SIPTrunkAddress,
 		netTraffic:          newLiveNetTracker(),
 		hostStats:           newHostStatsSampler(),
 		publicIPs:           make(map[string]cachedPublicIP),

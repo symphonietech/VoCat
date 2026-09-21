@@ -724,7 +724,7 @@ func (s *Server) syncModemSMS(ctx context.Context, onlyDevice string) {
 		for _, message := range messages {
 			if message.Direction == device.SMSDirectionStatusReport &&
 				message.MessageReference != nil && message.StatusCode != nil {
-				_, applyErr := s.store.ApplySMSDeliveryReport(ctx, store.SMSDeliveryReport{
+				reported, applyErr := s.store.ApplySMSDeliveryReport(ctx, store.SMSDeliveryReport{
 					DeviceID:          config.ID,
 					ModemIMEI:         modemIMEI,
 					IMSI:              identityAfter.IMSI,
@@ -743,6 +743,10 @@ func (s *Server) syncModemSMS(ctx context.Context, onlyDevice string) {
 					}
 					continue
 				}
+				// Off the sync loop: a MESSAGE to a handset waits out Timer F
+				// in the worst case, and the modem must not stop being read
+				// for that long because one extension is unreachable.
+				go s.reportSMSDeliveryToExtension(context.WithoutCancel(ctx), reported)
 				if autoClear {
 					clearSlots = appendModemSMSSlot(clearSlots, message)
 				}

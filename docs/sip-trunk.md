@@ -1323,6 +1323,119 @@ Records are pruned after 90 days. The API is read-only
 (`GET /api/calls/records`): a history that could be edited would be a claim
 rather than a record.
 
+## SMS over the trunk
+
+The same trunk carries text as well as audio, using SIP MESSAGE (RFC 3428).
+Off by default; turned on under **Asterisk -> SMS** in the web UI, which
+writes `vocat/messages.conf` in the shared dialplan directory.
+
+Two modes, and `did` turns on both directions at once — there is no
+deployment that wants a handset able to send but not receive.
+
+### A text arriving on a SIM
+
+VoCat polls its own SMS history rather than hooking either ingest path. That
+is what makes it cover both: an IMS message and an AT-modem message are
+already rows by the time the forwarder sees them, so multipart reassembly and
+deduplication come for free, and the cursor starts at the newest row so a
+restart never delivers yesterday's texts to somebody's phone.
+
+Each message becomes a MESSAGE whose **request URI holds the SIM's own
+number**, and `[vocat-messages]` delivers it to the extension named after that
+number:
+
+```
+exten => 15551230000,1,NoOp(SMS for 15551230000 from ${MESSAGE(from)})
+ same => n,MessageSend(pjsip:15551230000,${MESSAGE(from)})
+ same => n,Hangup()
+```
+
+There is no mapping table, for the same reason inbound `did` calls have none:
+the extension name *is* the map.
+
+**The original sender is kept as the `From`**, so a handset can reply to
+whoever actually texted rather than to VoCat. A sender that cannot legally be
+a URI user part — `支付宝`, `HSBC`, anything alphanumeric — is carried as a
+SIP **display name** instead, which is the only field that can hold it.
+
+Note which context these land in: `message_context`, never `context`. A text
+arriving in a call context would match a `Dial()` and make the handset ring.
+
+### A text sent by an extension
+
+Each generated endpoint gets `message_context=vocat-msg-<name>`, and that
+context writes the sender in **literally**:
+
+```
+[vocat-msg-15551230000]
+exten => _.,1,NoOp(SMS from 15551230000 to ${EXTEN})
+ same => n,MessageSend(pjsip:vocat/sip:${EXTEN}@127.0.0.1:5062,sip:15551230000@vocat)
+ same => n,Hangup()
+```
+
+That literal is the whole security property. `${MESSAGE(from)}` is what the
+handset *claimed*, not what Asterisk authenticated, so forwarding it would let
+a registered extension send as another one and spend another SIM's credit.
+The context an extension's message lands in is chosen by Asterisk from the
+endpoint it authenticated, which is the part a handset cannot influence.
+
+VoCat then accepts the text only when that sender is the number of a SIM it
+hosts, and sends through that SIM. Matching tolerates the national and E.164
+forms of one number, because a modem and a network disagree about the leading
+plus constantly — but only down to seven significant digits, so a short
+extension can never suffix-match a SIM number and quietly bill the wrong
+account.
+
+The **recipient is deliberately unconstrained**: it is an ordinary number out
+on the network, which is the point of sending.
+
+Responses are the ones the handset can act on:
+
+| | |
+|---|---|
+| `403 Forbidden` | the sender is not a number any SIM here owns |
+| `400 Bad Request` | the recipient is not a usable number |
+| `415 Unsupported Media Type` | the body was not `text/plain` |
+| `202 Accepted` | queued — the modem round trip happens after the response |
+| `503 Service Unavailable` | the device manager is not available |
+
+Once accepted it goes to the same path `POST /api/sms/send` uses, so the
+destination block list, the global rate limit, IMS-or-modem selection,
+multipart segmentation and the history row are all shared rather than
+reimplemented.
+
+### Delivery reports
+
+When a report lands for a message an extension sent, the extension gets a
+plain text back naming the state, the recipient and the first of the body.
+
+Not an RFC 5438 IMDN, which is the protocol-correct answer: almost no
+softphone implements it, and one that cannot parse it shows the user a blank
+message. The cost of the choice is that the report arrives as a new text
+rather than as a tick beside the original — which SIP has no way to do that
+handsets actually support.
+
+### History
+
+**Asterisk -> SMS** lists only the texts that crossed the trunk: extensions on
+the left, that extension's conversations in the middle, the thread on the
+right. Everything a SIM sent or received is already on the SMS page, and
+repeating it here would bury the handful of messages this tab exists for.
+
+Which extension a message involved is recorded on the row itself when it
+crosses, so the list is a fact rather than a reconstruction.
+
+### Requirements
+
+- `VOCAT_SIP_TRUNK_ADDR` must be set. Without it there is nothing to carry a
+  message, and the UI refuses the mode rather than rendering a dialplan that
+  does nothing.
+- `VOCAT_SIP_TRUNK_PBX` must be set for the **inbound** half: that is where
+  VoCat sends the MESSAGE.
+- An extension per SIM, named after the SIM's number — the same accounts
+  inbound `did` call routing needs, so a deployment using that already has
+  them.
+
 ## The trunk and the Calls page together
 
 Both work at once, and neither has to be off for the other to run. The Calls

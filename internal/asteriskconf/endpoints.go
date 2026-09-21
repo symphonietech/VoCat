@@ -231,6 +231,10 @@ func RenderExtensions(extensions []Extension) (string, error) {
 		}
 		fmt.Fprintf(&out, "[%s]\ntype=endpoint\n", name)
 		fmt.Fprintf(&out, "context=%s\n", ExtensionsContext)
+		// A text this account sends arrives in a context of its own, which is
+		// what carries its identity: see RenderMessages. Without this an SMS
+		// would land in the call context above and match a Dial().
+		fmt.Fprintf(&out, "message_context=%s\n", MessageContextName(name))
 		out.WriteString("disallow=all\nallow=ulaw\nallow=alaw\n")
 		fmt.Fprintf(&out, "auth=%s\naors=%s\n", name, name)
 		if callerID := strings.TrimSpace(extension.CallerID); callerID != "" {

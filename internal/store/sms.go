@@ -867,3 +867,62 @@ func normalizedLimit(value int) int {
 	}
 	return value
 }
+
+// SMSTrunkOriginExtension marks a stored message as one an extension sent
+// through the SIP trunk, and SMSTrunkForwardedTo marks one delivered to an
+// extension. Both live in extra rather than in a column of their own: they
+// describe how a message travelled rather than what it is, and every other
+// transport detail is already there.
+const (
+	SMSTrunkOriginExtension = "sip_extension"
+	SMSTrunkForwardedTo     = "sip_forwarded_to"
+)
+
+// TagSMSTrunkOrigin records which extension a message passed through.
+//
+// json_set rather than a read-modify-write: the row is also being updated by
+// delivery reports and storage rescans, and reading it into Go to add one key
+// would lose whatever those wrote in between.
+func (s *Store) TagSMSTrunkOrigin(ctx context.Context, id int64, key, extension string) error {
+	if id <= 0 || strings.TrimSpace(extension) == "" {
+		return errors.New("store: an SMS trunk tag needs a message and an extension")
+	}
+	switch key {
+	case SMSTrunkOriginExtension, SMSTrunkForwardedTo:
+	default:
+		return fmt.Errorf("store: %q is not an SMS trunk tag", key)
+	}
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE sms_messages
+		 SET extra_json = json_set(COALESCE(NULLIF(extra_json, ''), '{}'), '$.'||?, ?),
+		     updated_at = ?
+		 WHERE id = ?`,
+		key, strings.TrimSpace(extension), time.Now().UTC().Unix(), id)
+	if err != nil {
+		return fmt.Errorf("tag SMS trunk origin: %w", err)
+	}
+	return nil
+}
+
+// ListTrunkSMS returns messages that crossed the SIP trunk in either
+// direction, newest first. It is what the Asterisk page's SMS tab reads.
+func (s *Store) ListTrunkSMS(ctx context.Context, limit int) ([]SMSMessage, error) {
+	rows, err := s.db.QueryContext(ctx, smsMessageSelect+`
+		WHERE json_extract(extra_json, '$.`+SMSTrunkOriginExtension+`') IS NOT NULL
+		   OR json_extract(extra_json, '$.`+SMSTrunkForwardedTo+`') IS NOT NULL
+		ORDER BY id DESC
+		LIMIT ?`, normalizedLimit(limit))
+	if err != nil {
+		return nil, fmt.Errorf("list trunk SMS: %w", err)
+	}
+	defer rows.Close()
+	values := make([]SMSMessage, 0)
+	for rows.Next() {
+		value, scanErr := scanSMSMessage(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		values = append(values, value)
+	}
+	return values, rows.Err()
+}

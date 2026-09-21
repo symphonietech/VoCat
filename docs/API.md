@@ -608,6 +608,44 @@ Where a call arriving on a SIM rings. Rendered to `inbound.conf`.
   A stored forward plan whose trunk is later deleted falls back to the default
   on read, the same way a ring group naming a deleted extension does.
 
+### SMS over the trunk
+
+Whether a text crossing a SIM also crosses the PBX. Rendered to
+`messages.conf`, which `extensions.conf` includes.
+
+| Method | Path | Description |
+|---|---|---|
+| PUT | `/api/asterisk/sms` | Body: `{"mode":"off"\|"did"}`. `400 invalid_sms` when no SIP trunk is configured and the mode is not `off` — there would be nothing to carry the message, and the dialplan would render and then do nothing. `data: {saved:true, written, sms, sms_preview, trunk_host}` |
+| GET | `/api/asterisk/sms/history` | Only the texts that **crossed the trunk**, newest first, up to 500. `data: {messages: [...], limit}`. Each row is the same shape `GET /api/sms/messages` returns, plus `extension` (which extension it involved) and `trunk_role` (`sent_by_extension` or `delivered_to_extension`). Everything a SIM sent or received is on `/api/sms/messages`; this endpoint is the subset that involved a handset. |
+
+- `off` renders no SMS dialplan at all. VoCat still receives and stores texts;
+  it just does not hand them to Asterisk.
+- `did` turns on **both** directions, because no deployment wants a handset
+  able to send but not receive.
+  - **Inbound.** A text arriving on a SIM is sent to Asterisk as a SIP
+    MESSAGE whose request URI holds the SIM's own number, and
+    `[vocat-messages]` delivers it to the extension named after that number.
+    The original sender is passed through as the `From`, so the handset can
+    reply to whoever actually texted rather than to VoCat. A sender that is
+    not a usable number — `支付宝`, `HSBC` — is carried as a **display name**,
+    because it cannot legally be a URI user part.
+  - **Outbound.** Each generated endpoint gets its own
+    `message_context=vocat-msg-<name>`, and that context writes the sender
+    **in literally** rather than taking `${MESSAGE(from)}`, which is only what
+    the handset claimed. VoCat then accepts the text only when that sender is
+    the number of a SIM it hosts, and sends through that SIM. The recipient is
+    deliberately unconstrained: it is an ordinary number out on the network.
+  - A sender no SIM owns is `403 Forbidden`, a recipient that is not a usable
+    number is `400 Bad Request`, and an accepted text is `202 Accepted` — the
+    submission happens after the response, so the handset is not held open for
+    a modem round trip.
+- Delivery reports flow back to the extension that sent the message, as an
+  ordinary text rather than an RFC 5438 IMDN: almost no softphone implements
+  IMDN, and one that cannot parse it shows a blank message.
+- The `sms` mode and its rendered preview are also returned by
+  `GET /api/asterisk/extensions`, under `sms`, `sms_preview` and `trunk_host`.
+  An empty `trunk_host` is the one condition that makes SMS unavailable.
+
 ### External trunks
 
 An external SIP peer whose calls are relayed **out through a SIM**. This is a

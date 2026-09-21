@@ -457,7 +457,7 @@ func (s *Server) rewriteInboundAfterTrunkChange(ctx context.Context, trunks []as
 
 	extensions := s.storedAsteriskExtensions(ctx)
 	plan := s.asteriskInboundPlan(ctx, toConfigExtensions(extensions))
-	files, err := renderAsteriskExtensions(extensions, plan)
+	files, err := renderAsteriskExtensions(extensions, plan, s.asteriskSMSMode(ctx), s.asteriskTrunkHost())
 	if err != nil {
 		s.logger.Error("could not re-render the inbound dialplan after a trunk was removed",
 			"category", "siptrunk", "error", err)

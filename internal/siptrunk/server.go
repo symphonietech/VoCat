@@ -61,7 +61,11 @@ type Server struct {
 	// side a response belongs to.
 	dialogs   map[string]*dialog
 	outbounds map[string]*outbound
-	limiter   responseLimiter
+	// smsWaiters are the SendSMS calls waiting on a final response. A
+	// MESSAGE is out of dialog, so there is nothing to put in either map
+	// above and nothing to tear down: one request, one response, done.
+	smsWaiters map[string]chan *Response
+	limiter    responseLimiter
 }
 
 // ParsePeers converts textual peer entries into prefixes. A bare address
@@ -258,7 +262,7 @@ func (s *Server) route(request *Request) (int, string) {
 	switch request.Method {
 	case "OPTIONS":
 		return 200, "OK"
-	case "INVITE", "BYE", "CANCEL", "UPDATE", "INFO":
+	case "INVITE", "BYE", "CANCEL", "UPDATE", "INFO", "MESSAGE":
 		return 501, "Not Implemented"
 	case "ACK":
 		// Unreachable: dispatch takes every ACK. Listed anyway so that nobody

@@ -723,6 +723,34 @@ export type AsteriskInbound = {
   forwardNumber?: string;
 };
 
+// Whether a text arriving on a SIM is handed to the PBX, and whether an
+// extension may send one back out. One switch for both directions: there is
+// no deployment that wants a handset able to send but not receive.
+export type AsteriskSMS = {
+  // "off" renders no SMS dialplan at all. "did" delivers a text to the
+  // extension named after the SIM that received it, and accepts a text from
+  // an extension only when that extension is a SIM's own number.
+  mode: "off" | "did";
+};
+
+// One text that crossed the SIP trunk, as the Asterisk page's SMS tab shows
+// it. A subset of the SMS page's shape plus who it involved on the PBX side.
+export type AsteriskSMSMessage = {
+  id: number;
+  deviceId: string;
+  localPhone?: string;
+  peer: string;
+  direction: string;
+  body: string;
+  timestamp: string;
+  deliveryState?: string;
+  status?: string;
+  // The extension this message involved, and which way it went across the
+  // trunk. Absent only on a row whose markers could not be read.
+  extension?: string;
+  trunkRole?: "sent_by_extension" | "delivered_to_extension";
+};
+
 // One SIM number VoCat has learned, offered as an extension to create.
 export type AsteriskExtensionCandidate = {
   number: string;
@@ -743,6 +771,12 @@ export type AsteriskExtensions = {
   // inboundPreview is where a call arriving on a SIM rings.
   inboundPreview?: string;
   inbound?: AsteriskInbound;
+  // smsPreview is the generated SMS dialplan, and trunkHost is where its
+  // outbound half submits. An empty trunkHost means no SIP trunk is
+  // configured, which is the one condition that makes SMS unavailable.
+  smsPreview?: string;
+  sms?: AsteriskSMS;
+  trunkHost?: string;
   pending?: boolean;
   path?: string;
   canApply?: boolean;
