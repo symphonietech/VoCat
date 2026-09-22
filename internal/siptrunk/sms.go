@@ -279,8 +279,12 @@ func (s *Server) handleMessage(request *Request, from *net.UDPAddr) bool {
 		// 403 rather than 404: the destination exists, this sender may not
 		// use it. Saying "not found" would send someone looking for a
 		// misrouted request instead of a misnamed extension.
+		// The error carries which SIM numbers VoCat does know, which is the
+		// whole diagnosis: without it the line says only that the match
+		// failed, and the two causes -- a number VoCat never learned, and a
+		// number that differs -- are indistinguishable.
 		s.log("siptrunk refused an SMS from an extension with no SIM",
-			"sender", sender, "peer", from.String())
+			"sender", sender, "peer", from.String(), "error", err)
 		s.reply(request, from, 403, "Forbidden", nil)
 	case errors.Is(err, ErrSMSBadRecipient):
 		s.reply(request, from, 400, "Bad Request", nil)

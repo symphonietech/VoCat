@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"vocat/internal/asteriskconf"
-	"vocat/internal/device"
 	"vocat/internal/siptrunk"
 	"vocat/internal/store"
 )
@@ -206,12 +205,23 @@ func (s *Server) deviceForNumber(ctx context.Context, number string) (string, er
 	if err != nil {
 		return "", err
 	}
+	// Every candidate is listed in the refusal, because "no SIM has that
+	// number" is unactionable on its own: the operator cannot tell a SIM
+	// whose number VoCat never learned from one whose number simply differs,
+	// and those need opposite fixes.
+	seen := make([]string, 0, len(devices))
 	for _, config := range devices {
-		if sameSMSNumber(s.deviceLocalNumber(ctx, config.ID), number) {
+		local := s.deviceLocalNumber(ctx, config)
+		if sameSMSNumber(local, number) {
 			return config.ID, nil
 		}
+		if local == "" {
+			local = "(no number known)"
+		}
+		seen = append(seen, config.ID+"="+local)
 	}
-	return "", fmt.Errorf("%w: %s", siptrunk.ErrSMSSenderUnknown, number)
+	return "", fmt.Errorf("%w: %s; SIM numbers known: %s",
+		siptrunk.ErrSMSSenderUnknown, number, strings.Join(seen, ", "))
 }
 
 // sameSMSNumber compares two numbers the way a carrier does: the national and
@@ -253,28 +263,32 @@ func sameSMSNumber(left, right string) bool {
 // so a number that the history shows against a message is the same number an
 // extension may send from. Two answers to "whose number is this" would be one
 // answer too many.
-func (s *Server) deviceLocalNumber(ctx context.Context, deviceID string) string {
-	deviceID = strings.TrimSpace(deviceID)
-	if deviceID == "" {
+// It takes the stored configuration rather than an id because the physical
+// modem has to be resolved through physicalForConfig. The device manager is
+// keyed by discovery id, which encodes USB topology, so a bare Get(config.ID)
+// answers "what is plugged into the position this configuration was created
+// from" -- which is a different question, and on a miss returns no snapshot at
+// all. Without a snapshot there is no ICCID, without an ICCID there is no
+// number, and the SIM that owns the sending extension looks like it does not
+// exist.
+func (s *Server) deviceLocalNumber(ctx context.Context, config store.Device) string {
+	if strings.TrimSpace(config.ID) == "" {
 		return ""
 	}
-	var snapshot *device.Snapshot
-	if s.devices != nil {
-		if entry, err := s.devices.Get(deviceID); err == nil {
-			snapshot = entry.Snapshot
-		}
-	}
+	entry, _, _ := s.physicalForConfig(config)
+	snapshot := entry.Snapshot
 	identity := smsIdentityFromSnapshot(snapshot)
 	if identity.ICCID == "" && s.vowifi != nil {
 		// A VoWiFi SIM reports its ICCID through the orchestrator even when
 		// the modem entry has no snapshot yet, and without an ICCID the
-		// association table cannot be consulted at all.
-		if state, err := s.vowifi.State(deviceID); err == nil {
+		// association table cannot be consulted at all. The orchestrator is
+		// keyed by configuration id, not by discovery id.
+		if state, err := s.vowifi.State(config.ID); err == nil {
 			identity.ICCID = strings.TrimSpace(state.ICCID)
 			identity.IMSI = strings.TrimSpace(state.IMSI)
 		}
 	}
-	return strings.TrimSpace(s.smsLocalPhone(ctx, deviceID, identity, snapshot))
+	return strings.TrimSpace(s.smsLocalPhone(ctx, config.ID, identity, snapshot))
 }
 
 // submitTrunkSMS hands the text to the same endpoint the GUI posts to.

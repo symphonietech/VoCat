@@ -208,3 +208,21 @@ func TestForwardSMSKeepsTheOriginalSender(t *testing.T) {
 		t.Fatalf("device name = %q", trunk.sent[0].DeviceName)
 	}
 }
+
+// The exact pair from a real deployment: a softphone registered as
+// 8613910104604 against a SIM the network reports as +8613910104604. The
+// numbers were never the problem here -- the lookup that produced the SIM's
+// number was, and it returned "" -- but locking the pair keeps a future
+// change to sameSMSNumber from breaking it silently.
+func TestTrunkSMSMatchesABareExtensionAgainstAnE164SIM(t *testing.T) {
+	if !sameSMSNumber("+8613910104604", "8613910104604") {
+		t.Fatal("a bare extension did not match its own SIM in E.164")
+	}
+	if !sameSMSNumber("8613910104604", "+8613910104604") {
+		t.Fatal("the comparison is not symmetric")
+	}
+	// A different subscriber on the same carrier prefix must not match.
+	if sameSMSNumber("+8613910104604", "+8613910104605") {
+		t.Fatal("two different numbers matched")
+	}
+}
