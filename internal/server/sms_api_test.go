@@ -707,11 +707,16 @@ func TestBlockedSMSDestination(t *testing.T) {
 		phone string
 		block bool
 	}{
-		{"e164 china", "+8613800138000", true},
-		{"no plus china", "8613800138000", true},
-		{"international prefix china", "008613800138000", true},
-		{"spaced china", "+86 138 0013 8000", true},
-		{"dashed china", "+86-138-0013-8000", true},
+		// Commented out alongside the +86 rule in blockedSMSDestination.
+		// Restore these five rows when that rule is uncommented -- they are
+		// what proves the normalization cannot be sidestepped by dropping
+		// the "+", using a 00 prefix, or inserting spaces and dashes.
+		//
+		// {"e164 china", "+8613800138000", true},
+		// {"no plus china", "8613800138000", true},
+		// {"international prefix china", "008613800138000", true},
+		// {"spaced china", "+86 138 0013 8000", true},
+		// {"dashed china", "+86-138-0013-8000", true},
 		{"us e164", "+12025550177", false},
 		{"us no plus", "12025550177", false},
 		{"uk e164", "+447700900123", false},

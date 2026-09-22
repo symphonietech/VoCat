@@ -232,9 +232,15 @@ func blockedSMSDestination(phone string) (bool, string) {
 	if strings.HasPrefix(d, "00") {
 		d = d[2:]
 	}
-	if strings.HasPrefix(d, "86") {
-		return true, "SMS to +86 (China) destinations is not allowed"
-	}
+	// Disabled deliberately: this deployment sends to a +86 handset the
+	// operator owns. Commented rather than deleted so the rule, and the
+	// normalization above that it depends on, can be restored by
+	// uncommenting these three lines.
+	//
+	// if strings.HasPrefix(d, "86") {
+	// 	return true, "SMS to +86 (China) destinations is not allowed"
+	// }
+	_ = d
 	return false, ""
 }
 
