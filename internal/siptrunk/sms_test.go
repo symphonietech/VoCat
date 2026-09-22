@@ -80,3 +80,69 @@ func TestURIUserDecodesPercentEscapes(t *testing.T) {
 		}
 	}
 }
+
+// A MESSAGE is a non-INVITE transaction, so the PBX retransmits from T1
+// onwards until it holds a final response -- and a modem submission takes
+// seconds. Without transaction state the retransmission was handled as a
+// fresh message and the recipient got the text twice, about a second apart.
+func TestRetransmittedMessageIsNotSubmittedTwice(t *testing.T) {
+	server := &Server{}
+	request := &Request{
+		Method: "MESSAGE",
+		URI:    "sip:+639524451636@127.0.0.1:5062",
+		Headers: []Header{
+			{Name: "via", Value: "SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-one;rport"},
+			{Name: "call-id", Value: "abc@127.0.0.1"},
+			{Name: "cseq", Value: "1 MESSAGE"},
+		},
+	}
+	key := smsTransactionKey(request)
+	if key != "branch:z9hG4bK-one" {
+		t.Fatalf("transaction key = %q", key)
+	}
+
+	// First arrival claims the transaction.
+	if existing, claimed := server.beginSMSTransaction(key); !claimed || existing != nil {
+		t.Fatal("the first arrival did not claim the transaction")
+	}
+	// The retransmission must not claim it, and while the submission is still
+	// running there is no answer to repeat.
+	existing, claimed := server.beginSMSTransaction(key)
+	if claimed {
+		t.Fatal("a retransmission claimed the transaction a second time")
+	}
+	if existing == nil || existing.done {
+		t.Fatal("an in-flight transaction reported an answer it does not have")
+	}
+
+	// Once answered, a later retransmission repeats that same answer.
+	server.finishSMSTransaction(key, 202, "Accepted")
+	existing, claimed = server.beginSMSTransaction(key)
+	if claimed {
+		t.Fatal("a retransmission after the answer claimed the transaction")
+	}
+	if existing == nil || !existing.done || existing.code != 202 {
+		t.Fatalf("recorded answer = %+v, want a done 202", existing)
+	}
+}
+
+// A peer that omits an RFC 3261 branch still has to be told apart from the
+// next submission, or two different texts would collapse into one.
+func TestSMSTransactionKeyFallsBackWithoutABranch(t *testing.T) {
+	build := func(via, callID, cseq string) *Request {
+		return &Request{Method: "MESSAGE", Headers: []Header{
+			{Name: "via", Value: via},
+			{Name: "call-id", Value: callID},
+			{Name: "cseq", Value: cseq},
+		}}
+	}
+	first := smsTransactionKey(build("SIP/2.0/UDP 10.0.0.1:5060", "a@h", "1 MESSAGE"))
+	second := smsTransactionKey(build("SIP/2.0/UDP 10.0.0.1:5060", "b@h", "1 MESSAGE"))
+	third := smsTransactionKey(build("SIP/2.0/UDP 10.0.0.1:5060", "a@h", "2 MESSAGE"))
+	if first == second || first == third || second == third {
+		t.Fatalf("keys collided: %q %q %q", first, second, third)
+	}
+	if !strings.HasPrefix(first, "legacy:") {
+		t.Fatalf("key without a branch = %q, want the legacy form", first)
+	}
+}

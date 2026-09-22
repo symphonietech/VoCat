@@ -65,7 +65,13 @@ type Server struct {
 	// MESSAGE is out of dialog, so there is nothing to put in either map
 	// above and nothing to tear down: one request, one response, done.
 	smsWaiters map[string]chan *Response
-	limiter    responseLimiter
+	// smsServed remembers the MESSAGE transactions this side is handling or
+	// has answered, so a retransmission is absorbed rather than submitted a
+	// second time. Required of any UAS, and unavoidable here: a MESSAGE is a
+	// non-INVITE transaction, so the PBX retransmits from T1 onwards until it
+	// has a final response, while a modem submission takes seconds.
+	smsServed map[string]*smsTransaction
+	limiter   responseLimiter
 }
 
 // ParsePeers converts textual peer entries into prefixes. A bare address

@@ -198,6 +198,78 @@ func quoteDisplayName(value string) string {
 	return builder.String()
 }
 
+// smsTransaction is one inbound MESSAGE this side is handling. done is closed
+// once a final response has been chosen, after which code and reason hold it
+// so a late retransmission gets the same answer rather than a second send.
+type smsTransaction struct {
+	at     time.Time
+	done   bool
+	code   int
+	reason string
+}
+
+// smsTransactionKey identifies a transaction the way RFC 3261 does for a
+// request that carries a branch: the top Via's branch plus the method. Older
+// peers that omit a magic-cookie branch fall back to Call-ID and CSeq, which
+// is the pre-3261 identity and still distinguishes one submission from the
+// next.
+func smsTransactionKey(request *Request) string {
+	branch := strings.TrimSpace(viaBranch(request.Value("via")))
+	if strings.HasPrefix(branch, "z9hG4bK") && len(branch) > len("z9hG4bK") {
+		return "branch:" + branch
+	}
+	return "legacy:" + request.Value("call-id") + ":" + request.Value("cseq")
+}
+
+// viaBranch reads the branch parameter from a Via header value.
+func viaBranch(via string) string {
+	for _, part := range strings.Split(via, ";") {
+		part = strings.TrimSpace(part)
+		if value, ok := strings.CutPrefix(part, "branch="); ok {
+			if index := strings.IndexAny(value, " ,"); index >= 0 {
+				value = value[:index]
+			}
+			return value
+		}
+	}
+	return ""
+}
+
+// beginSMSTransaction claims a transaction, or reports the one already in
+// flight so the caller can absorb a retransmission instead of acting on it.
+//
+// Entries older than smsTransactionLifetime are dropped on the way past:
+// that is Timer F, after which the peer has given up and no retransmission of
+// this transaction can still arrive.
+func (s *Server) beginSMSTransaction(key string) (existing *smsTransaction, claimed bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.smsServed == nil {
+		s.smsServed = map[string]*smsTransaction{}
+	}
+	now := time.Now()
+	for id, entry := range s.smsServed {
+		if now.Sub(entry.at) > smsTransactionLifetime {
+			delete(s.smsServed, id)
+		}
+	}
+	if entry, ok := s.smsServed[key]; ok {
+		return entry, false
+	}
+	s.smsServed[key] = &smsTransaction{at: now}
+	return nil, true
+}
+
+// finishSMSTransaction records the final response, so a retransmission that
+// arrives afterwards is answered from here.
+func (s *Server) finishSMSTransaction(key string, code int, reason string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if entry, ok := s.smsServed[key]; ok {
+		entry.done, entry.code, entry.reason = true, code, reason
+	}
+}
+
 func (s *Server) watchSMS(callID string, waiter chan *Response) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -267,13 +339,45 @@ func (s *Server) handleMessage(request *Request, from *net.UDPAddr) bool {
 		return true
 	}
 
+	// Claim the transaction before submitting anything. The PBX retransmits a
+	// non-INVITE request from T1 onwards until it holds a final response, and
+	// a modem submission takes seconds, so without this the retransmission is
+	// handled as a fresh message and the recipient gets the text twice.
+	key := smsTransactionKey(request)
+	inFlight, claimed := s.beginSMSTransaction(key)
+	if !claimed {
+		if inFlight.done {
+			// Already answered. Repeat the answer rather than redo the work.
+			s.reply(request, from, inFlight.code, inFlight.reason, nil)
+			return true
+		}
+		// Still submitting. Staying silent is correct: the peer keeps its
+		// timer running and gets the one real response when it is ready,
+		// where any reply now would be a second answer to one request.
+		return true
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), smsSubmitTimeout)
 	defer cancel()
-	switch err := messenger.SendSMS(ctx, sender, recipient, body); {
+	err := messenger.SendSMS(ctx, sender, recipient, body)
+
+	// Recorded before the reply goes out, so a retransmission that crosses it
+	// on the wire is answered from here rather than starting a second send.
+	code, reason := 202, "Accepted"
+	switch {
+	case errors.Is(err, ErrSMSSenderUnknown):
+		code, reason = 403, "Forbidden"
+	case errors.Is(err, ErrSMSBadRecipient):
+		code, reason = 400, "Bad Request"
+	case err != nil:
+		code, reason = 503, "Service Unavailable"
+	}
+	s.finishSMSTransaction(key, code, reason)
+
+	switch {
 	case err == nil:
-		// 202, not 200: VoCat has accepted the message for delivery. The SIM
-		// submission and the carrier's own delivery both happen after this
-		// response is already on the wire.
+		// 202, not 200: VoCat has accepted the message for delivery. The
+		// carrier's own delivery happens after this response is on the wire.
 		s.reply(request, from, 202, "Accepted", nil)
 	case errors.Is(err, ErrSMSSenderUnknown):
 		// 403 rather than 404: the destination exists, this sender may not
@@ -303,3 +407,9 @@ func (s *Server) handleMessage(request *Request, from *net.UDPAddr) bool {
 // modem submission is slower than a dialplan expects, so this is generous, but
 // it is still bounded: an unanswered MESSAGE leaves Asterisk retransmitting.
 const smsSubmitTimeout = 20 * time.Second
+
+// smsTransactionLifetime is how long a served MESSAGE is remembered so a
+// retransmission can be answered from the recorded response instead of being
+// submitted again. 64*T1 is Timer F, after which the peer has given up and no
+// retransmission of that transaction can still arrive.
+const smsTransactionLifetime = 32 * time.Second
