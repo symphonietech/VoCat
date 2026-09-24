@@ -1,6 +1,7 @@
 package vowifi
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
@@ -15,6 +16,57 @@ func TestResolveCarrierProfileUsesStandardDefault(t *testing.T) {
 	if profile.IKEProposal != IKEProposalModern || !profile.AdvertiseEAPOnly ||
 		profile.IMSIdentityProfile != IMSProfileStandard || profile.IMSRegisterProfile != IMSProfileStandard {
 		t.Fatalf("default profile lost standard capabilities: %#v", profile)
+	}
+}
+
+func TestCarrierProfileSubscriberIMSIRewriteValidation(t *testing.T) {
+	rewrite := []byte(`{"version":1,"profiles":[{"id":"subscriber-rewrite","match":{"iccid_prefixes":["89636626"]},"identity":{"subscriber_imsi_rewrite":{"from_prefix":"204047616","to_prefix":"515661015"}}}]}`)
+	rules, err := loadCarrierProfiles(rewrite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := applyCarrierProfileRule(defaultCarrierProfile(), rules[0], "iccid", SIMIdentity{})
+	if got := profile.EffectiveSubscriberIMSI("204047616000001"); got != "515661015000001" {
+		t.Fatalf("rewritten subscriber IMSI = %q", got)
+	}
+	if got := profile.EffectiveSubscriberIMSI("204041234567890"); got != "204041234567890" {
+		t.Fatalf("unmatched subscriber IMSI changed to %q", got)
+	}
+	for _, malformed := range []string{
+		`{"version":1,"profiles":[{"id":"missing-target","match":{"iccid_prefixes":["896366"]},"identity":{"subscriber_imsi_rewrite":{"from_prefix":"204047616"}}}]}`,
+		`{"version":1,"profiles":[{"id":"length-mismatch","match":{"iccid_prefixes":["896366"]},"identity":{"subscriber_imsi_rewrite":{"from_prefix":"204047616","to_prefix":"51566"}}}]}`,
+		`{"version":1,"profiles":[{"id":"non-decimal","match":{"iccid_prefixes":["896366"]},"identity":{"subscriber_imsi_rewrite":{"from_prefix":"20404x616","to_prefix":"515661015"}}}]}`,
+	} {
+		if _, err := loadCarrierProfiles([]byte(malformed)); err == nil {
+			t.Fatalf("invalid subscriber rewrite was accepted: %s", malformed)
+		}
+	}
+}
+
+func TestBuiltinDITOProfileRewritesRoamingSubscriberPrefix(t *testing.T) {
+	for _, homePLMN := range []struct{ mcc, mnc string }{
+		{mcc: "515", mnc: "66"},
+		{mcc: "204", mnc: "04"},
+	} {
+		profile := ResolveCarrierProfile(SIMIdentity{
+			HomeMCC: homePLMN.mcc,
+			HomeMNC: homePLMN.mnc,
+			ICCID:   "89636626000000000001",
+			IMSI:    "204047616000001",
+		})
+		if profile.ID != "ipcc-dito-51566" {
+			t.Fatalf("carrier profile for %s%s = %q, want ipcc-dito-51566", homePLMN.mcc, homePLMN.mnc, profile.ID)
+		}
+		if got := profile.EffectiveSubscriberIMSI("204047616000001"); got != "515661015000001" {
+			t.Fatalf("rewritten subscriber IMSI for %s%s = %q", homePLMN.mcc, homePLMN.mnc, got)
+		}
+		if profile.IKEProposal != IKEProposalLegacy {
+			t.Fatalf("IKE proposal for %s%s = %q", homePLMN.mcc, homePLMN.mnc, profile.IKEProposal)
+		}
+	}
+	profile := ResolveCarrierProfile(SIMIdentity{HomeMCC: "515", HomeMNC: "66", SPN: "DITO"})
+	if got := profile.EffectiveSubscriberIMSI("515661015000001"); got != "515661015000001" {
+		t.Fatalf("native DITO subscriber IMSI changed to %q", got)
 	}
 }
 
@@ -68,6 +120,34 @@ func TestResolveCarrierProfileGiffgaffIMSHeaders(t *testing.T) {
 	}
 	if len(options.ContactExtraTags) != 2 || options.ContactExtraTags[0] != "+g.3gpp.mid-call" || options.ContactExtraTags[1] != "+g.3gpp.smsip" {
 		t.Fatalf("giffgaff Contact tags = %#v", options.ContactExtraTags)
+	}
+}
+
+// TestResolveCarrierProfileUltraMobileIMS locks the live-validated ePDG and
+// REGISTER Contact capabilities to the Ultra Mobile carrier selector.
+func TestResolveCarrierProfileUltraMobileIMS(t *testing.T) {
+	profile := ResolveCarrierProfile(SIMIdentity{
+		IMSI: "310240000000001", HomeMCC: "310", HomeMNC: "240", GID1: "4153FFFF",
+	})
+	if profile.ID != "ipcc-ultramint-mobile-310026" || profile.MatchSource != "hplmn+gid1" {
+		t.Fatalf("Ultra Mobile profile = %#v", profile)
+	}
+	if profile.EPDG != "epdg.epc.mnc240.mcc310.pub.3gppnetwork.org" {
+		t.Fatalf("Ultra Mobile ePDG = %q", profile.EPDG)
+	}
+	if profile.RouteMCC != "310" || profile.RouteMNC != "240" {
+		t.Fatalf("Ultra Mobile route = %s/%s, want 310/240", profile.RouteMCC, profile.RouteMNC)
+	}
+	if profile.IMSIPSecEncryption != "aes-cbc" {
+		t.Fatalf("Ultra Mobile IMS encryption = %q", profile.IMSIPSecEncryption)
+	}
+	wantTags := []string{
+		`+g.3gpp.accesstype="wlan1"`,
+		"+g.3gpp.smsip-msisdnless",
+		"+g.3gpp.smsip-msisdn-less",
+	}
+	if got := profile.IMSRegisterOptions.ContactExtraTags; !slices.Equal(got, wantTags) {
+		t.Fatalf("Ultra Mobile Contact tags = %#v, want %#v", got, wantTags)
 	}
 }
 

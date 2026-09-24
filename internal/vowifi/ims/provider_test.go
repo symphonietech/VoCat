@@ -9,6 +9,8 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -16,6 +18,47 @@ import (
 
 	"vocat/internal/vowifi"
 )
+
+func TestDeriveIdentitiesRewritesDITORoamingPrefix(t *testing.T) {
+	installDITONativeAliasProfile(t)
+	for _, test := range []struct {
+		iccid string
+		imsi  string
+		want  string
+	}{
+		{"89636626000000000001", "204047616000001", "515661015000001"},
+		{"89636626000000000002", "204047616000002", "515661015000002"},
+	} {
+		got, err := deriveIdentities(vowifi.SIMIdentity{
+			ICCID: test.iccid, IMSI: test.imsi, HomeMCC: "515", HomeMNC: "66",
+		}, Config{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.private != test.want+"@ims.mnc066.mcc515.3gppnetwork.org" ||
+			got.public != "sip:"+test.want+"@ims.mnc066.mcc515.3gppnetwork.org" {
+			t.Fatalf("DITO IMS identities = %#v", got)
+		}
+	}
+}
+
+func installDITONativeAliasProfile(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	emptyDir := t.TempDir()
+	t.Cleanup(func() {
+		if err := vowifi.LoadCarrierProfileDirectory(emptyDir); err != nil {
+			t.Errorf("clear carrier profiles: %v", err)
+		}
+	})
+	profile := `{"version":1,"profiles":[{"id":"test-dito-native-alias","match":{"home_plmns":["51566"],"imsi_prefixes":["204047616"],"iccid_prefixes":["89636626"]},"identity":{"subscriber_imsi_rewrite":{"from_prefix":"204047616","to_prefix":"515661015"}},"route":{"mcc":"515","mnc":"66"}}]}`
+	if err := os.WriteFile(filepath.Join(dir, "profile.json"), []byte(profile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := vowifi.LoadCarrierProfileDirectory(dir); err != nil {
+		t.Fatal(err)
+	}
+}
 
 type evidenceTunnel struct {
 	evidence vowifi.TunnelEvidence
@@ -360,6 +403,8 @@ func TestRefreshFailureRevokesRegistrationEvidence(t *testing.T) {
 	}
 }
 
+// serveRegistration exercises initial authentication, preauthenticated refresh,
+// and deregistration against one registrar transaction sequence.
 func serveRegistration(listener *net.UDPConn, nonce string, confirmSMS bool) error {
 	var callID string
 	var pani string
@@ -462,8 +507,14 @@ func serveRegistration(listener *net.UDPConn, nonce string, confirmSMS bool) err
 			if headers["expires"] == "0" {
 				return errors.New("refresh REGISTER used zero expiry")
 			}
-			if headers["authorization"] != "" {
-				return errors.New("refresh reused the one-time AKAv1 RES")
+			if headers["authorization"] == "" {
+				return errors.New("refresh REGISTER omitted cached digest credentials")
+			}
+			if err := verifyTestAuthorization(headers["authorization"], nonce); err != nil {
+				return err
+			}
+			if !strings.Contains(headers["authorization"], "nc=00000002") {
+				return fmt.Errorf("refresh REGISTER did not increment digest nonce count: %q", headers["authorization"])
 			}
 			contact := headers["contact"]
 			extraContacts := []string(nil)
@@ -609,6 +660,7 @@ func TestSipInstanceIDUsesGSMAFormWhenIMEIIsAvailable(t *testing.T) {
 	}
 }
 
+// TestGSMAContactFormatUsesAddressAndDeviceInstance verifies the complete GSMA Contact shape.
 func TestGSMAContactFormatUsesAddressAndDeviceInstance(t *testing.T) {
 	session := &Session{
 		identity:   identitySet{user: "234105776448519"},
@@ -619,9 +671,25 @@ func TestGSMAContactFormatUsesAddressAndDeviceInstance(t *testing.T) {
 		ContactFormat:    vowifi.IMSContactFormatGSMA,
 		ContactExtraTags: []string{"+g.3gpp.mid-call", "+g.3gpp.smsip"},
 	})
-	want := `<sip:[2001:db8::1]:49686>;+g.3gpp.icsi-ref="urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel";+g.3gpp.mid-call;+g.3gpp.smsip;+sip.instance="<urn:gsma:imei:353024112557010-0>"`
+	want := `<sip:[2001:db8::1]:49686>;+g.3gpp.icsi-ref="urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel,urn%3Aurn-7%3A3gpp-service.ims.icsi.sms";+g.3gpp.mid-call;+g.3gpp.smsip;+sip.instance="<urn:gsma:imei:353024112557010-0>"`
 	if got != want {
 		t.Fatalf("GSMA Contact = %q, want %q", got, want)
+	}
+}
+
+// TestRegisterContactAdvertisesSMSOverIPICSI guards the encoded SMS service identifier independently.
+func TestRegisterContactAdvertisesSMSOverIPICSI(t *testing.T) {
+	session := &Session{
+		identity:   identitySet{user: "310240000000001"},
+		transport:  "tcp",
+		instanceID: "urn:gsma:imei:353024112557010-0",
+	}
+
+	for _, format := range []string{"", vowifi.IMSContactFormatATT, vowifi.IMSContactFormatGSMA} {
+		contact := session.buildContact("[2001:db8::1]:5060", vowifi.IMSRegisterOptions{ContactFormat: format})
+		if !strings.Contains(contact, "urn%3Aurn-7%3A3gpp-service.ims.icsi.sms") {
+			t.Fatalf("Contact format %q does not advertise SMS-over-IP ICSI: %s", format, contact)
+		}
 	}
 }
 
@@ -665,6 +733,8 @@ func validateTestPANI(value string) error {
 	return nil
 }
 
+// serveRefreshFailure accepts initial AKA registration and then rejects a
+// preauthenticated refresh so the session's failure evidence can be tested.
 func serveRefreshFailure(listener *net.UDPConn, nonce string) error {
 	var callID string
 	for step := 0; step < 3; step++ {
@@ -717,8 +787,11 @@ func serveRefreshFailure(listener *net.UDPConn, nonce string) error {
 			}
 			continue
 		}
-		if headers["authorization"] != "" {
-			return errors.New("refresh reused the one-time AKAv1 RES")
+		if headers["authorization"] == "" {
+			return errors.New("refresh REGISTER omitted cached digest credentials")
+		}
+		if !strings.Contains(headers["authorization"], "nc=00000002") {
+			return fmt.Errorf("refresh REGISTER did not increment digest nonce count: %q", headers["authorization"])
 		}
 		if _, err := listener.WriteToUDP(
 			testResponse(503, "Service Unavailable", callID, headers["cseq"], nil),
