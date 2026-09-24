@@ -449,6 +449,15 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 	if err := vowifi.LoadCarrierProfileDirectory(carrierProfileDir); err != nil {
 		return fmt.Errorf("load installed carrier profiles: %w", err)
 	}
+	// A key no struct field claims is ignored by the decoder, so a misspelled
+	// override would otherwise load, apply nothing, and look like it worked.
+	// Warned rather than refused: startup failure here becomes a restart loop,
+	// and an override written for a newer VoCat must still boot on this one.
+	for _, warning := range vowifi.CarrierProfileWarnings() {
+		logger.Warn("carrier profile override has a key VoCat does not know; "+
+			"the setting is not applied",
+			"category", "vowifi", "detail", warning, "dir", carrierProfileDir)
+	}
 	instanceLock, err := lockServerInstance(cfg.DatabasePath)
 	if err != nil {
 		return err

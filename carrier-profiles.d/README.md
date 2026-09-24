@@ -42,7 +42,7 @@ Beyond `epdg` (`hostname`, `dns_hosts`, `dns_client_subnet`), a rule can carry
 (transport, codecs, registration headers, …). See
 `internal/vowifi/carrier_compat.go` for the full set.
 
-## Two things that will bite you
+## Three things that will bite you
 
 **1. Your rule must be at least as specific as the built-in one.**
 Resolution picks the highest-specificity match, counting how many selector
@@ -62,6 +62,25 @@ python3 -c "import json;d=json.load(open('internal/vowifi/carrier_profiles.json'
 The matched rule is applied onto a fresh default profile, so anything the
 built-in rule set that you omit reverts to the default. Carry over every field
 you still want, not just the one you are changing.
+
+**3. A key VoCat does not recognise is ignored, not rejected.**
+The decoder drops any key no field claims, deliberately: an override written
+for a newer VoCat has to keep booting on an older one. So a misspelled key
+loads cleanly and applies nothing. VoCat now says so at startup — grep for it
+after every edit:
+
+```sh
+docker compose logs vocat | grep "does not know"
+```
+
+```
+WARN carrier profile override has a key VoCat does not know; the setting is
+     not applied  detail="local.json: unknown key \"profiles[0].epdg.hostnam\" (ignored)"
+```
+
+The path names the file, the profile index and the dotted key. No warning
+means every key in your file was understood — not that the rule won, which is
+points 1 and 2 above.
 
 ## Validate before restarting
 

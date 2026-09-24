@@ -82,7 +82,11 @@ const (
 )
 
 type carrierProfileDocument struct {
-	Version  int                  `json:"version"`
+	Version int `json:"version"`
+	// Metadata is provenance the generator writes -- count, generated_at,
+	// source. Modelled but deliberately unparsed, so it counts as a key this
+	// format knows rather than showing up as an unknown one in every file.
+	Metadata json.RawMessage      `json:"metadata,omitempty"`
 	Profiles []carrierProfileRule `json:"profiles"`
 }
 
@@ -219,6 +223,7 @@ func LoadCarrierProfileDirectory(dir string) error {
 		externalCarrierProfiles.Lock()
 		externalCarrierProfiles.rules = nil
 		externalCarrierProfiles.Unlock()
+		setCarrierProfileWarnings(nil)
 		return nil
 	}
 	if err != nil {
@@ -229,6 +234,10 @@ func LoadCarrierProfileDirectory(dir string) error {
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 	loaded := make([]carrierProfileRule, 0, len(entries))
+	// Keys no struct field claims. Collected rather than enforced, and cleared
+	// on every load so a corrected file stops warning. See
+	// carrier_profile_lint.go for why this is not a hard failure.
+	var warnings []string
 	seen := make(map[string]string)
 	for _, entry := range entries {
 		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || !strings.EqualFold(filepath.Ext(entry.Name()), ".json") {
@@ -261,6 +270,7 @@ func LoadCarrierProfileDirectory(dir string) error {
 		if err != nil {
 			return fmt.Errorf("load carrier profile %q: %w", path, err)
 		}
+		warnings = append(warnings, carrierProfileUnknownFields(entry.Name(), encoded)...)
 		for _, rule := range rules {
 			if previous := seen[rule.ID]; previous != "" {
 				return fmt.Errorf("carrier profile %q is duplicated in %q and %q", rule.ID, previous, path)
@@ -272,6 +282,7 @@ func LoadCarrierProfileDirectory(dir string) error {
 	externalCarrierProfiles.Lock()
 	externalCarrierProfiles.rules = loaded
 	externalCarrierProfiles.Unlock()
+	setCarrierProfileWarnings(warnings)
 	return nil
 }
 
