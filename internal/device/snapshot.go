@@ -91,19 +91,9 @@ func (manager *Manager) readSnapshot(
 			snapshot.SIMStatus, snapshot.SIMReady = parseCPIN(response)
 		}
 	}
-	// Both commands are tried when the first yields no usable ICCID, not only
-	// when it fails outright. A modem that answers AT+CCID with OK and nothing
-	// parseable used to end the attempt here: ccidErr stayed nil, so neither
-	// AT+QCCID nor the QMI read below was reached, and the card looked absent.
 	ccid, ccidErr := manager.command(ctx, client, "AT+CCID")
-	if ccidErr != nil || parseICCIDIdentifier(ccid, []string{"+CCID:"}, 18, 22) == "" {
-		if fallback, fallbackErr := manager.command(ctx, client, "AT+QCCID"); fallbackErr == nil {
-			if parseICCIDIdentifier(fallback, []string{"+QCCID:"}, 18, 22) != "" || ccidErr != nil {
-				ccid, ccidErr = fallback, nil
-			}
-		} else if ccidErr != nil {
-			ccidErr = fallbackErr
-		}
+	if ccidErr != nil {
+		ccid, ccidErr = manager.command(ctx, client, "AT+QCCID")
 	}
 	if ccidErr != nil && strings.EqualFold(strings.TrimSpace(backend), "qmi") && isNativeQMICandidate(candidate) &&
 		strings.EqualFold(strings.TrimSpace(snapshot.SIMStatus), "READY") {
@@ -123,17 +113,9 @@ func (manager *Manager) readSnapshot(
 	}
 	if ccidErr != nil {
 		snapshot.Warnings = append(snapshot.Warnings, "read ICCID: "+ccidErr.Error())
-	} else if snapshot.ICCID == "" {
-		snapshot.ICCID = parseICCIDIdentifier(ccid, []string{"+CCID:", "+QCCID:"}, 18, 22)
+	} else {
 		if snapshot.ICCID == "" {
-			// Said out loud, because an empty ICCID disables the whole card
-			// policy panel -- including the VoWiFi switch -- and a read that
-			// succeeded but produced nothing used to leave no trace at all.
-			// The reply is included: whatever the modem actually said is the
-			// only thing that identifies which parse rule it broke.
-			snapshot.Warnings = append(snapshot.Warnings,
-				"read ICCID: the modem replied without a usable ICCID: "+
-					strings.Join(ccid.Lines, " / "))
+			snapshot.ICCID = parseICCIDIdentifier(ccid, []string{"+CCID:", "+QCCID:"}, 18, 22)
 		}
 	}
 	if previousICCID != "" && snapshot.ICCID != "" && !strings.EqualFold(previousICCID, snapshot.ICCID) {
@@ -650,21 +632,7 @@ func parseICCIDIdentifier(
 ) string {
 	normalize := func(value string) string {
 		value = strings.Trim(value, `" `)
-		// EF_ICCID is nibble-swapped BCD, so an ICCID shorter than the field
-		// is padded with an "F" nibble. Which position that filler lands in
-		// after the modem unswaps is firmware-dependent: usually last, but
-		// some report it mid-string -- "898600910121F0105571" is a real
-		// example, where trimming only the right-hand side leaves the F in
-		// place, the digit check below fails, and the ICCID reads as absent.
-		//
-		// Removing every F is safe because an ICCID is decimal by definition:
-		// an F can only ever be padding, never a value.
-		value = strings.Map(func(character rune) rune {
-			if character == 'F' || character == 'f' {
-				return -1
-			}
-			return character
-		}, value)
+		value = strings.TrimRight(value, "Ff")
 		if len(value) >= minimum && len(value) <= maximum &&
 			strings.IndexFunc(value, func(character rune) bool { return !unicode.IsDigit(character) }) < 0 {
 			return value
