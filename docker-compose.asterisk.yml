@@ -68,6 +68,19 @@ services:
       - vocat
     network_mode: host
 
+    # Asterisk's log goes to the console, which with `asterisk -f` is this
+    # container's stdout -- so this block is what bounds it. Without a cap the
+    # json-file driver grows without limit, exactly like the messages.log it
+    # replaces; see templates/logger.conf.
+    #
+    # 30 MB total. Asterisk at notice level is terse unless port 5060 is being
+    # scanned, and if it is, the useful lines are the recent ones.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
     environment:
       # Required. The entrypoint refuses to start without it, and refuses one
       # shorter than 12 characters: SIP registrars are scanned continuously,

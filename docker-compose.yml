@@ -75,6 +75,16 @@ services:
     privileged: true
     user: "0:0"
 
+    # Cap the container log. The default json-file driver has no limit, so a
+    # long-running deployment keeps every line it has ever written under
+    # /var/lib/docker/containers -- which is a slow leak that only shows up as
+    # a full disk.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
     environment:
       # Marks the process as containerized: the web UI then advertises
       # "pull new image" instead of attempting an in-place binary update.

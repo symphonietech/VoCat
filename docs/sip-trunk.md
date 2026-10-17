@@ -300,6 +300,7 @@ default here.
 | `templates/extensions.conf` | Outbound dial plan, `[from-vocat]` ready for inbound |
 | `templates/rtp.conf` | Ports 10000-10200 |
 | `templates/modules.conf` | `noload => chan_sip.so` — a no-op on Asterisk 22, which removed it; kept for a rebase onto an older base |
+| `templates/logger.conf` | Log to the console only, so it lands in `docker compose logs` where Compose can cap it. Replaces the packaged default, which writes an unrotated `messages.log` inside the container |
 
 The configs are rendered rather than mounted so the SIP password stays in the
 environment and never reaches a git-tracked file. `envsubst` is given an
@@ -310,6 +311,93 @@ with a real SIM behind it becomes someone else's long-distance plan.
 
 Everything below is what those files contain, for anyone wiring up an existing
 Asterisk instead.
+
+### Where the logs go, and why they are capped
+
+Both containers log to stdout, and both compose files cap it:
+
+```yaml
+logging:
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+```
+
+Thirty megabytes each, rotated by Docker. Read it the usual way:
+
+```
+docker compose logs -f asterisk
+docker compose logs -f vocat
+```
+
+Without that block the `json-file` driver keeps every line forever, under
+`/var/lib/docker/containers/<id>/<id>-json.log`. It is a slow leak that
+surfaces only as a full disk.
+
+Asterisk's own file log is **off**. The packaged `logger.conf` declares
+`messages => notice,warning,error`, which writes `/var/log/asterisk/messages.log`
+— and that path is not a volume, so it lands in the container's writable
+overlay layer, where it shows up on the host as:
+
+```
+/var/lib/docker/overlay2/<layer>/diff/var/log/asterisk/messages.log
+```
+
+Nothing in the image rotates it. There is no cron and no logrotate, and
+Asterisk's own rotation only runs when something invokes `logger rotate`. So
+the file grows for as long as the container does. `templates/logger.conf`
+therefore ships `console` as the only log target, which routes the same lines
+at the same levels into the capped stream above.
+
+If you need the file back:
+
+```
+ASTERISK_LOG_TO_FILE=yes      # in .env, then: docker compose restart asterisk
+```
+
+It is still uncapped, so turn it off again afterwards.
+
+### When the log grows fast anyway
+
+A PBX on a public port is scanned continuously, and every request that matches
+no endpoint is one line:
+
+```
+NOTICE ... Request 'REGISTER' from '"100" <sip:100@…>' failed for '45.148.10.x:5080' … - No matching endpoint found
+```
+
+That is the usual reason an idle deployment writes hundreds of megabytes a
+day. Capping the log bounds the disk cost; it does not stop the traffic. Find
+out whether this is what you are looking at by counting the repeats — the
+`sed` blanks out the parts that differ on every packet (addresses, ports,
+call-IDs, the claimed From), so the same complaint collapses into one row:
+
+```
+docker compose logs --no-log-prefix asterisk \
+  | sed -E "s/\(callid: [^)]*\)/(callid: X)/; s/'[^']*'/'X'/g; s/[0-9]+/N/g" \
+  | awk -F']' '{print $NF}' | sort | uniq -c | sort -rn | head -20
+```
+
+A top row in the thousands with `No matching endpoint found` is scanner
+traffic. One in the thousands saying `Contact … is now Reachable` or
+`Unreachable` is a handset flapping instead, and the knob for that is
+`qualify_frequency` on its AOR.
+
+`pjsip.conf` binds `0.0.0.0:5060` on both UDP and TCP, and with
+`network_mode: host` that is the host's port. The fix is to stop the packets
+arriving rather than to log them more quietly — restrict 5060 to the networks
+your handsets are actually on:
+
+```
+sudo ufw allow from 192.168.0.0/16 to any port 5060 proto udp
+sudo ufw allow from 192.168.0.0/16 to any port 5060 proto tcp
+sudo ufw deny 5060
+```
+
+This is worth doing on its own merits. An exposed registrar in front of a SIM
+is the toll-fraud exposure the 12-character password minimum and the empty
+trunk destination list already exist to limit.
 
 ## Asterisk side
 

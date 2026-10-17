@@ -13,6 +13,7 @@ set -eu
 : "${VOCAT_DEVICE:=}"
 : "${ASTERISK_AMI_USER:=vocat}"
 : "${ASTERISK_AMI_SECRET:=}"
+: "${ASTERISK_LOG_TO_FILE:=no}"
 
 if [ ${#ASTERISK_SIP_PASSWORD} -lt 12 ]; then
 	# SIP registrars are scanned constantly and a weak one becomes someone
@@ -49,6 +50,18 @@ for template in /etc/asterisk/templates/*.conf; do
 	[ -e "$template" ] || continue
 	envsubst "$substitute" < "$template" > "/etc/asterisk/$(basename "$template")"
 done
+
+# messages.log is off by default -- see the top of templates/logger.conf for
+# why. Appended here rather than templated because envsubst cannot express a
+# condition, and the same approach is used for manager.conf above.
+#
+# Nothing in this container rotates the file, so this is a switch to turn back
+# off once whatever needed it is understood.
+if [ "$ASTERISK_LOG_TO_FILE" = "yes" ]; then
+	echo "entrypoint: ASTERISK_LOG_TO_FILE=yes -- writing /var/log/asterisk/messages.log"
+	echo "entrypoint: nothing rotates it; unset this once you are done with it"
+	echo "messages => notice,warning,error" >> /etc/asterisk/logger.conf
+fi
 
 # Refuse to start on top of another SIP server. This container uses host
 # networking, so port 5060 is the host's: an Asterisk installed on the host
