@@ -20,10 +20,30 @@ import (
 // The wire formats here were verified byte-for-byte against lpac
 // (euicc/es10b.c, es10c.c, es9p.c) and exercised against a live eUICC.
 
-// es10SegmentMSS caps each STORE DATA block. 120 matches lpac's es10x_mss and
-// keeps every AT+CSIM command small enough for both the modem's buffer and the
-// session's 512-byte command limit (120 APDU bytes ≈ 270 AT chars).
+// es10SegmentMSS caps each STORE DATA block on the AT+CSIM transport. 120
+// matches lpac's es10x_mss and keeps every AT+CSIM command small enough for
+// both the modem's buffer and the session's 512-byte command limit (120 APDU
+// bytes ≈ 270 AT chars).
 const es10SegmentMSS = 120
+
+// es10SegmentMSSDirect caps each block on the transports that carry the APDU
+// without a text encoding -- PC/SC and QMI UIM. 255 is the ceiling SGP.22
+// allows, being the largest short-form Lc; extended length is never used,
+// because a T=0 card has no such thing.
+//
+// Not a correctness fix: 120 was already inside the limit. It halves the
+// number of round trips on a BoundProfilePackage, and reverting this one
+// constant restores the old block count if a card ever objects to a full
+// 255-byte block.
+const es10SegmentMSSDirect = 255
+
+// segmentMSS picks the block size for this channel's transport.
+func (channel *euiccChannel) segmentMSS() int {
+	if channel.pcscSession != nil || channel.qmiSession != nil {
+		return es10SegmentMSSDirect
+	}
+	return es10SegmentMSS
+}
 
 // storeDataChained sends one ES10 request body as one or more chained STORE
 // DATA blocks (CLA=80, INS=E2). Blocks use P1=0x11 while more follow and 0x91 on
@@ -31,35 +51,65 @@ const es10SegmentMSS = 120
 // es10x_command_iter. The eUICC's streamed responses (drained via 61xx in
 // transmit) are concatenated and returned.
 func (channel *euiccChannel) storeDataChained(ctx context.Context, derRequest []byte) ([]byte, error) {
+	mss := channel.segmentMSS()
 	var assembled []byte
 	sequence := byte(0)
 	for offset := 0; offset < len(derRequest); {
 		size := len(derRequest) - offset
 		last := true
-		if size > es10SegmentMSS {
-			size = es10SegmentMSS
+		if size > mss {
+			size = mss
 			last = false
 		}
 		p1 := byte(0x91)
 		if !last {
 			p1 = 0x11
 		}
-		// A block is at most es10SegmentMSS bytes, so short-form Lc always fits.
+		// A block is at most 255 bytes, so short-form Lc always fits and an
+		// extended-length APDU is never constructed -- a T=0 card has no
+		// extended length, and offering it is one way to be answered 6700.
 		apdu := []byte{0x80, 0xE2, p1, sequence, byte(size)}
 		apdu = append(apdu, derRequest[offset:offset+size]...)
-		apdu = append(apdu, 0x00) // Le
+		if last {
+			// Case 4: the final block is the one that carries the eUICC's
+			// answer, so it asks for a response.
+			apdu = append(apdu, 0x00) // Le
+		}
+		// An intermediate block gets no Le at all. It returns nothing but
+		// 9000, which makes it a case 3 command, and appending Le makes it
+		// case 4 -- one byte longer than the card is expecting. A T=0 eUICC
+		// answers that with 6700 (wrong length), which is why a command small
+		// enough to fit one block has always worked here while a chained one
+		// never has: a single block is the last block, so it was the only
+		// shape ever framed correctly.
 		payload, sw, err := channel.transmit(ctx, apdu, 0x80)
 		if err != nil {
 			return nil, err
 		}
 		if !es10StatusOK(sw) {
-			return nil, fmt.Errorf("%w: SW=%04X", errESIMSW, sw)
+			return nil, fmt.Errorf("%w: SW=%04X (STORE DATA P1=%02X block %d, Lc=%d, %s)",
+				errESIMSW, sw, p1, sequence, size, channel.transportName())
 		}
 		assembled = append(assembled, payload...)
 		offset += size
 		sequence++
 	}
 	return assembled, nil
+}
+
+// transportName labels the APDU path for an error message, with the negotiated
+// protocol when PC/SC can report it. A bare "SW=6700" says nothing about which
+// command or which framing produced it; this is what turns the next report
+// into something answerable.
+func (channel *euiccChannel) transportName() string {
+	switch {
+	case channel.pcscSession != nil:
+		return "PC/SC " + channel.pcscSession.ProtocolName()
+	case channel.qmiSession != nil:
+		return "QMI UIM"
+	default:
+		return "AT+CSIM"
+	}
 }
 
 // 91xx is a successful UICC result with a proactive SIM Toolkit command

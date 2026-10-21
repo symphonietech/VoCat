@@ -87,6 +87,40 @@ func (session *Session) Transmit(ctx context.Context, command []byte) ([]byte, u
 	return session.card.Transmit(ctx, command)
 }
 
+// ProtocolT0 reports whether this card speaks T=0, and whether the backend
+// could say at all. A backend that does not expose the negotiated protocol
+// reports known=false rather than guessing, because guessing T=1 on a T=0
+// card is exactly the mistake that makes an eUICC answer 6700.
+func (session *Session) ProtocolT0() (isT0 bool, known bool) {
+	if session == nil || session.card == nil || session.closed {
+		return false, false
+	}
+	reporter, ok := session.card.(interface{ Protocol() uint32 })
+	if !ok {
+		return false, false
+	}
+	switch reporter.Protocol() {
+	case pcscProtocolT0:
+		return true, true
+	case pcscProtocolT1:
+		return false, true
+	}
+	return false, false
+}
+
+// ProtocolName names the negotiated protocol for a log or an error message.
+func (session *Session) ProtocolName() string {
+	isT0, known := session.ProtocolT0()
+	switch {
+	case !known:
+		return "T=?"
+	case isT0:
+		return "T=0"
+	default:
+		return "T=1"
+	}
+}
+
 func (session *Session) Close() error {
 	return session.close(false)
 }

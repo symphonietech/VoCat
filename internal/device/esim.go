@@ -594,18 +594,74 @@ func (channel *euiccChannel) transmit(ctx context.Context, apdu []byte, insClass
 		return nil, 0, err
 	}
 	assembled := append([]byte(nil), payload...)
+	// The command most recently put on the wire. 6Cxx advises the Le of
+	// whatever was just sent, so retrying needs that command and not the
+	// original one -- after a GET RESPONSE they are no longer the same.
+	current := apdu
 	guard := 0
-	for sw>>8 == 0x61 && guard < 24 {
+	for guard < 24 {
 		guard++
-		getResponse := []byte{0x80 | byte(channel.channel), 0xC0, 0x00, 0x00, byte(sw & 0xFF)}
-		frag, nextSW, err := channel.exchange(ctx, getResponse)
-		if err != nil {
-			return nil, 0, err
+		switch {
+		case sw>>8 == 0x61:
+			// GET RESPONSE is an interindustry command, so its class byte is
+			// 0x0N with N the logical channel -- not 0x8N. 0x80 is the
+			// proprietary class, and a card entitled to reject GET RESPONSE
+			// in a proprietary class does so; the channel number still has to
+			// be there, or the response is fetched from the basic channel
+			// where nothing is pending.
+			getResponse := []byte{byte(channel.channel), 0xC0, 0x00, 0x00, byte(sw & 0xFF)}
+			frag, nextSW, err := channel.exchange(ctx, getResponse)
+			if err != nil {
+				return nil, 0, err
+			}
+			assembled = append(assembled, frag...)
+			current = getResponse
+			sw = nextSW
+		case sw>>8 == 0x6C:
+			// 6Cxx is the T=0 "wrong Le" advice: resend the identical command
+			// with the length the card named. Only meaningful for a command
+			// that carried an Le in the first place, so a case 3 command --
+			// which has none -- is left alone rather than having a byte
+			// appended to it.
+			if !apduHasLe(current) {
+				return assembled, sw, nil
+			}
+			retry := append([]byte(nil), current...)
+			retry[len(retry)-1] = byte(sw & 0xFF)
+			frag, nextSW, err := channel.exchange(ctx, retry)
+			if err != nil {
+				return nil, 0, err
+			}
+			// The rejected attempt returned no data, so this replaces rather
+			// than extends whatever it would have contributed.
+			assembled = append([]byte(nil), frag...)
+			current = retry
+			sw = nextSW
+		default:
+			return assembled, sw, nil
 		}
-		assembled = append(assembled, frag...)
-		sw = nextSW
 	}
 	return assembled, sw, nil
+}
+
+// apduHasLe reports whether a command APDU carries a trailing Le byte, by
+// checking whether its body is exactly Lc bytes long (case 3) or one more
+// than that (case 4). Short form only: nothing here builds an extended-length
+// APDU, because a T=0 card has no extended length.
+func apduHasLe(apdu []byte) bool {
+	if len(apdu) < 5 {
+		// Case 1: header only, nothing to resend with a new length.
+		return false
+	}
+	if len(apdu) == 5 {
+		// Case 2: there is no data field, so the fifth byte is Le whatever
+		// its value. GET RESPONSE itself is this shape, and it is the command
+		// most likely to be answered 6Cxx.
+		return true
+	}
+	lc := int(apdu[4])
+	// Case 4 carries one byte beyond the data field; case 3 does not.
+	return len(apdu) == 5+lc+1
 }
 
 // es10 runs one ES10 command: it wraps the DER request body in one or more

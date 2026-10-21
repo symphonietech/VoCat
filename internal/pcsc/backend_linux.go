@@ -269,6 +269,16 @@ func (card *nativeCard) Transmit(ctx context.Context, command []byte) ([]byte, u
 	return card.transmit(ctx, append([]byte(nil), command...), 0)
 }
 
+// Protocol reports the protocol pcscd negotiated with the card (T=0 or T=1).
+// The eUICC layer needs it because the two differ in how a command that
+// returns no data must be framed, and because 61xx/6Cxx are T=0 artefacts.
+func (card *nativeCard) Protocol() uint32 {
+	if card == nil {
+		return 0
+	}
+	return card.protocol
+}
+
 func (card *nativeCard) TransmitRaw(ctx context.Context, command []byte) ([]byte, uint16, error) {
 	if card == nil || card.client == nil || card.closed {
 		return nil, 0, errors.New("pcsc: card session is closed")
