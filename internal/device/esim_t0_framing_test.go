@@ -14,6 +14,9 @@ import (
 type recordingEuiccTransport struct {
 	sent     [][]byte
 	responds func(call int, apdu []byte) ([]byte, int)
+	// protocol is the pcscd value: 1 for T=0, 2 for T=1. Zero means the
+	// backend cannot say, which must leave framing alone.
+	protocol uint32
 }
 
 func (transport *recordingEuiccTransport) Transmit(_ context.Context, command []byte) ([]byte, uint16, error) {
@@ -28,9 +31,7 @@ func (transport *recordingEuiccTransport) Transmit(_ context.Context, command []
 
 func (*recordingEuiccTransport) Close() error { return nil }
 
-// Protocol reports T=0, which is what the Eastcompeace eUICC in the bug report
-// offers -- its ATR advertises no T=1 at all.
-func (*recordingEuiccTransport) Protocol() uint32 { return 1 }
+func (transport *recordingEuiccTransport) Protocol() uint32 { return transport.protocol }
 
 type recordingBackend struct{ card *recordingEuiccTransport }
 
@@ -43,7 +44,7 @@ func (backend recordingBackend) Open(context.Context, pcsc.Selector) (pcsc.Card,
 // newScriptedChannel wires a euiccChannel onto a real pcsc.Session backed by
 // the recorder. Logical channel 2 rather than 1, so a class byte that forgets
 // the channel number is visibly wrong rather than accidentally right.
-func newScriptedChannel(t *testing.T, transport *recordingEuiccTransport) *euiccChannel {
+func newScriptedChannel(t *testing.T, transport *recordingEuiccTransport, wantProtocol string) *euiccChannel {
 	t.Helper()
 	service := pcsc.NewWithBackend(recordingBackend{card: transport})
 	session, err := service.OpenSession(context.Background(), pcsc.Selector{ReaderName: "AK9563"})
@@ -51,19 +52,37 @@ func newScriptedChannel(t *testing.T, transport *recordingEuiccTransport) *euicc
 		t.Fatalf("OpenSession: %v", err)
 	}
 	t.Cleanup(func() { _ = session.Close() })
-	if name := session.ProtocolName(); name != "T=0" {
-		t.Fatalf("ProtocolName = %q, want T=0", name)
+	if name := session.ProtocolName(); name != wantProtocol {
+		t.Fatalf("ProtocolName = %q, want %q", name, wantProtocol)
 	}
 	return &euiccChannel{channel: 2, pcscSession: session}
 }
 
-// The regression this file exists for. A chained STORE DATA must frame its
-// intermediate blocks as case 3 -- Lc and data, no Le. Appending Le makes the
-// command one byte longer than a T=0 eUICC expects, and it answers 6700. Only
-// the final block carries Le, because only the final block returns data.
-func TestStoreDataChainedOmitsLeOnIntermediateBlocks(t *testing.T) {
+// t0Channel is the card from the bug report: an Eastcompeace eUICC behind an
+// Alcor AK9563, whose ATR advertises no T=1 at all.
+func t0Channel(t *testing.T, transport *recordingEuiccTransport) *euiccChannel {
+	t.Helper()
+	transport.protocol = 1
+	return newScriptedChannel(t, transport, "T=0")
+}
+
+func t1Channel(t *testing.T, transport *recordingEuiccTransport) *euiccChannel {
+	t.Helper()
+	transport.protocol = 2
+	return newScriptedChannel(t, transport, "T=1")
+}
+
+// The regression this file exists for. Over T=0 a command that carries data
+// carries no Le -- the two fields are mutually exclusive in a T=0 TPDU, so the
+// card answers 61xx and GET RESPONSE collects the body. Appending Le makes the
+// command one byte longer than the eUICC expects and it answers 6700.
+//
+// Measured on the reported card: a 191-byte AuthenticateServer was rejected
+// 6700 both as 120+71 chained blocks and as a single 191-byte block. The only
+// thing those two shapes share is the trailing byte.
+func TestStoreDataChainedOmitsLeOnEveryBlockOverT0(t *testing.T) {
 	transport := &recordingEuiccTransport{}
-	channel := newScriptedChannel(t, transport)
+	channel := t0Channel(t, transport)
 
 	// Just over two full blocks, so there are two intermediate blocks and a
 	// short final one -- the shape AuthenticateServer produces, which is the
@@ -105,25 +124,20 @@ func TestStoreDataChainedOmitsLeOnIntermediateBlocks(t *testing.T) {
 		if lc != wantLc {
 			t.Errorf("block %d Lc = %d, want %d", index, lc, wantLc)
 		}
-		// The whole point: case 3 for every block but the last.
-		wantLen := 5 + lc
-		if last {
-			wantLen++
-		}
-		if len(apdu) != wantLen {
-			t.Errorf("block %d length = %d, want %d (Lc=%d, Le %s) -- apdu %s",
-				index, len(apdu), wantLen, lc,
-				map[bool]string{true: "present", false: "absent"}[last],
-				hex.EncodeToString(apdu))
+		// The whole point: over T=0 every block is case 3, the last one
+		// included. A trailing Le makes the command one byte longer than the
+		// card expects and it answers 6700.
+		if len(apdu) != 5+lc {
+			t.Errorf("block %d length = %d, want %d (Lc=%d, no Le) -- apdu %s",
+				index, len(apdu), 5+lc, lc, hex.EncodeToString(apdu))
 		}
 	}
 }
 
-// A request that fits one block is the last block, so it keeps its Le. This is
-// the shape that always worked, and it must keep working.
-func TestStoreDataChainedKeepsLeOnASingleBlock(t *testing.T) {
+// A single-block request is framed the same way: data, no Le.
+func TestStoreDataChainedSingleBlockOverT0CarriesNoLe(t *testing.T) {
 	transport := &recordingEuiccTransport{}
-	channel := newScriptedChannel(t, transport)
+	channel := t0Channel(t, transport)
 
 	if _, err := channel.storeDataChained(context.Background(), []byte{0xBF, 0x2E, 0x00}); err != nil {
 		t.Fatalf("storeDataChained: %v", err)
@@ -131,10 +145,41 @@ func TestStoreDataChainedKeepsLeOnASingleBlock(t *testing.T) {
 	if len(transport.sent) != 1 {
 		t.Fatalf("blocks = %d, want 1", len(transport.sent))
 	}
-	apdu := transport.sent[0]
+	want := []byte{0x82, 0xE2, 0x91, 0x00, 0x03, 0xBF, 0x2E, 0x00}
+	if hex.EncodeToString(transport.sent[0]) != hex.EncodeToString(want) {
+		t.Fatalf("apdu = %s, want %s",
+			hex.EncodeToString(transport.sent[0]), hex.EncodeToString(want))
+	}
+}
+
+// T=1 can carry a data field and an expected length in the same exchange, so
+// the final block keeps its Le there. This is the path that already works on
+// other readers, and the T=0 fix must not reach it.
+func TestStoreDataChainedKeepsLeOnTheFinalBlockOverT1(t *testing.T) {
+	transport := &recordingEuiccTransport{}
+	channel := t1Channel(t, transport)
+
+	if _, err := channel.storeDataChained(context.Background(), []byte{0xBF, 0x2E, 0x00}); err != nil {
+		t.Fatalf("storeDataChained: %v", err)
+	}
 	want := []byte{0x82, 0xE2, 0x91, 0x00, 0x03, 0xBF, 0x2E, 0x00, 0x00}
-	if hex.EncodeToString(apdu) != hex.EncodeToString(want) {
-		t.Fatalf("apdu = %s, want %s", hex.EncodeToString(apdu), hex.EncodeToString(want))
+	if hex.EncodeToString(transport.sent[0]) != hex.EncodeToString(want) {
+		t.Fatalf("apdu = %s, want %s",
+			hex.EncodeToString(transport.sent[0]), hex.EncodeToString(want))
+	}
+}
+
+// A backend that cannot report its protocol is left alone rather than
+// reframed on a guess.
+func TestStoreDataChainedKeepsLeWhenTheProtocolIsUnknown(t *testing.T) {
+	transport := &recordingEuiccTransport{}
+	channel := newScriptedChannel(t, transport, "T=?")
+
+	if _, err := channel.storeDataChained(context.Background(), []byte{0xBF, 0x2E, 0x00}); err != nil {
+		t.Fatalf("storeDataChained: %v", err)
+	}
+	if got := transport.sent[0]; len(got) != 9 {
+		t.Fatalf("apdu = %s, want a trailing Le", hex.EncodeToString(got))
 	}
 }
 
@@ -142,7 +187,7 @@ func TestStoreDataChainedKeepsLeOnASingleBlock(t *testing.T) {
 // a T=0 card has no extended length to fall back on.
 func TestStoreDataChainedNeverExceedsShortFormLc(t *testing.T) {
 	transport := &recordingEuiccTransport{}
-	channel := newScriptedChannel(t, transport)
+	channel := t0Channel(t, transport)
 
 	request := make([]byte, 4096)
 	if _, err := channel.storeDataChained(context.Background(), request); err != nil {
@@ -171,7 +216,7 @@ func TestTransmitGetResponseUsesInterindustryClassAndChannel(t *testing.T) {
 			return []byte{0xBF, 0x38, 0x02, 0x01, 0x02}, 0x9000
 		},
 	}
-	channel := newScriptedChannel(t, transport)
+	channel := t0Channel(t, transport)
 
 	payload, sw, err := channel.transmit(context.Background(), []byte{0x80, 0xE2, 0x91, 0x00, 0x01, 0xAA, 0x00}, 0x80)
 	if err != nil {
@@ -205,7 +250,7 @@ func TestTransmitRetriesOn6CxxWithTheAdvisedLength(t *testing.T) {
 			return []byte{1, 2, 3, 4, 5, 6, 7}, 0x9000
 		},
 	}
-	channel := newScriptedChannel(t, transport)
+	channel := t0Channel(t, transport)
 
 	payload, sw, err := channel.transmit(context.Background(), []byte{0x80, 0xE2, 0x91, 0x00, 0x01, 0xAA, 0x00}, 0x80)
 	if err != nil {
@@ -226,7 +271,7 @@ func TestTransmitDoesNotAppendLeToACaseThreeCommandOn6Cxx(t *testing.T) {
 	transport := &recordingEuiccTransport{
 		responds: func(int, []byte) ([]byte, int) { return nil, 0x6C07 },
 	}
-	channel := newScriptedChannel(t, transport)
+	channel := t0Channel(t, transport)
 
 	caseThree := []byte{0x80, 0xE2, 0x11, 0x00, 0x02, 0xAA, 0xBB}
 	_, sw, err := channel.transmit(context.Background(), caseThree, 0x80)
@@ -256,5 +301,48 @@ func TestAPDUHasLe(t *testing.T) {
 		if got := apduHasLe(testCase.apdu); got != testCase.want {
 			t.Errorf("%s: apduHasLe = %v, want %v", testCase.name, got, testCase.want)
 		}
+	}
+}
+
+// The half of the T=0 model that makes dropping Le safe: a case 3 command
+// still returns its body, the card just announces it with 61xx and hands it
+// over on GET RESPONSE. Without this the fix above would frame the command
+// correctly and then throw the answer away.
+func TestStoreDataChainedCollectsTheResponseOverT0(t *testing.T) {
+	body := []byte{0xBF, 0x38, 0x03, 0x80, 0x01, 0x00}
+	transport := &recordingEuiccTransport{
+		responds: func(call int, apdu []byte) ([]byte, int) {
+			switch call {
+			case 0:
+				// The STORE DATA itself: no data back, just the announcement.
+				if apduHasLe(apdu) {
+					t.Errorf("STORE DATA carried an Le: %s", hex.EncodeToString(apdu))
+				}
+				return nil, 0x6100 | len(body)
+			case 1:
+				return body, 0x9000
+			}
+			t.Fatalf("unexpected exchange %d", call)
+			return nil, 0
+		},
+	}
+	channel := t0Channel(t, transport)
+
+	response, err := channel.storeDataChained(context.Background(), []byte{0xBF, 0x2E, 0x00})
+	if err != nil {
+		t.Fatalf("storeDataChained: %v", err)
+	}
+	if hex.EncodeToString(response) != hex.EncodeToString(body) {
+		t.Fatalf("response = %s, want %s",
+			hex.EncodeToString(response), hex.EncodeToString(body))
+	}
+	if len(transport.sent) != 2 {
+		t.Fatalf("exchanges = %d, want 2 (STORE DATA then GET RESPONSE)", len(transport.sent))
+	}
+	getResponse := transport.sent[1]
+	want := []byte{0x02, 0xC0, 0x00, 0x00, byte(len(body))}
+	if hex.EncodeToString(getResponse) != hex.EncodeToString(want) {
+		t.Fatalf("GET RESPONSE = %s, want %s",
+			hex.EncodeToString(getResponse), hex.EncodeToString(want))
 	}
 }

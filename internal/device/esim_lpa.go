@@ -70,18 +70,23 @@ func (channel *euiccChannel) storeDataChained(ctx context.Context, derRequest []
 		// extended length, and offering it is one way to be answered 6700.
 		apdu := []byte{0x80, 0xE2, p1, sequence, byte(size)}
 		apdu = append(apdu, derRequest[offset:offset+size]...)
-		if last {
-			// Case 4: the final block is the one that carries the eUICC's
-			// answer, so it asks for a response.
+		// Over T=0 a command that carries data carries no Le, whatever it is
+		// going to return. ISO 7816-3 T=0 cannot send and receive in one
+		// TPDU, so the data field and the expected-length field are mutually
+		// exclusive: the card answers 61xx and GET RESPONSE collects the
+		// body (see transmit). Appending Le makes the command one byte longer
+		// than the card is expecting and it answers 6700.
+		//
+		// Measured, not assumed. A 191-byte AuthenticateServer was rejected
+		// 6700 both as 120+71 chained blocks and as a single 191-byte block;
+		// the only thing the two shapes have in common is the trailing byte.
+		//
+		// On T=1 the Le stays. There both fields can coexist, the response
+		// comes back in the same exchange, and removing it would be a change
+		// to a path that works.
+		if last && !channel.omitLeOnDataCommands() {
 			apdu = append(apdu, 0x00) // Le
 		}
-		// An intermediate block gets no Le at all. It returns nothing but
-		// 9000, which makes it a case 3 command, and appending Le makes it
-		// case 4 -- one byte longer than the card is expecting. A T=0 eUICC
-		// answers that with 6700 (wrong length), which is why a command small
-		// enough to fit one block has always worked here while a chained one
-		// never has: a single block is the last block, so it was the only
-		// shape ever framed correctly.
 		payload, sw, err := channel.transmit(ctx, apdu, 0x80)
 		if err != nil {
 			return nil, err
@@ -95,6 +100,21 @@ func (channel *euiccChannel) storeDataChained(ctx context.Context, derRequest []
 		sequence++
 	}
 	return assembled, nil
+}
+
+// omitLeOnDataCommands reports whether this transport needs case 3 framing for
+// every command that carries data.
+//
+// True only for a PC/SC card that pcscd says negotiated T=0. The AT+CSIM and
+// QMI UIM paths go through modem firmware that performs the T=0 conversion
+// itself, and a PC/SC reader whose protocol cannot be determined is left
+// alone rather than reframed on a guess.
+func (channel *euiccChannel) omitLeOnDataCommands() bool {
+	if channel.pcscSession == nil {
+		return false
+	}
+	isT0, known := channel.pcscSession.ProtocolT0()
+	return known && isT0
 }
 
 // transportName labels the APDU path for an error message, with the negotiated

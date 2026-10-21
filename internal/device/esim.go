@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -565,7 +566,59 @@ func (channel *euiccChannel) close(ctx context.Context) {
 	}
 }
 
+// esimAPDUTraceEnabled reports whether VOCAT_ESIM_APDU_TRACE is set. Off by
+// default: an APDU trace carries the SM-DP+ certificate, the challenge and the
+// profile package, so it is a deliberate act rather than something a
+// deployment leaks into its log by accident.
+func esimAPDUTraceEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("VOCAT_ESIM_APDU_TRACE"))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+// esimTraceHex renders at most the first 32 bytes of a buffer, so a trace line
+// stays readable while still showing the header, Lc and the start of the data
+// field -- which is where a framing fault is visible.
+func esimTraceHex(data []byte) string {
+	if len(data) <= 32 {
+		return strings.ToUpper(hex.EncodeToString(data))
+	}
+	return strings.ToUpper(hex.EncodeToString(data[:32])) +
+		fmt.Sprintf("...(%d bytes)", len(data))
+}
+
 func (channel *euiccChannel) exchange(ctx context.Context, apdu []byte) ([]byte, int, error) {
+	payload, sw, err := channel.exchangeOnce(ctx, apdu)
+	if !esimAPDUTraceEnabled() || channel.manager == nil || channel.manager.logger == nil {
+		return payload, sw, err
+	}
+	// Lc/Le are reported as parsed rather than as raw bytes, because the whole
+	// class of bug here is a command whose declared length and actual length
+	// disagree.
+	attributes := []any{
+		"device", channel.id,
+		"transport", channel.transportName(),
+		"logical_channel", channel.channel,
+		"command", esimTraceHex(apdu),
+		"command_len", len(apdu),
+		"has_le", apduHasLe(apdu),
+	}
+	if len(apdu) >= 5 {
+		attributes = append(attributes, "lc_or_le", int(apdu[4]))
+	}
+	if err != nil {
+		attributes = append(attributes, "error", err.Error())
+	} else {
+		attributes = append(attributes,
+			"sw", fmt.Sprintf("%04X", sw), "response_len", len(payload))
+	}
+	channel.manager.logger.Info("esim apdu", attributes...)
+	return payload, sw, err
+}
+
+func (channel *euiccChannel) exchangeOnce(ctx context.Context, apdu []byte) ([]byte, int, error) {
 	if channel.qmiSession != nil {
 		raw, err := channel.qmiSession.SendAPDU(ctx, channel.qmiSlot, byte(channel.channel), apdu)
 		if err != nil {
