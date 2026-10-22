@@ -282,9 +282,14 @@ func (s *Service) Logout(ctx context.Context, sessionToken string) error {
 	return nil
 }
 
-// apiTokenPrefix marks a raw token as a VoCat API token so it is
-// recognizable (e.g. in logs or config files) without decoding it.
-const apiTokenPrefix = "vocat_at_"
+// apiTokenMinLength and apiTokenMaxLength bound what is worth a database
+// lookup. Deliberately loose rather than an equality test on 43: a token
+// issued before the "vocat_at_" prefix was dropped is 52 characters and must
+// still be accepted.
+const (
+	apiTokenMinLength = 20
+	apiTokenMaxLength = 256
+)
 
 // DefaultAPITokenTTL is applied by callers that do not pick their own
 // lifetime (the CLI's --ttl flag, for example).
@@ -312,7 +317,11 @@ func (s *Service) CreateAPIToken(ctx context.Context, name string, ttl time.Dura
 	if err != nil {
 		return "", APITokenInfo{}, err
 	}
-	rawToken := apiTokenPrefix + secret
+	// The raw token is the secret and nothing else. It used to carry a
+	// "vocat_at_" prefix so a leaked token was recognisable on sight and to
+	// secret scanners; that was removed by request. Tokens minted before the
+	// change keep working -- see AuthenticateAPIToken.
+	rawToken := secret
 	expiresAt := time.Now().UTC().Add(ttl)
 	record, err := s.store.CreateAPIToken(ctx, name, hashToken(rawToken), expiresAt)
 	if err != nil {
@@ -331,7 +340,17 @@ func (s *Service) CreateAPIToken(ctx context.Context, name string, ttl time.Dura
 // valid token always authenticates as the current admin. Expired tokens are
 // deleted so ListAPITokens does not accumulate dead rows.
 func (s *Service) AuthenticateAPIToken(ctx context.Context, rawToken string) (Principal, error) {
-	if rawToken == "" || !strings.HasPrefix(rawToken, apiTokenPrefix) {
+	// A token is looked up by the hash of exactly the string presented, and
+	// nothing here rewrites it, so a token minted while the "vocat_at_"
+	// prefix existed still authenticates with its prefix attached: its stored
+	// hash covers the whole string including those nine bytes. Stripping a
+	// prefix here instead would have invalidated every token already issued.
+	//
+	// The length bounds replace the prefix test as the cheap reject for
+	// something that is plainly not a token -- an empty header, a session
+	// cookie, a JWT -- and are wide enough for both forms: 43 characters for
+	// a current token (32 random bytes, base64url) and 52 for a prefixed one.
+	if len(rawToken) < apiTokenMinLength || len(rawToken) > apiTokenMaxLength {
 		return Principal{}, ErrUnauthorized
 	}
 	record, err := s.store.APITokenByHash(ctx, hashToken(rawToken))

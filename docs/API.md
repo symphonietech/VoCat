@@ -124,19 +124,24 @@ running service uses):
 
 ```bash
 vocat api-token create --name "my-integration" --ttl 720h   # 720h = 30 days
-# -> prints the raw token once: vocat_at_...  (it is never shown again)
+# -> prints the raw token once: 43 base64url characters, no prefix
+#    (it is never shown again)
 
 vocat api-token list
 vocat api-token revoke <id>
 ```
 
+The token carries no prefix. Tokens issued by an older build began with
+`vocat_at_` and remain valid exactly as printed -- a token is matched by the
+hash of the whole string, so nothing needs reissuing.
+
 Use it as:
 
 ```bash
-curl -s -H "Authorization: Bearer vocat_at_XXXXXXXXXXXXXXXXXXXX" \
+curl -s -H "Authorization: Bearer XXXXXXXXXXXXXXXXXXXX" \
   http://localhost:7575/api/devices
 
-curl -s -X POST -H "Authorization: Bearer vocat_at_XXXXXXXXXXXXXXXXXXXX" \
+curl -s -X POST -H "Authorization: Bearer XXXXXXXXXXXXXXXXXXXX" \
   -H "Content-Type: application/json" \
   -d '{"device_id":"modem-1","phone":"+15551234567","message":"hi"}' \
   http://localhost:7575/api/sms/send

@@ -194,8 +194,14 @@ func TestCreateAndAuthenticateAPIToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateAPIToken() error = %v", err)
 	}
-	if !strings.HasPrefix(rawToken, apiTokenPrefix) {
-		t.Fatalf("raw token = %q, want prefix %q", rawToken, apiTokenPrefix)
+	// The token is the secret alone. The "vocat_at_" prefix it used to carry
+	// was removed by request, so assert its absence rather than leaving the
+	// format unpinned -- otherwise a prefix could creep back unnoticed.
+	if strings.Contains(rawToken, "_at_") || strings.HasPrefix(rawToken, "vocat") {
+		t.Fatalf("raw token = %q, want no prefix", rawToken)
+	}
+	if len(rawToken) != 43 {
+		t.Fatalf("raw token length = %d, want 43 (32 random bytes, base64url)", len(rawToken))
 	}
 	if info.Name != "ci script" {
 		t.Fatalf("info.Name = %q", info.Name)
@@ -209,8 +215,14 @@ func TestCreateAndAuthenticateAPIToken(t *testing.T) {
 		t.Fatalf("principal = %+v, want admin", principal)
 	}
 
-	if _, err := service.AuthenticateAPIToken(ctx, "vocat_at_not-a-real-token"); !errors.Is(err, ErrUnauthorized) {
-		t.Fatalf("AuthenticateAPIToken(garbage) error = %v, want ErrUnauthorized", err)
+	for name, candidate := range map[string]string{
+		"legacy-shaped but unknown": "vocat_at_not-a-real-token-padded-out-to-length",
+		"bare but unknown":          "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+		"too short to be a token":   "short",
+	} {
+		if _, err := service.AuthenticateAPIToken(ctx, candidate); !errors.Is(err, ErrUnauthorized) {
+			t.Fatalf("AuthenticateAPIToken(%s) error = %v, want ErrUnauthorized", name, err)
+		}
 	}
 	if _, err := service.AuthenticateAPIToken(ctx, ""); !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("AuthenticateAPIToken(empty) error = %v, want ErrUnauthorized", err)
@@ -265,5 +277,35 @@ func TestCreateAPITokenValidatesInput(t *testing.T) {
 	}
 	if _, _, err := service.CreateAPIToken(ctx, "name", 0); err == nil {
 		t.Fatal("CreateAPIToken() with non-positive ttl should fail")
+	}
+}
+
+// A token issued while the "vocat_at_" prefix existed must keep working. Its
+// stored hash covers the whole string, prefix included, so validation has to
+// hash exactly what the caller presents and must not strip anything. Removing
+// the prefix from minting is not allowed to invalidate credentials already in
+// use somewhere.
+func TestAuthenticateAPITokenAcceptsALegacyPrefixedToken(t *testing.T) {
+	ctx := context.Background()
+	service := newTestService(t)
+
+	// Mint the way the old code did: prefix + secret, hashed together.
+	secret, err := randomToken()
+	if err != nil {
+		t.Fatalf("randomToken: %v", err)
+	}
+	legacy := "vocat_at_" + secret
+	if _, err := service.store.CreateAPIToken(
+		ctx, "issued before the prefix was dropped",
+		hashToken(legacy), time.Now().UTC().Add(time.Hour)); err != nil {
+		t.Fatalf("CreateAPIToken: %v", err)
+	}
+
+	principal, err := service.AuthenticateAPIToken(ctx, legacy)
+	if err != nil {
+		t.Fatalf("AuthenticateAPIToken(legacy) error = %v, want success", err)
+	}
+	if principal.Username != "admin" {
+		t.Fatalf("principal = %+v, want admin", principal)
 	}
 }
