@@ -619,7 +619,7 @@ export default function SmsPage() {
   useEffect(() => () => clearLongPress(), [clearLongPress]);
 
   return (
-    <div ref={pageRef} className="sms-page flex h-[calc(100vh-140px)] flex-col">
+    <div ref={pageRef} className="sms-page flex flex-col">
       <PageHeader
         title={t("短信功能检测")}
         subtitle={t("通过收发测试验证模组 SMS 收发功能是否正常")}
@@ -665,11 +665,15 @@ export default function SmsPage() {
         ) : null}
         <div className="sms-main-layout">
           {isDesktop ? (
-            <div className="flex flex-col border-r border-gray-100 dark:border-white/10">
+            <div className="flex min-h-0 flex-col border-r border-gray-100 dark:border-white/10">
+              {/* min-h-0 so this column can be shorter than its device list,
+                  which then scrolls inside it. ContactList and ThreadPanel
+                  already had it; this was the one column without, so with
+                  enough devices it pushed the row past the card. */}
               <div className="border-b border-gray-100 p-4 dark:border-white/10">
                 <div className="text-xs font-bold uppercase tracking-wider text-gray-500">{t("设备")}</div>
               </div>
-              <div className="space-y-1 overflow-auto p-3">
+              <div className="min-h-0 flex-1 space-y-1 overflow-auto p-3">
                 {deviceFilters.map((d) => (
                   <button
                     key={d.id}

@@ -417,8 +417,26 @@ html.dark .glass-modal {
 }
 
 /* ---- SMS page ---- */
-.sms-page { container-type: inline-size; }
-.sms-main-layout { display: grid; grid-template-columns: minmax(0, 1fr); height: 100%; min-height: 0; }
+/* 100vh is the largest viewport on a phone -- the one with the browser toolbar
+   hidden -- so with the toolbar showing, the bottom of the page sat behind it
+   and the reply box with it. dvh tracks the toolbar; vh stays as the fallback
+   for browsers without it, the same pattern used for the modal above. */
+.sms-page { container-type: inline-size; height: calc(100vh - 140px); }
+@supports (height: 100dvh) {
+  .sms-page { height: calc(100dvh - 140px); }
+}
+/* The single row is pinned to the card's height. Left implicit, it was an
+   auto track, whose minimum is the tallest column's content: with enough
+   devices in the left column (sixteen did it at 900px) the row grew past the
+   card, every column stretched with it, and the card's overflow:hidden cut off
+   the bottom of the thread -- the newest messages and the reply box. A
+   minmax(0, 1fr) track has no content-based minimum, so a long column scrolls
+   inside itself instead of making the row taller. */
+.sms-main-layout {
+  display: grid; grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  height: 100%; min-height: 0;
+}
 .sms-msg-wrapper { width: 100%; max-width: min(620px, 88%); }
 .sms-delete-trigger { width: 28px; height: 28px; padding: 0; }
 .sms-thread-row { position: relative; }
