@@ -14,7 +14,12 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 28
+// 31, not upstream's 27: this fork's migrations 25-28 were already applied to
+// live databases, so upstream's three new ones are appended as 29-31 rather
+// than renumbered into 25-27. Renumbering ours instead would leave a database
+// sitting at user_version 28 skipping straight past them, and it would never
+// get the automatic_tasks rebuild, revert_profile or sms_raw_records at all.
+const schemaVersion = 31
 
 var ErrNotFound = errors.New("store: not found")
 
@@ -23,6 +28,11 @@ type Store struct {
 	db           *sql.DB
 	logMu        sync.Mutex
 	logClearedAt time.Time
+	logMinLevel  string
+
+	startupSMSID  int64 // see StartupSMSMessageID
+	smsInsertedMu sync.Mutex
+	smsInserted   chan struct{} // see SMSInserted
 }
 
 type Admin struct {
@@ -80,7 +90,12 @@ func Open(ctx context.Context, path string) (*Store, error) {
 			return closeOnError(fmt.Errorf("secure sqlite file: %w", err))
 		}
 	}
-	return &Store{db: db}, nil
+	s := &Store{db: db}
+	// Captured before this process can save an SMS; see StartupSMSMessageID.
+	if s.startupSMSID, err = s.LatestSMSMessageID(ctx); err != nil {
+		return closeOnError(err)
+	}
+	return s, nil
 }
 
 func prepareDatabasePath(path string) error {
@@ -129,7 +144,10 @@ func migrate(ctx context.Context, db *sql.DB) error {
 					(nextVersion == 16 && strings.Contains(statement, "ADD COLUMN sim_pin")) ||
 					(nextVersion == 19 && strings.Contains(statement, "ADD COLUMN")) ||
 					(nextVersion == 23 && strings.Contains(statement, "ADD COLUMN")) ||
-					(nextVersion == 28 && strings.Contains(statement, "ADD COLUMN mbn_profile"))
+					(nextVersion == 28 && strings.Contains(statement, "ADD COLUMN mbn_profile")) ||
+					// Upstream guards this at 26, where it put the migration.
+					// Here it is 30, for the reason given on schemaVersion.
+					(nextVersion == 30 && strings.Contains(statement, "ADD COLUMN revert_profile"))
 				if duplicateAdditiveColumn && strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
 					continue
 				}

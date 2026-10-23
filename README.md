@@ -24,7 +24,7 @@
 
 **English** | [العربية](docs/README.ar.md) | [简体中文](docs/README.zh-CN.md) | [繁體中文](docs/README.zh-TW.md) | [Français](docs/README.fr.md) | [Русский](docs/README.ru.md) | [Español](docs/README.es.md) | [日本語](docs/README.ja.md)
 
-Vocat is an open-source web control panel and engineering toolkit for Quectel EC20/EC25-class cellular modems. It combines modem discovery, live radio status, AT and USSD terminals, SMS, WiFi Calling, eSIM management, network selection, proxy routing, notifications, audit logs, and release automation in one self-contained service.
+Vocat is an open-source web control panel and engineering toolkit for Quectel EC20/EC25-class and China Mobile ML307 series cellular modems. It combines modem discovery, live radio status, AT and USSD terminals, SMS, WiFi Calling, eSIM management, network selection, proxy routing, notifications, audit logs, and release automation in one self-contained service.
 
 The backend is written in Go, the interface is built with React and TypeScript, and the production frontend is embedded into the Go binary. A single executable contains the web application and uses SQLite for persistent state.
 
@@ -38,7 +38,7 @@ The backend is written in Go, the interface is built with React and TypeScript, 
 | Area | What Vocat provides |
 | --- | --- |
 | Device management | Automatic serial/USB discovery, multiple modem support, friendly device names, live overview updates, module restart, flight mode, and USB networking mode controls. |
-| Radio and network | Registration status, operator, signal metrics, RSRP/RSRQ/SINR, network mode, band, channel, operator scanning, and automatic or manual network selection. |
+| Radio and network | Registration status, operator, signal metrics, RSRP/RSRQ/SINR, network mode, band, channel, operator scanning, automatic or manual network selection, and LTE cell querying and single-cell lock/unlock (EARFCN/PCI). |
 | AT and USSD | Interactive AT terminal, command history, raw modem responses, USSD start/continue/cancel flows, and clear modem error reporting. |
 | SMS | Direct cellular and IMS SMS transmission, inbound synchronization, multipart handling, delivery reports, conversation history, unread state, timestamps, and per-message delivery status. |
 | WiFi Calling | IKEv2/ePDG tunnel setup, EAP-AKA authentication, IMS registration, IMS SMS, IMS voice calls with browser audio, reconnect controls, status diagnostics, and per-device routing. |
@@ -53,12 +53,13 @@ The backend is written in Go, the interface is built with React and TypeScript, 
 
 ## Supported hardware
 
-Vocat targets Qualcomm-based Quectel modules that expose compatible AT, QMI, serial, and USB networking interfaces, including:
+Vocat targets Qualcomm-based Quectel and China Mobile ML307 series modules that expose compatible AT, QMI, serial, and USB networking interfaces, including:
 
 - Quectel EC20
 - Quectel EC25
 - Quectel EG25 family
 - Compatible EG600 and related modules
+- China Mobile ML307 series (e.g. ML307A-E5, various OEMs)
 
 Available features depend on the module firmware, USB composition, SIM/eSIM capabilities, host drivers, radio network, and carrier configuration.
 
@@ -189,7 +190,7 @@ network configuration, and devices added after the container starts. The
 
 This mode intentionally gives Vocat broad access to the host's devices and
 network stack. Use it only on a trusted Linux host. The automatic discovery
-identifies supported Quectel USB modems (USB vendor ID `2c7c`) and PCIe/MHI
+identifies supported Quectel USB modems (USB vendor ID `2c7c`) and China Mobile ML307 series modules by product string, and PCIe/MHI
 modems exposed through the Linux WWAN subsystem; it does not identify arbitrary
 modem layouts. Mapping only individual nodes with `--device`, such as
 `/dev/ttyUSB2`, `/dev/cdc-wdm0`, or `/dev/wwan0qmi0`, limits the container to
@@ -444,9 +445,16 @@ When Telegram notifications are enabled and both Chat ID and Admin ID are config
 /switch <device> <iccid>
 /wfc <device> <status|on|off|reconnect>
 /sms <device> <number> <message>
+/ussd <device> <code>
+/ussd_reply <session> <input>
+/ussd_cancel <session>
 ```
 
 Profile switching and SMS submission use one-time confirmation buttons. The bot does not expose eSIM download, delete, or rename commands.
+
+The web terminal and Telegram share USSD routing. With WiFi Calling enabled, requests use IMS/USSI and return a readiness error until IMS registers, without falling back to cellular AT+CUSD. With WiFi Calling disabled, requests use cellular USSD. Menu replies and cancellation stay bound to the original device and dialog. Cancellation errors are reported and retain the session for retry; an uncertain submission is never automatically resubmitted over another channel.
+
+USSI dialog handling follows [3GPP TS 24.390](https://www.etsi.org/deliver/etsi_ts/124300_124399/124390/18.00.00_60/ts_124390v180000p.pdf). A failed BYE retains a cancellation record, but further menu input is blocked once cancellation has started ([RFC 3261, section 15.1.1](https://www.rfc-editor.org/rfc/rfc3261.html#section-15.1.1)).
 
 ## Updating
 

@@ -3,6 +3,7 @@ package pcsc
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"strings"
 	"testing"
@@ -118,5 +119,129 @@ func TestSnapshotRejectsPhysicalReaderUntilPCSCDIsReady(t *testing.T) {
 	snapshot, err := service.Snapshot(context.Background(), Selector{USBPath: "2-1"}, "")
 	if !errors.Is(err, ErrUnavailable) || snapshot.Reader.USBPath != "2-1" {
 		t.Fatalf("Snapshot() = %#v, %v", snapshot, err)
+	}
+}
+
+type scriptedBackend struct {
+	card Card
+}
+
+func (b *scriptedBackend) Readers(context.Context) ([]Reader, error) {
+	return []Reader{{Name: "Test Reader", USBPath: "1-1", CardPresent: true}}, nil
+}
+
+func (b *scriptedBackend) Open(context.Context, Selector) (Card, error) {
+	return b.card, nil
+}
+
+func TestSelectAKAApplicationPreferences(t *testing.T) {
+	usimRecord := []byte{0x61, 0x12, 0x4F, 0x10, 0xA0, 0x00, 0x00, 0x00, 0x87, 0x10, 0x02, 0xFF, 0xFF, 0xFF, 0xFF, 0x89, 0x00, 0x00, 0x01, 0x00}
+	isimRecord := []byte{0x61, 0x12, 0x4F, 0x10, 0xA0, 0x00, 0x00, 0x00, 0x87, 0x10, 0x04, 0xFF, 0xFF, 0xFF, 0xFF, 0x89, 0x00, 0x00, 0x01, 0x00}
+
+	t.Run("prefers USIM by default", func(t *testing.T) {
+		card := &scriptedCard{
+			replies: []scriptedReply{
+				{sw: 0x9000},                   // select MF
+				{sw: 0x9000},                   // select EF_DIR
+				{data: usimRecord, sw: 0x9000}, // record 1: USIM
+				{data: isimRecord, sw: 0x9000}, // record 2: ISIM
+				{sw: 0x6A83},                   // record 3: end of file
+				{sw: 0x9000},                   // select application
+			},
+		}
+		aid, app, err := selectAKAApplication(context.Background(), card, "")
+		if err != nil {
+			t.Fatalf("selectAKAApplication: %v", err)
+		}
+		if app != "USIM" || !strings.HasPrefix(strings.ToUpper(hex.EncodeToString(aid)), usimAIDPrefix) {
+			t.Fatalf("app = %s, aid = %X", app, aid)
+		}
+	})
+
+	t.Run("selects ISIM when preference is isim_strict", func(t *testing.T) {
+		card := &scriptedCard{
+			replies: []scriptedReply{
+				{sw: 0x9000},                   // select MF
+				{sw: 0x9000},                   // select EF_DIR
+				{data: usimRecord, sw: 0x9000}, // record 1: USIM
+				{data: isimRecord, sw: 0x9000}, // record 2: ISIM
+				{sw: 0x6A83},                   // record 3: end of file
+				{sw: 0x9000},                   // select application
+			},
+		}
+		aid, app, err := selectAKAApplication(context.Background(), card, "isim_strict")
+		if err != nil {
+			t.Fatalf("selectAKAApplication: %v", err)
+		}
+		if app != "ISIM" || !strings.HasPrefix(strings.ToUpper(hex.EncodeToString(aid)), isimAIDPrefix) {
+			t.Fatalf("app = %s, aid = %X", app, aid)
+		}
+	})
+
+	t.Run("returns ErrISIMUnavailable when isim_strict card lacks ISIM", func(t *testing.T) {
+		card := &scriptedCard{
+			replies: []scriptedReply{
+				{sw: 0x9000},                   // select MF
+				{sw: 0x9000},                   // select EF_DIR
+				{data: usimRecord, sw: 0x9000}, // record 1: USIM
+				{sw: 0x6A83},                   // record 2: end of file
+			},
+		}
+		_, _, err := selectAKAApplication(context.Background(), card, "isim_strict")
+		if !errors.Is(err, ErrISIMUnavailable) {
+			t.Fatalf("want ErrISIMUnavailable, got %v", err)
+		}
+	})
+}
+
+func TestAuthenticateWithPreference(t *testing.T) {
+	usimRecord := []byte{0x61, 0x12, 0x4F, 0x10, 0xA0, 0x00, 0x00, 0x00, 0x87, 0x10, 0x02, 0xFF, 0xFF, 0xFF, 0xFF, 0x89, 0x00, 0x00, 0x01, 0x00}
+	isimRecord := []byte{0x61, 0x12, 0x4F, 0x10, 0xA0, 0x00, 0x00, 0x00, 0x87, 0x10, 0x04, 0xFF, 0xFF, 0xFF, 0xFF, 0x89, 0x00, 0x00, 0x01, 0x00}
+	iccidBytes := []byte{0x98, 0x10, 0x32, 0x54, 0x76, 0x98, 0x10, 0x32, 0x54, 0xF6}
+
+	akaSuccess := []byte{0xDB, 0x08, 1, 2, 3, 4, 5, 6, 7, 8, 0x10}
+	akaSuccess = append(akaSuccess, bytes.Repeat([]byte{0xAA}, 16)...)
+	akaSuccess = append(akaSuccess, 0x10)
+	akaSuccess = append(akaSuccess, bytes.Repeat([]byte{0xBB}, 16)...)
+
+	card := &scriptedCard{
+		replies: []scriptedReply{
+			{sw: 0x9000},                   // select MF (readICCID)
+			{sw: 0x9000},                   // select EF_ICCID
+			{data: iccidBytes, sw: 0x9000}, // read binary EF_ICCID
+			{sw: 0x9000},                   // select MF (selectAKAApplication)
+			{sw: 0x9000},                   // select EF_DIR
+			{data: usimRecord, sw: 0x9000}, // record 1: USIM
+			{data: isimRecord, sw: 0x9000}, // record 2: ISIM
+			{sw: 0x6A83},                   // record 3: end of EF_DIR
+			{sw: 0x9000},                   // select application (ISIM)
+			{data: akaSuccess, sw: 0x9000}, // authenticate APDU
+		},
+	}
+
+	service := NewWithBackend(&scriptedBackend{card: card})
+	res, err := service.AuthenticateWithPreference(
+		context.Background(),
+		Selector{USBPath: "1-1"},
+		"8901234567890123456",
+		"",
+		AKAChallenge{},
+		"isim_strict",
+	)
+	if err != nil {
+		t.Fatalf("AuthenticateWithPreference: %v", err)
+	}
+	if len(res.RES) != 8 || len(res.CK) != 16 || len(res.IK) != 16 {
+		t.Fatalf("unexpected AKA result: %#v", res)
+	}
+
+	// Verify the selected application was ISIM (A0000000871004...)
+	// APDU index 8 is SELECT application: 00 A4 04 04 10 <AID> 00
+	if len(card.calls) < 9 {
+		t.Fatalf("card received only %d calls", len(card.calls))
+	}
+	selectAPDU := card.calls[8]
+	if !bytes.Contains(selectAPDU, []byte{0xA0, 0x00, 0x00, 0x00, 0x87, 0x10, 0x04}) {
+		t.Fatalf("expected ISIM AID in SELECT APDU, got: % X", selectAPDU)
 	}
 }

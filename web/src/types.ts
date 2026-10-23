@@ -1,6 +1,6 @@
 export type ApiStatus = "ok" | "error";
 
-export type DeviceType = "wifi_410" | "dji_4g" | "pcie_ec20_ec25" | "usb_sim_reader";
+export type DeviceType = "wifi_410" | "dji_4g" | "ml307" | "pcie_ec20_ec25" | "usb_sim_reader";
 
 export interface Session {
   authenticated: boolean;
@@ -26,6 +26,29 @@ export interface ApiErrorBody {
   requestId?: string;
   warning?: string;
   busy?: boolean;
+}
+
+export interface CellLockTarget {
+  earfcn: number;
+  pci: number;
+}
+
+export interface CellLockStatus {
+  target: CellLockTarget | null;
+}
+
+export interface CellInfo extends CellLockTarget {
+  plmn: string;
+  source: "serving" | "neighbor";
+  rsrp?: number;
+  rsrq?: number;
+  rssi?: number;
+  sinr?: number;
+}
+
+export interface DeviceCells {
+  items: CellInfo[];
+  neighborsStatus: "available" | "unsupported" | "unavailable";
 }
 
 export interface VoWiFiRuntime {
@@ -120,6 +143,7 @@ export interface DeviceListItem {
   id: string;
   name: string;
   deviceType: DeviceType;
+  supportsCellLock: boolean;
   running: boolean;
   healthy: boolean;
   controlOnline: boolean;
@@ -336,6 +360,8 @@ export interface SMSMessage {
   peer: string;
   direction: "inbound" | "outbound" | "received" | "sent";
   body?: string;
+  decodeStatus?: "decoded" | "empty" | "failed";
+  decodeError?: string;
   content?: string;
   sender?: string;
   recipient?: string;
@@ -449,14 +475,19 @@ export interface EsimOverview {
   profiles: EsimEuiccProfiles[];
 }
 
+export type NotificationConfig<T = Record<string, unknown>> = T & {
+  deviceIds?: string[] | null; // Missing in older settings; null means all devices.
+};
+
 export interface NotificationSettings {
-  telegram: Record<string, unknown>;
-  webhook: Record<string, unknown>;
-  bark: Record<string, unknown>;
-  email: Record<string, unknown>;
-  pushplus: Record<string, unknown>;
-  wecom: Record<string, unknown>;
-  lark: Record<string, unknown>;
+  meow: NotificationConfig<{ enabled: boolean; nickname: string; url: string; imgUrl: string }>;
+  telegram: NotificationConfig;
+  webhook: NotificationConfig;
+  bark: NotificationConfig;
+  email: NotificationConfig;
+  pushplus: NotificationConfig;
+  wecom: NotificationConfig;
+  lark: NotificationConfig;
 }
 
 // 网络访问控制策略：默认仅放行内网网段，可切换到对公网开放。
@@ -473,6 +504,7 @@ export interface LoggingSettings {
   mode: "unlimited" | "count" | "days";
   count: number;
   days: number;
+  level: "debug" | "info" | "warn" | "error";
   storedLogs: number;
   maxLogs: number;
 }

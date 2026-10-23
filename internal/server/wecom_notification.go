@@ -22,6 +22,9 @@ var wecomTemplateVariableNames = []string{
 	"timestamp",
 	"content",
 	"number",
+	"local_phone",
+	"iccid",
+	"recipient",
 	"device_id",
 	"device_name",
 	"device_label",
@@ -115,6 +118,9 @@ func wecomSMSValues(message smsNotification) wecomTemplateValues {
 		"timestamp":    message.Time.UTC().Format(time.RFC3339),
 		"content":      message.Content,
 		"number":       message.Number,
+		"local_phone":  message.LocalPhone,
+		"iccid":        message.ICCID,
+		"recipient":    message.Recipient(),
 		"device_id":    message.DeviceID,
 		"device_name":  message.DeviceName,
 		"device_label": message.DeviceLabel,
@@ -160,7 +166,10 @@ func validateWecomNotificationConfig(config map[string]any) error {
 	return err
 }
 
-func sendWecomNotification(ctx context.Context, config map[string]any, values wecomTemplateValues) error {
+func sendWecomNotification(ctx context.Context, config map[string]any, deviceID *string, values wecomTemplateValues) error {
+	if deviceID != nil && !notificationMatchesDevice(configStrings(config, "device_ids"), *deviceID) {
+		return nil
+	}
 	payload, err := renderWecomPayload(configString(config, "payload_template"), values)
 	if err != nil {
 		return err
@@ -202,5 +211,5 @@ func sendWecomNotification(ctx context.Context, config map[string]any, values we
 }
 
 func sendWecomNotificationTest(ctx context.Context, config map[string]any) error {
-	return sendWecomNotification(ctx, config, wecomTestValues(time.Now()))
+	return sendWecomNotification(ctx, config, nil, wecomTestValues(time.Now()))
 }

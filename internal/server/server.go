@@ -83,7 +83,7 @@ type Server struct {
 	maxRequestBodyBytes       int64
 	startedAt                 time.Time
 	handler                   http.Handler
-	websheets                 *websheetManager
+	e911Sessions              *e911SessionManager
 	accessMu                  sync.RWMutex
 	access                    parsedAccessConfig
 	loginLimiter              *loginRateLimiter
@@ -105,6 +105,7 @@ type Server struct {
 	lookupPublicIP            func(context.Context, string) (exportproxy.PublicIPInfo, error)
 	automaticTasks            *automaticTaskScheduler
 	smsSyncMu                 sync.Mutex
+	esimSIMResetAttempted     map[string]bool // 由 smsSyncMu 保护；读取成功后允许下一次故障恢复。
 	smsStorageMu              sync.Mutex
 	smsStorage                map[string]device.SMSStorageUsage
 	cellularDataOnce          sync.Once
@@ -170,7 +171,7 @@ func New(options Options) (*Server, error) {
 		secureCookies:       options.SecureCookies,
 		maxRequestBodyBytes: options.MaxRequestBodyBytes,
 		startedAt:           time.Now().UTC(),
-		websheets:           newWebsheetManager(),
+		e911Sessions:        newE911SessionManager(),
 		loginLimiter:        newLoginRateLimiter(),
 		extensions:          options.Extensions,
 		exportProxy:         options.ExportProxy,
@@ -194,6 +195,7 @@ func New(options Options) (*Server, error) {
 	server.cellularDataRuntime()
 	server.loadAccessConfig(context.Background())
 	server.loadUILanguage(context.Background())
+	server.loadLoggingConfig(context.Background())
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", server.handleLiveness)
@@ -205,7 +207,6 @@ func New(options Options) (*Server, error) {
 	mux.HandleFunc("/api/auth/logout", server.handleLogout)
 	mux.HandleFunc("/api", server.handleAPI)
 	mux.HandleFunc("/api/", server.handleAPI)
-	mux.HandleFunc("/websheets/", server.handleWebsheet)
 	mux.HandleFunc("/plugin-assets/", server.handlePluginAsset)
 	mux.HandleFunc("/", server.handleSPA)
 
@@ -231,6 +232,10 @@ type VoWiFiSMSSyncController interface {
 type VoWiFiMaintenanceController interface {
 	BeginMaintenance(string) error
 	EndMaintenance(string)
+}
+
+type VoWiFiUnregisterController interface {
+	Unregister(context.Context, string) error
 }
 
 type VoWiFiCallController interface {
@@ -724,9 +729,8 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "same-origin")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(self), geolocation=()")
-		if strings.HasPrefix(r.URL.Path, "/websheets/") || strings.HasPrefix(r.URL.Path, "/plugin-assets/") {
-			// The self-hosted E911 websheet is embedded in an iframe by the SPA, so
-			// it must be frameable same-origin. Every other route stays DENY.
+		if strings.HasPrefix(r.URL.Path, "/plugin-assets/") {
+			// Local plugin frames must be frameable same-origin.
 			w.Header().Set("X-Frame-Options", "SAMEORIGIN")
 			w.Header().Set(
 				"Content-Security-Policy",

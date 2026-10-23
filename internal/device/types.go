@@ -89,6 +89,23 @@ const (
 	PhoneSourceEFMSISDN  = "usim_ef_msisdn"
 )
 
+type servingMetrics struct {
+	PLMN       string
+	AccessTech string
+	Band       string
+	Channel    string
+	RSSI       *int
+	RSRP       *int
+	RSRQ       *int
+	SINR       *int
+}
+
+type servingRecord struct {
+	servingMetrics
+	PCI      string
+	Complete bool
+}
+
 type Snapshot struct {
 	DeviceID           string      `json:"deviceId"`
 	Port               string      `json:"port"`
@@ -162,6 +179,7 @@ const (
 	SMSEncodingGB18030  SMSEncoding = "gb18030_pdu"
 	SMSEncodingLatin1   SMSEncoding = "latin1_pdu"
 	SMSEncoding8BitPDU  SMSEncoding = "8bit_pdu"
+	SMSEncodingWAPPush  SMSEncoding = "wap_push"
 	SMSEncodingUnknown  SMSEncoding = "unknown"
 )
 

@@ -127,7 +127,7 @@ func (s *Server) NotifyIncomingCall(ctx context.Context, notification IncomingCa
 	}
 
 	destCtx := s.notificationDestinationContext(ctx)
-	for _, channel := range []string{"telegram", "bark", "email", "pushplus", "webhook", "wecom", "lark"} {
+	for _, channel := range notificationChannels {
 		setting, err := s.store.NotificationSetting(destCtx, channel)
 		if errors.Is(err, store.ErrNotFound) || (err == nil && !setting.Enabled) {
 			continue
@@ -153,22 +153,26 @@ func (s *Server) NotifyIncomingCall(ctx context.Context, notification IncomingCa
 	}
 }
 
+// sendCallNotification 按渠道发送来电信息，MeoW 与其他独立标题渠道复用 DetailText。
 func sendCallNotification(ctx context.Context, channel string, config map[string]any, message IncomingCallNotification) error {
+	if channel == "meow" {
+		return sendMeowNotification(ctx, config, &message.DeviceID, message.Title(), message.DetailText())
+	}
 	switch channel {
 	case "telegram":
-		return sendTelegramTextNotification(ctx, config, message.Text())
+		return sendTelegramTextNotification(ctx, config, message.DeviceID, message.Text())
 	case "bark":
-		return sendBarkTextNotification(ctx, config, message.Title(), message.DetailText())
+		return sendBarkTextNotification(ctx, config, message.DeviceID, message.Title(), message.DetailText())
 	case "email":
-		return sendEmailTextNotification(ctx, config, message.Title()+" - "+message.DeviceLabel, message.Text())
+		return sendEmailTextNotification(ctx, config, message.DeviceID, message.Title()+" - "+message.DeviceLabel, message.Text())
 	case "pushplus":
-		return sendPushplusTextNotification(ctx, config, message.Title(), message.DetailText())
+		return sendPushplusTextNotification(ctx, config, message.DeviceID, message.Title(), message.DetailText())
 	case "webhook":
 		return sendCallWebhookNotification(ctx, config, message)
 	case "wecom":
-		return sendWecomNotification(ctx, config, wecomCallValues(message))
+		return sendWecomNotification(ctx, config, &message.DeviceID, wecomCallValues(message))
 	case "lark":
-		return sendLarkNotification(ctx, config, larkCallValues(message))
+		return sendLarkNotification(ctx, config, &message.DeviceID, larkCallValues(message))
 	default:
 		return fmt.Errorf("unsupported notification channel %q", channel)
 	}
@@ -200,6 +204,9 @@ func renderCallWebhookTemplate(template string, message IncomingCallNotification
 }
 
 func sendCallWebhookNotification(ctx context.Context, config map[string]any, message IncomingCallNotification) error {
+	if !notificationMatchesDevice(configStrings(config, "device_ids"), message.DeviceID) {
+		return nil
+	}
 	template := configString(config, "text_template")
 	rendered := renderCallWebhookTemplate(template, message)
 	payload, _ := json.Marshal(map[string]any{
@@ -306,7 +313,10 @@ func (s *Server) pollCellularCalls(ctx context.Context) {
 		return
 	}
 	for _, config := range devices {
-		if !config.NetworkEnabled {
+		// Native 410 firmware has no supported cellular call interface. Its
+		// VoWiFi calls arrive through SIP; polling CLCC while SIM/IMS is starting
+		// only produces ERROR and incorrectly poisons the modem health state.
+		if store.NormalizeDeviceType(config.DeviceType) == store.DeviceTypeWiFi410 {
 			continue
 		}
 		// If VoWiFi is active, incoming calls are handled directly by SIP INVITE in real time.

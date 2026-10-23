@@ -167,6 +167,9 @@ func TestSupportsUSSIContentType(t *testing.T) {
 	}{
 		{ussiContentType, true},
 		{"Application/Vnd.3gpp.Ussd; charset=binary", true},
+		{ussiXMLContentType, true},
+		{"application/vnd.3gpp.ussd+xml; charset=utf-8", true},
+		{"multipart/mixed; boundary=test-boundary", true},
 		{smsContentType, false},
 		{"text/plain", false},
 	} {
@@ -1052,38 +1055,91 @@ func serveOutboundUSSI(listener *net.UDPConn, nonce string, readyForClose chan<-
 		return err
 	}
 
+	// 1. Expect outbound INVITE for USSI dialog initiation (3GPP TS 24.390)
 	count, remote, err = listener.ReadFromUDP(packet)
 	if err != nil {
 		return err
 	}
 	message, err := parseSIPPacket(packet[:count])
 	if err != nil || message.Request == nil {
-		return fmt.Errorf("outbound MESSAGE parse: %v", err)
+		return fmt.Errorf("outbound INVITE parse: %v", err)
 	}
-	if message.Request.Method != "MESSAGE" ||
+	if message.Request.Method != "INVITE" ||
 		!strings.HasPrefix(message.Request.URI, "sip:") ||
-		strings.ToLower(message.Request.value("Content-Type")) != ussiContentType ||
-		message.Request.value("Request-Disposition") != "no-fork" ||
-		message.Request.value("Allow") != "MESSAGE" {
-		return fmt.Errorf("unexpected outbound MESSAGE %#v", message.Request)
+		!strings.Contains(message.Request.URI, "user=dialstring") ||
+		message.Request.value("Recv-Info") != ussiInfoPackage {
+		return fmt.Errorf("unexpected outbound INVITE %#v", message.Request)
 	}
-	_, _, text := extractUSSDString(message.Request.Body)
-	if text != "*100#" {
-		return fmt.Errorf("USSI text = %q, want *100#", text)
+	text, _, _, _, err := extractUSSDPayloadFromSIP(message.Request.Body, message.Request.value("Content-Type"))
+	if err != nil || text != "*100#" {
+		return fmt.Errorf("extracted USSI text = %q (err=%v), want *100#", text, err)
 	}
-	replyBody := buildUSSDBody("Reply")
-	reply := []byte(strings.Join([]string{
+
+	// 2. Network responds 200 OK to INVITE with SDP port 0
+	inviteCallID := message.Request.value("Call-ID")
+	inviteCSeq := message.Request.value("CSeq")
+	from := message.Request.value("From")
+	to := message.Request.value("To") + ";tag=server-tag-1"
+	contact := "<sip:as@127.0.0.1:5060>"
+	sdp := "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 0 RTP/AVP 96\r\n"
+	invite200 := []byte(strings.Join([]string{
 		"SIP/2.0 200 OK",
-		"Call-ID: " + message.Request.value("Call-ID"),
-		"CSeq: " + message.Request.value("CSeq"),
-		"Content-Type: application/vnd.3gpp.ussd",
-		"Content-Transfer-Encoding: binary",
-		fmt.Sprintf("Content-Length: %d", len(replyBody)), "", "",
-	}, "\r\n"))
-	reply = append(reply, replyBody...)
-	if _, err = listener.WriteToUDP(reply, remote); err != nil {
+		"Via: " + message.Request.value("Via"),
+		"From: " + from,
+		"To: " + to,
+		"Call-ID: " + inviteCallID,
+		"CSeq: " + inviteCSeq,
+		"Contact: " + contact,
+		"Content-Type: application/sdp",
+		fmt.Sprintf("Content-Length: %d", len(sdp)),
+		"", "",
+	}, "\r\n") + sdp)
+	if _, err = listener.WriteToUDP(invite200, remote); err != nil {
 		return err
 	}
+
+	// 3. UE sends ACK for 200 OK
+	count, remote, err = listener.ReadFromUDP(packet)
+	if err != nil {
+		return err
+	}
+	ackMsg, err := parseSIPPacket(packet[:count])
+	if err != nil || ackMsg.Request == nil || ackMsg.Request.Method != "ACK" {
+		return fmt.Errorf("expected ACK, got %#v", ackMsg)
+	}
+
+	// 4. Network sends BYE with application/vnd.3gpp.ussd+xml containing result
+	byeXML := `<?xml version="1.0" encoding="UTF-8"?><ussd-data xmlns="urn:oma:xml:ussd:ussd-data"><language>en</language><ussd-string>Reply</ussd-string></ussd-data>`
+	clientContact := headerURI(message.Request.value("Contact"))
+	if clientContact == "" {
+		clientContact = "sip:ec20@127.0.0.1:5060"
+	}
+	byeReq := []byte(strings.Join([]string{
+		"BYE " + clientContact + " SIP/2.0",
+		"Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bKbyesrv1",
+		"Max-Forwards: 70",
+		"From: " + to,
+		"To: " + from,
+		"Call-ID: " + inviteCallID,
+		"CSeq: 1 BYE",
+		"Content-Type: application/vnd.3gpp.ussd+xml",
+		fmt.Sprintf("Content-Length: %d", len(byeXML)),
+		"", "",
+	}, "\r\n") + byeXML)
+	if _, err = listener.WriteToUDP(byeReq, remote); err != nil {
+		return err
+	}
+
+	// 5. UE responds 200 OK to BYE
+	count, remote, err = listener.ReadFromUDP(packet)
+	if err != nil {
+		return err
+	}
+	byeResp, err := parseSIPPacket(packet[:count])
+	if err != nil || byeResp.Response == nil || byeResp.Response.StatusCode != 200 {
+		return fmt.Errorf("expected 200 OK for BYE, got %#v", byeResp)
+	}
+
 	close(readyForClose)
 
 	count, remote, err = listener.ReadFromUDP(packet)

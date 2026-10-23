@@ -469,16 +469,19 @@ func (session *Session) handleCallRequest(request *sipRequest, respond func([]by
 		}
 		return true
 	case "CANCEL", "BYE":
+		callID := strings.TrimSpace(request.value("Call-ID"))
+		session.callMu.Lock()
+		call := session.calls[callID]
+		session.callMu.Unlock()
+		if call == nil {
+			return false
+		}
 		response, err := buildSIPResponseWithBody(request, 200, session.fromTag, nil)
 		if err == nil {
 			_ = respond(response)
 		}
-		callID := strings.TrimSpace(request.value("Call-ID"))
 		if request.Method == "CANCEL" {
-			session.callMu.Lock()
-			call := session.calls[callID]
-			session.callMu.Unlock()
-			if call != nil && call.invite != nil && call.respond != nil {
+			if call.invite != nil && call.respond != nil {
 				if terminated, buildErr := buildSIPResponseWithBody(call.invite, 487, session.fromTag, nil); buildErr == nil {
 					_ = call.respond(terminated)
 				}

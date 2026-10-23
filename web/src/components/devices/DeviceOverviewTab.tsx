@@ -1,4 +1,6 @@
 import { useState } from "react";
+import { CellLockDialog } from "./CellLockDialog";
+import { useDeviceCellLock } from "./useDeviceCellLock";
 import { OverviewNetworkCard } from "./OverviewNetworkCard";
 import { OverviewVowifiCard } from "./OverviewVowifiCard";
 import { OverviewSimPanel } from "./OverviewSimPanel";
@@ -27,6 +29,9 @@ export function DeviceOverviewTab(props: DeviceOverviewTabProps) {
   const [operatorOpen, setOperatorOpen] = useState(false);
   const { device } = props;
 	const wifiCallingOnly = device.deviceType === "usb_sim_reader";
+  const supportsCellLock = device.supportsCellLock === true;
+  const cellLock = useDeviceCellLock(device.id, supportsCellLock);
+  const cellLocked = !!cellLock.status?.target;
 	const showNetworkDetails = !!device.developerEnabled && !wifiCallingOnly;
   return (
     <div className="space-y-4">
@@ -36,7 +41,8 @@ export function DeviceOverviewTab(props: DeviceOverviewTabProps) {
 		  {isVoWiFiInUse(device) && !(device.modem?.imei && device.modem?.simInserted === false) ? (
             <OverviewVowifiCard device={device} />
           ) : (
-            <OverviewNetworkCard device={device} onOpenOperatorSelection={() => setOperatorOpen(true)} />
+            <OverviewNetworkCard device={device} onOpenOperatorSelection={() => setOperatorOpen(true)}
+              onOpenCellLock={supportsCellLock ? cellLock.openDialog : undefined} cellLocked={cellLocked} />
           )}
         </div>
         <OverviewSimPanel
@@ -68,6 +74,7 @@ export function DeviceOverviewTab(props: DeviceOverviewTabProps) {
           onUpdated={props.onRefresh}
         />
       ) : null}
+      {supportsCellLock && cellLock.dialogOpen ? <CellLockDialog cellLock={cellLock} /> : null}
     </div>
   );
 }

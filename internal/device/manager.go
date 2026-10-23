@@ -33,7 +33,7 @@ type Manager struct {
 	uiccMu             sync.Mutex // serializes all multi-command UICC/APDU transactions
 	esimMu             sync.Mutex // serializes eSIM card access (list/switch/download)
 	esimRecoveryMu     sync.Mutex
-	esimRecoveries     map[string]chan struct{}
+	esimRecoveries     map[string]*esimRecovery
 	esimCacheMu        sync.RWMutex
 	esimCache          map[string]EsimInfo
 	discoverer         modem.Discoverer
@@ -50,11 +50,14 @@ type Manager struct {
 	networkEventSubscribers map[chan string]struct{}
 	deviceEventsMu          sync.Mutex
 	deviceEventSubscribers  map[chan DeviceLifecycleEvent]struct{}
+	smsArrivals             chan struct{}
 
 	qmiRadioOpener                qmiRadioSessionOpener
 	qmiDataOpener                 qmiDataSessionOpener
 	nativeQMIRegistrationMu       sync.Mutex
 	nativeQMIRegistrationInFlight map[string]struct{}
+	nativeQMISIMRecoveryMu        sync.Mutex
+	nativeQMISIMRecoveries        map[string]time.Time
 
 	started      bool
 	devices      map[string]*managedDevice
@@ -145,8 +148,11 @@ func NewManager(options Options) (*Manager, error) {
 	if options.Discoverer == nil {
 		options.Discoverer = modem.NewSystemDiscoverer()
 	}
+	smsArrivals := make(chan struct{}, 1)
 	if options.Opener == nil {
-		options.Opener = modem.SerialOpener{}
+		options.Opener = modem.SerialOpener{
+			SessionOptions: modem.SessionOptions{OnURC: signalSMSArrival(smsArrivals)},
+		}
 	}
 	if options.CommandTimeout <= 0 {
 		options.CommandTimeout = 3 * time.Second
@@ -181,10 +187,11 @@ func NewManager(options Options) (*Manager, error) {
 		nativeQMIRegistrationInFlight: make(map[string]struct{}),
 		networkEventSubscribers:       make(map[chan string]struct{}),
 		deviceEventSubscribers:        make(map[chan DeviceLifecycleEvent]struct{}),
+		smsArrivals:                   smsArrivals,
 
 		devices:        make(map[string]*managedDevice),
 		ussdSessions:   make(map[string]ussdSession),
-		esimRecoveries: make(map[string]chan struct{}),
+		esimRecoveries: make(map[string]*esimRecovery),
 		esimCache:      make(map[string]EsimInfo),
 	}, nil
 }
@@ -807,7 +814,12 @@ func (manager *Manager) ExecuteAT(
 	commandCtx, cancel := manager.withTimeout(ctx, manager.commandTimeout)
 	defer cancel()
 	response, err := client.Execute(commandCtx, command)
-	manager.setResult(id, state, nil, err)
+	// An unsupported CLCC query does not indicate an unhealthy control channel.
+	var commandErr *modem.CommandError
+	if !strings.EqualFold(strings.TrimSpace(command), "AT+CLCC") ||
+		!errors.As(err, &commandErr) || strings.TrimSpace(commandErr.Final) != "+CME ERROR: 4" {
+		manager.setResult(id, state, nil, err)
+	}
 	return response, err
 }
 
@@ -865,24 +877,36 @@ func (manager *Manager) Reboot(ctx context.Context, id string) error {
 		manager.setResult(id, state, nil, err)
 		return err
 	}
+	if err := manager.requireOnlineModemRestart(ctx, client); err != nil {
+		manager.setResult(id, state, nil, err)
+		return err
+	}
 	state.dataMu.Lock()
 	invalidateQMINetworkSession(state, manager.candidateFor(state))
 	state.dataMu.Unlock()
 	commandCtx, cancel := manager.withTimeout(ctx, manager.longTimeout)
 	defer cancel()
 	_, err = client.Execute(commandCtx, "AT+CFUN=1,1")
-	if closeErr := client.Close(); err == nil {
-		err = closeErr
+	if !isCommandInterrupted(err) {
+		if closeErr := client.Close(); err == nil {
+			err = closeErr
+		}
+		state.client = nil
 	}
-	state.client = nil
 	state.preFlightMode = nil
 	manager.clearSnapshot(id, state)
 	manager.setResult(id, state, nil, err)
 	return err
 }
 
+// Interrupted commands still own their late replies; reopening the port would
+// let those replies complete an unrelated command in the new session.
+func isCommandInterrupted(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, modem.ErrCommandTimeout)
+}
+
 // softResetForProfileSwitch resets the baseband SIM stack using a soft CFUN sequence
-// (AT+CFUN=0 -> AT+CFUN=1/4) instead of rebooting the entire hardware module (AT+CFUN=1,1).
+// (AT+CFUN=0 -> AT+CFUN=4) instead of rebooting the entire hardware module (AT+CFUN=1,1).
 // This causes the baseband to reload the new eSIM profile files within ~1-2 seconds
 // without disconnecting USB/PCIe or dropping serial communication ports.
 func (manager *Manager) softResetForProfileSwitch(ctx context.Context, id string) error {
@@ -900,27 +924,48 @@ func (manager *Manager) softResetForProfileSwitch(ctx context.Context, id string
 		manager.setResult(id, state, nil, err)
 		return err
 	}
+	return manager.softResetSIMLocked(ctx, id, state, client)
+}
+
+// softResetSIMLocked 要求持有 opMu，使模式验证与 SIM 重置不能被其他模组操作插入。
+func (manager *Manager) softResetSIMLocked(ctx context.Context, id string, state *managedDevice, client modem.Client) error {
 	state.dataMu.Lock()
 	invalidateQMINetworkSession(state, manager.candidateFor(state))
 	state.dataMu.Unlock()
-	commandCtx, cancel := manager.withTimeout(ctx, manager.commandTimeout)
+	commandCtx, cancel := context.WithTimeout(ctx, manager.commandTimeout)
 	defer cancel()
 
 	// 1. Cycle SIM interface to minimum functionality / clear cached SIM files
-	_, _ = client.Execute(commandCtx, "AT+CFUN=0")
+	if manager.logger != nil {
+		manager.logger.Info("recovering SIM with cellular RF disabled", "category", "hardware", "device_id", id,
+			"recovery_source", "sim_reset", "target_cfun", 4)
+	}
+	if _, err := client.Execute(commandCtx, "AT+CFUN=0"); err != nil {
+		// 超时或取消时不能确认 CFUN=0 是否已生效，仍尝试恢复到 RF 关闭的工作模式。
+		if isCommandInterrupted(err) {
+			reloadCtx, cancelReload := context.WithTimeout(context.WithoutCancel(ctx), manager.commandTimeout)
+			_, reloadErr := client.Execute(reloadCtx, "AT+CFUN=4")
+			cancelReload()
+			err = errors.Join(err, reloadErr)
+		}
+		err = fmt.Errorf("power down SIM for profile recovery: %w", err)
+		manager.clearSnapshot(id, state)
+		manager.setResult(id, state, nil, err)
+		return err
+	}
 
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
 	case <-time.After(500 * time.Millisecond):
 	}
 
-	// 2. Restore radio to trigger fresh USIM file reading
-	targetCFUN := "AT+CFUN=1"
-	if state.snapshot != nil && state.snapshot.FlightMode {
-		targetCFUN = "AT+CFUN=4"
-	}
-	_, err = client.Execute(commandCtx, targetCFUN)
+	// 2. Reload the USIM without enabling RF. Snapshots can be nil or partial
+	// during REFRESH; their zero-value FlightMode does not authorize CFUN=1.
+	// CFUN=0 成功后必须独立完成重新上电，不能因页面取消或原命令超时留在最低功能模式。
+	reloadCtx, cancelReload := context.WithTimeout(context.WithoutCancel(ctx), manager.commandTimeout)
+	defer cancelReload()
+	_, err := client.Execute(reloadCtx, "AT+CFUN=4")
+	err = errors.Join(ctx.Err(), err)
 
 	manager.clearSnapshot(id, state)
 	manager.setResult(id, state, nil, err)

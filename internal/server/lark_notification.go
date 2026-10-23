@@ -29,6 +29,9 @@ var larkTemplateVariableNames = []string{
 	"timestamp",
 	"content",
 	"number",
+	"local_phone",
+	"iccid",
+	"recipient",
 	"device_id",
 	"device_name",
 	"device_label",
@@ -176,6 +179,9 @@ func larkSMSValues(message smsNotification) larkTemplateValues {
 		"timestamp":    message.Time.UTC().Format(time.RFC3339),
 		"content":      message.Content,
 		"number":       message.Number,
+		"local_phone":  message.LocalPhone,
+		"iccid":        message.ICCID,
+		"recipient":    message.Recipient(),
 		"device_id":    message.DeviceID,
 		"device_name":  message.DeviceName,
 		"device_label": message.DeviceLabel,
@@ -232,7 +238,10 @@ func larkSigningSecret(config map[string]any) string {
 	return configString(config, "secret")
 }
 
-func sendLarkNotification(ctx context.Context, config map[string]any, values larkTemplateValues) error {
+func sendLarkNotification(ctx context.Context, config map[string]any, deviceID *string, values larkTemplateValues) error {
+	if deviceID != nil && !notificationMatchesDevice(configStrings(config, "device_ids"), *deviceID) {
+		return nil
+	}
 	payload, err := renderLarkPayload(configString(config, "payload_template"), values)
 	if err != nil {
 		return err
@@ -288,5 +297,5 @@ func sanitizeLarkRequestError(err error) error {
 }
 
 func sendLarkNotificationTest(ctx context.Context, config map[string]any) error {
-	return sendLarkNotification(ctx, config, larkTestValues(time.Now()))
+	return sendLarkNotification(ctx, config, nil, larkTestValues(time.Now()))
 }

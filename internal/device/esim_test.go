@@ -193,6 +193,178 @@ func TestEnableProfileResultErrors(t *testing.T) {
 	}
 }
 
+func TestEnableProfileRequestWithAID(t *testing.T) {
+	aid, err := hex.DecodeString("A0000005591010FFFFFFFF8900000101")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := buildEnableProfileRequestWithAID(aid, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.ToUpper(hex.EncodeToString(req)); got != "BF3117A0124F10A0000005591010FFFFFFFF89000001018101FF" {
+		t.Fatalf("EnableProfile with AID request = %s, want BF3117A0124F10A0000005591010FFFFFFFF89000001018101FF", got)
+	}
+	reqNoRefresh, err := buildEnableProfileRequestWithAID(aid, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.ToUpper(hex.EncodeToString(reqNoRefresh)); got != "BF3117A0124F10A0000005591010FFFFFFFF8900000101810100" {
+		t.Fatalf("EnableProfile with AID (refresh=false) = %s", got)
+	}
+	if _, err := buildEnableProfileRequestWithAID(nil, true); err == nil {
+		t.Fatal("empty AID should be rejected")
+	}
+	if _, err := buildEnableProfileRequestWithAID(make([]byte, 17), true); err == nil {
+		t.Fatal("17-byte AID should be rejected (>16 octets)")
+	}
+}
+
+func TestDisableProfileRequestWithAID(t *testing.T) {
+	aid, err := hex.DecodeString("A0000005591010FFFFFFFF8900000101")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := buildDisableProfileRequestWithAID(aid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.ToUpper(hex.EncodeToString(req)); got != "BF3217A0124F10A0000005591010FFFFFFFF89000001018101FF" {
+		t.Fatalf("DisableProfile with AID request = %s", got)
+	}
+}
+
+func TestIsHexAID(t *testing.T) {
+	if isHexAID("8986040111111111111") {
+		t.Fatal("decimal ICCID should not be identified as hex AID")
+	}
+	if isHexAID("894921007608519523") {
+		t.Fatal("decimal ICCID should not be identified as hex AID")
+	}
+	if !isHexAID("A0000005591010FFFFFFFF8900000100") {
+		t.Fatal("32-char hex AID should be identified as hex AID")
+	}
+	if !isHexAID("a0000005591010ffffffff8900000100") {
+		t.Fatal("lowercase 32-char hex AID should be identified as hex AID")
+	}
+	if !isHexAID("A0000005591010FF") {
+		t.Fatal("16-char hex AID with hex letters should be identified as hex AID")
+	}
+}
+
+func TestEnableProfileCommandError0x07AndSGP22Results(t *testing.T) {
+	cmdErrResp := []byte{0xBF, 0x31, 0x03, 0x80, 0x01, 0x07}
+	res, ok := enableProfileResult(cmdErrResp)
+	if !ok || res != 7 {
+		t.Fatalf("enableProfileResult = (%d, %v), want (7, true)", res, ok)
+	}
+	if err := enableProfileResponseError(byte(res), cmdErrResp); !errors.Is(err, ErrESIMCommandError) {
+		t.Fatalf("result 7 should map to ErrESIMCommandError, got: %v", err)
+	}
+
+	enterpriseResp := []byte{0xBF, 0x31, 0x03, 0x80, 0x01, 0x06}
+	if err := enableProfileResponseError(6, enterpriseResp); !errors.Is(err, ErrESIMDisallowedByEnterpriseRule) {
+		t.Fatalf("result 6 should map to ErrESIMDisallowedByEnterpriseRule, got: %v", err)
+	}
+
+	rpmResp := []byte{0xBF, 0x31, 0x03, 0x80, 0x01, 0x09}
+	if err := enableProfileResponseError(9, rpmResp); !errors.Is(err, ErrESIMDisallowedForRPM) {
+		t.Fatalf("result 9 should map to ErrESIMDisallowedForRPM, got: %v", err)
+	}
+
+	noPortResp := []byte{0xBF, 0x31, 0x03, 0x80, 0x01, 0x0A}
+	if err := enableProfileResponseError(10, noPortResp); !errors.Is(err, ErrESIMNoEsimPortAvailable) {
+		t.Fatalf("result 10 should map to ErrESIMNoEsimPortAvailable, got: %v", err)
+	}
+}
+
+func TestDisableProfileCommandErrorAndSGP22Results(t *testing.T) {
+	cmdErrResp := []byte{0xBF, 0x32, 0x03, 0x80, 0x01, 0x07}
+	res, ok := disableProfileResult(cmdErrResp)
+	if !ok || res != 7 {
+		t.Fatalf("disableProfileResult = (%d, %v), want (7, true)", res, ok)
+	}
+	if err := disableProfileResponseError(res, cmdErrResp); !errors.Is(err, ErrESIMDisableCommandError) {
+		t.Fatalf("result 7 should map to ErrESIMDisableCommandError, got: %v", err)
+	}
+	if err := disableProfileResponseError(6, []byte{0xBF, 0x32, 0x03, 0x80, 0x01, 0x06}); !errors.Is(err, ErrESIMDisableDisallowedByEnterprise) {
+		t.Fatalf("result 6 should map to ErrESIMDisableDisallowedByEnterprise, got: %v", err)
+	}
+	if err := disableProfileResponseError(0x7F, []byte{0xBF, 0x32, 0x03, 0x80, 0x01, 0x7F}); !errors.Is(err, ErrESIMDisableUndefined) {
+		t.Fatalf("result 0x7F should map to ErrESIMDisableUndefined, got: %v", err)
+	}
+}
+
+func TestESIMSwitchProfileFallsBackToAIDOnCommandError(t *testing.T) {
+	const targetICCID = "894921007608519523"
+	targetAIDHex := "A0000005591010FFFFFFFF8900000101"
+
+	manageChannelOpen := clientStep{
+		command:  `AT+CSIM=10,"0070000001"`,
+		response: okResponse(`+CSIM: 6,"019000"`),
+	}
+	selectISDR := clientStep{
+		command:  fmt.Sprintf(`AT+CSIM=42,"01A4040010%s"`, isdRAID),
+		response: okResponse(`+CSIM: 4,"9000"`),
+	}
+	enableICCIDStoreData := clientStep{
+		command:  `AT+CSIM=52,"81E2910014BF3111A00C5A0A989412006780155932FF8101FF00"`,
+		response: okResponse(`+CSIM: 16,"BF31038001079000"`),
+	}
+	enableAIDStoreData := clientStep{
+		command:  `AT+CSIM=64,"81E291001ABF3117A0124F10A0000005591010FFFFFFFF89000001018101FF00"`,
+		response: okResponse(`+CSIM: 16,"BF31038001009000"`),
+	}
+	manageChannelClose := clientStep{
+		command:  `AT+CSIM=10,"0070800100"`,
+		response: okResponse(`+CSIM: 4,"9000"`),
+	}
+	verifyICCID := clientStep{
+		command:  "AT+CCID",
+		response: okResponse("+CCID: " + targetICCID + "F"),
+	}
+	refreshATI := clientStep{
+		command:  "ATI",
+		response: modem.Response{Final: "ERROR"},
+		err:      errors.New("refresh stub in test"),
+	}
+
+	client := &transcriptClient{steps: []clientStep{
+		manageChannelOpen,
+		selectISDR,
+		enableICCIDStoreData,
+		enableAIDStoreData,
+		manageChannelClose,
+		verifyICCID,
+		refreshATI,
+	}}
+	manager, id := newStartedTestManager(t, client)
+	state, _ := manager.lookup(id)
+	state.candidate.Product = "TestModem"
+
+	manager.cacheESIMInfo(id, EsimInfo{
+		AID: isdRAID,
+		Profiles: []EsimProfile{
+			{
+				ICCID: targetICCID,
+				AID:   targetAIDHex,
+				State: 0,
+			},
+		},
+	})
+
+	err := manager.ESIMSwitchProfile(context.Background(), id, targetICCID, "")
+	if err != nil {
+		t.Fatalf("ESIMSwitchProfile with AID fallback failed: %v", err)
+	}
+	client.assertDone(t)
+
+	cached, ok := manager.cachedESIMInfo(id)
+	if !ok || cached.Profiles[0].State != 1 {
+		t.Fatalf("profile was not marked enabled in cache: %+v", cached)
+	}
+}
+
 func TestVerifySwitchedICCIDReadsLiveModem(t *testing.T) {
 	client := &transcriptClient{steps: []clientStep{{
 		command:  "AT+CCID",
@@ -203,6 +375,19 @@ func TestVerifySwitchedICCIDReadsLiveModem(t *testing.T) {
 	defer cancel()
 	if err := manager.verifySwitchedICCID(ctx, id, "89492026266006792824"); err != nil {
 		t.Fatalf("verifySwitchedICCID: %v", err)
+	}
+	client.assertDone(t)
+}
+
+func TestVerifySwitchedICCIDReadsML307MCCID(t *testing.T) {
+	client := &transcriptClient{steps: []clientStep{
+		{command: "AT+CCID", response: modem.Response{Final: "ERROR"}, err: errors.New("CCID unsupported")},
+		{command: "AT+QCCID", response: modem.Response{Final: "ERROR"}, err: errors.New("QCCID unsupported")},
+		{command: "AT+MCCID", response: okResponse("+MCCID: 89492026266006792824F")},
+	}}
+	manager, id := newStartedTestManager(t, client)
+	if err := manager.verifySwitchedICCIDAttempts(context.Background(), id, "89492026266006792824", 1, 0); err != nil {
+		t.Fatalf("verifySwitchedICCIDAttempts: %v", err)
 	}
 	client.assertDone(t)
 }
@@ -261,6 +446,26 @@ func TestEuiccSASTrimsCardPadding(t *testing.T) {
 	payload := derConstruct(0xBF22, derEncode(0x0C, []byte("   SAS-UP-TEST   ")))
 	if got := euiccSAS(payload); got != "SAS-UP-TEST" {
 		t.Fatalf("SAS = %q", got)
+	}
+}
+
+func TestOpenEuiccGETResponsePreservesTransportError(t *testing.T) {
+	for _, cause := range []error{modem.ErrCommandTimeout, context.Canceled, context.DeadlineExceeded,
+		&modem.CommandError{Command: `AT+CSIM=10,"81C0000010"`, Final: "+CME ERROR: 0"}} {
+		t.Run(cause.Error(), func(t *testing.T) {
+			client := &transcriptClient{steps: []clientStep{
+				{command: `AT+CSIM=10,"0070000001"`, response: okResponse(`+CSIM: 6,"019000"`)},
+				{command: fmt.Sprintf(`AT+CSIM=42,"01A4040010%s"`, isdRAID), response: okResponse(`+CSIM: 4,"6110"`)},
+				{command: `AT+CSIM=10,"81C0000010"`, err: cause},
+				{command: `AT+CSIM=10,"0070800100"`, response: okResponse(`+CSIM: 4,"9000"`)},
+			}}
+			manager, id := newStartedTestManager(t, client)
+			channel, err := manager.openEuiccOnceAID(context.Background(), id, isdRAID)
+			if channel != nil || !errors.Is(err, cause) || errors.Is(err, errNoEUICC) {
+				t.Fatalf("open eUICC = %v, %v; want transport error %v, not absent eUICC", channel, err, cause)
+			}
+			client.assertDone(t)
+		})
 	}
 }
 
@@ -403,11 +608,11 @@ func TestOpenEuiccRecoversOrphanedSingleLogicalChannel(t *testing.T) {
 }
 
 func TestWaitForESIMRecovery(t *testing.T) {
-	done := make(chan struct{})
-	manager := &Manager{esimRecoveries: map[string]chan struct{}{"dev": done}}
+	done := &esimRecovery{done: make(chan struct{})}
+	manager := &Manager{esimRecoveries: map[string]*esimRecovery{"dev": done}}
 	go func() {
 		time.Sleep(10 * time.Millisecond)
-		close(done)
+		close(done.done)
 	}()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -415,7 +620,7 @@ func TestWaitForESIMRecovery(t *testing.T) {
 		t.Fatalf("waitForESIMRecovery: %v", err)
 	}
 
-	blocked := make(chan struct{})
+	blocked := &esimRecovery{done: make(chan struct{})}
 	manager.esimRecoveries["blocked"] = blocked
 	timeoutContext, cancelTimeout := context.WithTimeout(context.Background(), time.Millisecond)
 	defer cancelTimeout()
@@ -425,9 +630,9 @@ func TestWaitForESIMRecovery(t *testing.T) {
 }
 
 func TestESIMListProfilesReturnsCacheDuringRecovery(t *testing.T) {
-	done := make(chan struct{})
+	done := &esimRecovery{done: make(chan struct{})}
 	manager := &Manager{
-		esimRecoveries: map[string]chan struct{}{"dev": done},
+		esimRecoveries: map[string]*esimRecovery{"dev": done},
 		esimCache: map[string]EsimInfo{
 			"dev": {Profiles: []EsimProfile{{ICCID: "old", State: 1}}},
 		},

@@ -614,6 +614,8 @@
         "proposal": "modern"
       },
       "ims": {
+        "identity_profile": "att",
+        "register_profile": "att",
         "ipsec_encryption": "aes-cbc"
       }
     },
@@ -3797,8 +3799,16 @@
           "8985203"
         ]
       },
+      "epdg": {
+        "hostname": "wlan.three.com.hk"
+      },
       "ike": {
         "proposal": "modern"
+      },
+      "ims": {
+        "ipsec_mode": "optional",
+        "pani_enabled": true,
+        "pani_country": "AUTO"
       }
     },
     {

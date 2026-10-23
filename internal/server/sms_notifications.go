@@ -15,22 +15,56 @@ import (
 	"net/http"
 	"net/mail"
 	"net/smtp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
+	"vocat/internal/smsdecode"
 	"vocat/internal/store"
 )
 
 const smsNotificationPollInterval = 2 * time.Second
 
-var smsOnlyNotificationChannels = []string{"bark", "email", "pushplus", "webhook", "wecom", "lark"}
+const (
+	// smsNotificationMaxAttempts bounds how many times one message is retried
+	// before the channel moves on. Without it a message that the provider
+	// permanently rejects stalls every later notification for that channel.
+	// Combined with the backoff below this keeps retrying for roughly thirteen
+	// minutes, so a short provider outage does not drop a notification.
+	smsNotificationMaxAttempts = 10
+	// smsNotificationMaxRetryDelay caps the exponential retry backoff so a
+	// provider that is down for a long time is still probed, just rarely.
+	smsNotificationMaxRetryDelay = 5 * time.Minute
+)
+
+// smsNotificationRetryDelay returns how long to wait before the next poll after
+// consecutiveFailures send failures in a row. The first failure keeps the
+// normal two-second cadence; every further failure doubles the delay, so a
+// permanently broken provider is not polled every two seconds forever.
+func smsNotificationRetryDelay(consecutiveFailures int) time.Duration {
+	delay := smsNotificationPollInterval
+	for attempt := 1; attempt < consecutiveFailures; attempt++ {
+		if delay >= smsNotificationMaxRetryDelay {
+			return smsNotificationMaxRetryDelay
+		}
+		delay *= 2
+	}
+	if delay > smsNotificationMaxRetryDelay {
+		return smsNotificationMaxRetryDelay
+	}
+	return delay
+}
+
+var smsOnlyNotificationChannels = []string{"bark", "email", "pushplus", "webhook", "wecom", "lark", "meow"}
 
 type smsNotification struct {
 	DeviceID    string
 	DeviceName  string
 	DeviceLabel string
 	Number      string
+	LocalPhone  string
+	ICCID       string
 	Time        time.Time
 	Content     string
 }
@@ -39,10 +73,32 @@ func (value smsNotification) Text() string {
 	return strings.Join([]string{
 		"收到新短信",
 		"设备  " + value.DeviceLabel,
+		value.recipientLine("  "),
 		"号码  " + value.Number,
 		"时间  " + value.Time.Local().Format("2006-01-02 15:04:05"),
 		"内容  " + value.Content,
 	}, "\n")
+}
+
+// Recipient identifies the receiving subscription even when its number is unknown.
+func (value smsNotification) Recipient() string {
+	return firstNonEmpty(value.LocalPhone, value.ICCID, "未知")
+}
+
+func (value smsNotification) recipientLine(separator string) string {
+	label := "收信卡"
+	if value.LocalPhone != "" {
+		label = "本机号码"
+	} else if value.ICCID != "" {
+		label = "ICCID"
+	}
+	return label + separator + value.Recipient()
+}
+
+func (value smsNotification) TelegramText() string {
+	return fmt.Sprintf("📩 新短信\n设备：%s\n%s\n来自：%s\n时间：%s\n\n%s",
+		value.DeviceLabel, value.recipientLine("："), value.Number,
+		value.Time.Local().Format("2006-01-02 15:04:05"), value.Content)
 }
 
 func (value smsNotification) DetailText() string {
@@ -63,72 +119,123 @@ func (s *Server) StartSMSNotificationDispatchers(ctx context.Context) {
 	}
 }
 
+// smsNotificationCursor is the per-channel dispatcher state carried across
+// ticks. It is not safe for concurrent use; each channel owns one instance.
+type smsNotificationCursor struct {
+	id                  int64
+	initialized         bool
+	lastError           string
+	lastErrorAt         time.Time
+	consecutiveFailures int
+	failedMessageID     int64
+	failedAttempts      int
+}
+
+// logError reports a channel dispatch error through the server logger. Repeats
+// of the same error within a minute are suppressed so a provider that is down
+// cannot flood the log at the polling cadence.
+func (state *smsNotificationCursor) logError(server *Server, channel string, err error) {
+	if err.Error() != state.lastError || time.Since(state.lastErrorAt) >= time.Minute {
+		server.logSMSNotificationError(channel, err)
+		state.lastError, state.lastErrorAt = err.Error(), time.Now()
+	}
+}
+
+// smsNotificationSender delivers one notification. It is a parameter so the
+// retry policy can be tested without reaching a real provider.
+type smsNotificationSender func(context.Context, string, map[string]any, smsNotification) error
+
+// runSMSNotificationChannel runs one notification channel until ctx is
+// cancelled, woken early by a newly stored SMS. While a provider is failing
+// only the backoff delay applies, so new SMS cannot exhaust a message's attempts.
 func (s *Server) runSMSNotificationChannel(ctx context.Context, channel string) {
-	var cursor int64
-	cursorInitialized := false
-	lastError := ""
-	lastErrorAt := time.Time{}
+	state := &smsNotificationCursor{}
 	for ctx.Err() == nil {
-		if !cursorInitialized {
-			latest, err := s.store.LatestSMSMessageID(ctx)
-			if err != nil {
-				if err.Error() != lastError || time.Since(lastErrorAt) >= time.Minute {
-					s.logSMSNotificationError(channel, err)
-					lastError, lastErrorAt = err.Error(), time.Now()
-				}
-				if !waitTelegram(ctx, smsNotificationPollInterval) {
-					return
-				}
-				continue
-			}
-			cursor, cursorInitialized = latest, true
-			lastError = ""
+		inserted := s.store.SMSInserted() // before the tick, so none is missed
+		delay := s.deliverSMSNotificationsOnce(ctx, channel, state, sendSMSNotification)
+		if state.consecutiveFailures > 0 {
+			inserted = nil
 		}
-		config, enabled, configErr := s.smsNotificationConfig(ctx, channel)
-		if configErr != nil {
-			if configErr.Error() != lastError || time.Since(lastErrorAt) >= time.Minute {
-				s.logSMSNotificationError(channel, configErr)
-				lastError, lastErrorAt = configErr.Error(), time.Now()
-			}
-		} else if !enabled {
-			if newest, latestErr := s.store.LatestSMSMessageID(ctx); latestErr == nil {
-				cursor = newest
-			}
-			lastError = ""
-		} else {
-			messages, listErr := s.store.ListInboundSMSAfterID(ctx, cursor, 100)
-			if listErr != nil {
-				if listErr.Error() != lastError || time.Since(lastErrorAt) >= time.Minute {
-					s.logSMSNotificationError(channel, listErr)
-					lastError, lastErrorAt = listErr.Error(), time.Now()
-				}
-			} else {
-				for _, message := range messages {
-					if !smsMessageReadyToNotify(message) {
-						cursor = message.ID
-						continue
-					}
-					notification := s.newSMSNotification(ctx, message)
-					if sendErr := sendSMSNotification(s.notificationDestinationContext(ctx), channel, config, notification); sendErr != nil {
-						if sendErr.Error() != lastError || time.Since(lastErrorAt) >= time.Minute {
-							s.logSMSNotificationError(channel, sendErr)
-							lastError, lastErrorAt = sendErr.Error(), time.Now()
-						}
-						break
-					}
-					cursor = message.ID
-					lastError = ""
-				}
-			}
-		}
-		if !waitTelegram(ctx, smsNotificationPollInterval) {
+		if !waitSMSInserted(ctx, delay, inserted) {
 			return
 		}
 	}
 }
 
+// deliverSMSNotificationsOnce performs one scheduling tick for a channel and
+// returns how long the caller should wait before the next tick.
+func (s *Server) deliverSMSNotificationsOnce(
+	ctx context.Context,
+	channel string,
+	state *smsNotificationCursor,
+	send smsNotificationSender,
+) time.Duration {
+	if !state.initialized {
+		// Reading MAX(id) here would skip an SMS stored between Open and this
+		// first tick.
+		state.id, state.initialized = s.store.StartupSMSMessageID(), true
+	}
+	config, enabled, configErr := s.smsNotificationConfig(ctx, channel)
+	if configErr != nil {
+		state.logError(s, channel, configErr)
+	} else if !enabled {
+		if newest, latestErr := s.store.LatestSMSMessageID(ctx); latestErr == nil {
+			state.id = newest
+		}
+		state.lastError = ""
+	} else {
+		messages, listErr := s.store.ListInboundSMSAfterID(ctx, state.id, 100)
+		if listErr != nil {
+			state.logError(s, channel, listErr)
+		} else {
+			for _, message := range messages {
+				if !smsMessageReadyToNotify(message) {
+					state.id = message.ID
+					continue
+				}
+				notification := s.newSMSNotification(ctx, message)
+				if sendErr := send(s.notificationDestinationContext(ctx), channel, config, notification); sendErr != nil {
+					if message.ID == state.failedMessageID {
+						state.failedAttempts++
+					} else {
+						state.failedMessageID, state.failedAttempts = message.ID, 1
+					}
+					state.consecutiveFailures++
+					state.logError(s, channel, sendErr)
+					if state.failedAttempts >= smsNotificationMaxAttempts {
+						// Give up on this one message so a permanently failing provider
+						// cannot stall every later notification for this channel.
+						state.logError(s, channel, fmt.Errorf(
+							"dropping inbound SMS notification %d after %d attempts: %w",
+							message.ID, state.failedAttempts, sendErr,
+						))
+						state.id = message.ID
+						state.failedMessageID, state.failedAttempts = 0, 0
+						state.consecutiveFailures = 0
+						continue
+					}
+					break
+				}
+				s.logger.Debug("SMS notification sent",
+					"category", "sms", "channel", channel, "sms_id", message.ID)
+				state.id = message.ID
+				state.lastError = ""
+				state.consecutiveFailures = 0
+				state.failedMessageID, state.failedAttempts = 0, 0
+			}
+		}
+	}
+	return smsNotificationRetryDelay(state.consecutiveFailures)
+}
+
+// A missing/null scope keeps the existing all-device behavior; [] sends nothing.
+func notificationMatchesDevice(deviceIDs []string, deviceID string) bool {
+	return deviceIDs == nil || slices.Contains(deviceIDs, deviceID)
+}
+
 func smsMessageReadyToNotify(message store.SMSMessage) bool {
 	return strings.TrimSpace(message.Body) != "" &&
+		store.SMSDecodeError(message.Extra) == "" &&
 		store.ConcatSMSReadyToNotify(message.MessageID, message.Extra)
 }
 
@@ -151,6 +258,9 @@ func (s *Server) smsNotificationConfig(ctx context.Context, channel string) (map
 }
 
 func validateSMSNotificationConfig(channel string, config map[string]any) error {
+	if channel == "meow" {
+		return validateMeowNotificationConfig(config)
+	}
 	switch channel {
 	case "bark", "email", "webhook", "wecom", "lark":
 		if err := validateNotificationTestConfig(channel, config); err != nil {
@@ -185,13 +295,26 @@ func (s *Server) newSMSNotification(ctx context.Context, message store.SMSMessag
 	if device, err := s.store.Device(ctx, deviceID); err == nil {
 		name = strings.TrimSpace(device.Name)
 	}
+	// Use the message's historical subscription, never the device's current
+	// SIM: dispatch and retries can happen after an eSIM profile switch.
+	iccid := strings.TrimSpace(message.ICCID)
+	localPhone := strings.TrimSpace(message.LocalPhone)
+	if localPhone == "" && iccid != "" {
+		if number, err := s.store.PhoneNumberForICCID(ctx, iccid); err == nil {
+			localPhone = number
+		} else if !errors.Is(err, store.ErrNotFound) && s.logger != nil {
+			s.logger.Warn("read SMS notification phone number", "iccid", iccid, "error", err)
+		}
+	}
 	return smsNotification{
 		DeviceID:    deviceID,
 		DeviceName:  name,
 		DeviceLabel: firstNonEmpty(name, deviceID, "--"),
 		Number:      firstNonEmpty(message.Peer, "--"),
+		LocalPhone:  localPhone,
+		ICCID:       iccid,
 		Time:        message.Timestamp,
-		Content:     message.Body,
+		Content:     smsdecode.Preview(message.Body),
 	}
 }
 
@@ -201,7 +324,11 @@ func (s *Server) logSMSNotificationError(channel string, err error) {
 	}
 }
 
+// sendSMSNotification 按渠道发送短信，MeoW 与其他独立标题渠道复用 DetailText。
 func sendSMSNotification(ctx context.Context, channel string, config map[string]any, message smsNotification) error {
+	if channel == "meow" {
+		return sendMeowNotification(ctx, config, &message.DeviceID, "收到新短信", message.DetailText())
+	}
 	switch channel {
 	case "bark":
 		return sendBarkSMSNotification(ctx, config, message)
@@ -212,15 +339,18 @@ func sendSMSNotification(ctx context.Context, channel string, config map[string]
 	case "webhook":
 		return sendWebhookSMSNotification(ctx, config, message)
 	case "wecom":
-		return sendWecomNotification(ctx, config, wecomSMSValues(message))
+		return sendWecomNotification(ctx, config, &message.DeviceID, wecomSMSValues(message))
 	case "lark":
-		return sendLarkNotification(ctx, config, larkSMSValues(message))
+		return sendLarkNotification(ctx, config, &message.DeviceID, larkSMSValues(message))
 	default:
 		return fmt.Errorf("unsupported SMS notification channel %q", channel)
 	}
 }
 
 func sendBarkSMSNotification(ctx context.Context, config map[string]any, message smsNotification) error {
+	if !notificationMatchesDevice(configStrings(config, "device_ids"), message.DeviceID) {
+		return nil
+	}
 	client, err := restrictedHTTPClient(ctx, 6*time.Second, "")
 	if err != nil {
 		return err
@@ -251,20 +381,10 @@ func sendBarkSMSNotification(ctx context.Context, config map[string]any, message
 }
 
 func sendWebhookSMSNotification(ctx context.Context, config map[string]any, message smsNotification) error {
-	rendered := message.Text()
-	if template := configString(config, "text_template"); strings.TrimSpace(template) != "" {
-		rendered = renderSMSWebhookTemplate(template, message)
+	if !notificationMatchesDevice(configStrings(config, "device_ids"), message.DeviceID) {
+		return nil
 	}
-	payload, _ := json.Marshal(map[string]any{
-		"event":        "sms.received",
-		"message":      rendered,
-		"timestamp":    message.Time.UTC().Format(time.RFC3339),
-		"device_id":    message.DeviceID,
-		"device_name":  message.DeviceName,
-		"device_label": message.DeviceLabel,
-		"number":       message.Number,
-		"content":      message.Content,
-	})
+	payload := buildSMSWebhookPayload(configString(config, "text_template"), message)
 	timeout := durationMilliseconds(configInt(config, "timeout_ms"), 5*time.Second)
 	client, err := restrictedHTTPClient(ctx, timeout, "")
 	if err != nil {
@@ -304,6 +424,27 @@ func sendWebhookSMSNotification(ctx context.Context, config map[string]any, mess
 	return nil
 }
 
+func buildSMSWebhookPayload(template string, message smsNotification) []byte {
+	rendered := message.Text()
+	if strings.TrimSpace(template) != "" {
+		rendered = renderSMSWebhookTemplate(template, message)
+	}
+	payload, _ := json.Marshal(map[string]any{
+		"event":        "sms.received",
+		"message":      rendered,
+		"timestamp":    message.Time.UTC().Format(time.RFC3339),
+		"device_id":    message.DeviceID,
+		"device_name":  message.DeviceName,
+		"device_label": message.DeviceLabel,
+		"number":       message.Number,
+		"local_phone":  message.LocalPhone,
+		"iccid":        message.ICCID,
+		"recipient":    message.Recipient(),
+		"content":      message.Content,
+	})
+	return payload
+}
+
 func renderSMSWebhookTemplate(template string, message smsNotification) string {
 	replacements := map[string]string{
 		"{{text}}":         message.Content,
@@ -312,6 +453,9 @@ func renderSMSWebhookTemplate(template string, message smsNotification) string {
 		"{{timestamp}}":    message.Time.UTC().Format(time.RFC3339),
 		"{{time}}":         message.Time.Local().Format("2006-01-02 15:04:05"),
 		"{{number}}":       message.Number,
+		"{{local_phone}}":  message.LocalPhone,
+		"{{iccid}}":        message.ICCID,
+		"{{recipient}}":    message.Recipient(),
 		"{{device_id}}":    message.DeviceID,
 		"{{device_name}}":  message.DeviceName,
 		"{{device_label}}": message.DeviceLabel,
@@ -322,24 +466,37 @@ func renderSMSWebhookTemplate(template string, message smsNotification) string {
 	return template
 }
 
+func buildPushplusPayload(token, title, content, topic, channel string) map[string]any {
+	payload := map[string]any{
+		"token":    token,
+		"title":    title,
+		"content":  content,
+		"template": "txt",
+	}
+	if topic != "" {
+		payload["topic"] = topic
+	}
+	if channel != "" {
+		payload["channel"] = channel
+	}
+	return payload
+}
+
 func sendPushplusSMSNotification(ctx context.Context, config map[string]any, message smsNotification) error {
+	if !notificationMatchesDevice(configStrings(config, "device_ids"), message.DeviceID) {
+		return nil
+	}
 	destination, err := validateOutboundURL(ctx, "https://www.pushplus.plus/send", true)
 	if err != nil {
 		return err
 	}
-	payload := map[string]any{
-		"token":     configString(config, "token"),
-		"title":     "收到新短信",
-		"content":   message.DetailText(),
-		"template":  "txt",
-		"timestamp": time.Now().UnixMilli(),
-	}
-	if topic := configString(config, "topic"); topic != "" {
-		payload["topic"] = topic
-	}
-	if channel := configString(config, "channel"); channel != "" {
-		payload["channel"] = channel
-	}
+	payload := buildPushplusPayload(
+		configString(config, "token"),
+		"收到新短信",
+		message.DetailText(),
+		configString(config, "topic"),
+		configString(config, "channel"),
+	)
 	encoded, _ := json.Marshal(payload)
 	client, err := restrictedHTTPClient(ctx, 8*time.Second, "")
 	if err != nil {
@@ -371,6 +528,9 @@ func sendPushplusSMSNotification(ctx context.Context, config map[string]any, mes
 }
 
 func sendEmailSMSNotification(ctx context.Context, config map[string]any, message smsNotification) error {
+	if !notificationMatchesDevice(configStrings(config, "device_ids"), message.DeviceID) {
+		return nil
+	}
 	host := strings.TrimSpace(configString(config, "smtp_host"))
 	port := configInt(config, "smtp_port")
 	if port == 0 {

@@ -1082,7 +1082,7 @@ func configureVoWiFiRuntime(
 			} else if deviceConfig.DeviceType == store.DeviceTypeWiFi410 {
 				adapter = nativeQMIAdapter
 			}
-			return newVoWiFiOrchestrator(deviceConfig, database, adapter, logger, onIncomingCall)
+			return newVoWiFiOrchestrator(factoryContext, deviceConfig, database, adapter, logger, onIncomingCall)
 		},
 	})
 
@@ -1238,6 +1238,7 @@ func protectVoWiFiStartupRadioWithRetry(
 type vowifiDeviceAdapter interface {
 	vowifi.SIMIdentityReader
 	vowifi.AKAProvider
+	vowifi.PreferredAKAProvider
 	vowifi.RadioController
 }
 
@@ -1270,16 +1271,16 @@ func receivedIMSSMSMessageID(message ims.ReceivedSMS) string {
 }
 
 func newVoWiFiOrchestrator(
+	ctx context.Context,
 	deviceConfig store.Device,
 	database *store.Store,
 	adapter vowifiDeviceAdapter,
 	logger *slog.Logger,
 	onIncomingCall func(context.Context, ims.ReceivedCall) error,
 ) (*vowifi.Orchestrator, error) {
-	apn := deviceConfig.APN
-	if apn == "" {
-		apn = "ims"
-	}
+	// The ePDG tunnel is an IMS service: request the dedicated IMS APN and never
+	// the cellular data APN cached on the device or card policy.
+	apn := vowifisettings.IMSAPN(ctx, database)
 	vowifiLogger := logger.With("category", "vowifi", "device_id", deviceConfig.ID)
 	tunnelProvider, err := ike.NewProvider(ike.Config{
 		APN: apn, Logger: vowifiLogger, AutoProposalFallback: true,
@@ -1434,6 +1435,9 @@ func provisionDiscoveredDevices(
 	}
 	for _, discovered := range manager.List() {
 		candidate := discovered.Candidate
+		if candidate.DiscoveryIssue != "" || (!candidate.HasATPort() && candidate.HardwareKind != pcsc.HardwareKind) {
+			continue
+		}
 		deviceType := provisionedDeviceType(candidate)
 		backend := "at"
 		control := candidate.ATPort.OpenPath()
@@ -1450,7 +1454,9 @@ func provisionDiscoveredDevices(
 			esimTransport = "pcsc"
 		}
 		name := candidate.Product
-		if name == "" || strings.EqualFold(name, "Android") {
+		if (name == "" || strings.EqualFold(name, "Android")) && modem.IsML307(candidate) {
+			name = "ML307"
+		} else if name == "" || strings.EqualFold(name, "Android") {
 			name = "Quectel EC20 / EC25"
 		}
 		supportsSMS := deviceType != store.DeviceTypeWiFi410
@@ -1480,6 +1486,9 @@ func provisionDiscoveredDevices(
 }
 
 func provisionedDeviceType(candidate modem.Candidate) string {
+	if modem.IsML307(candidate) {
+		return store.DeviceTypeML307
+	}
 	controlName := filepath.Base(filepath.Clean(candidate.QMIControl))
 	if candidate.HardwareKind == "wwan" &&
 		strings.HasPrefix(controlName, "wwan") && strings.Contains(controlName, "qmi") {
@@ -1557,17 +1566,22 @@ func pollDeviceSnapshots(
 			recoveryTracker.complete(entry.ID, expectedICCID, action, issued, time.Now())
 		}()
 	}
+	lastFullRefresh := time.Time{}
 	refresh := func() {
-		discoveryContext, cancelDiscovery := context.WithTimeout(ctx, 10*time.Second)
-		_, err := manager.Discover(discoveryContext)
-		cancelDiscovery()
-		if err != nil {
-			logger.Debug("periodic modem discovery failed", "error", err)
-			return
+		fullRefresh := time.Since(lastFullRefresh) >= 30*time.Second
+		if fullRefresh {
+			lastFullRefresh = time.Now()
+			discoveryContext, cancelDiscovery := context.WithTimeout(ctx, 10*time.Second)
+			_, err := manager.Discover(discoveryContext)
+			cancelDiscovery()
+			if err != nil {
+				logger.Debug("periodic modem discovery failed", "error", err)
+				return
+			}
+			// Hotplug can replace the physical discovery ID. Rebind each configured
+			// device's selected QMI/AT control plane before collecting its snapshot.
+			configureDeviceBackends(ctx, logger, database, manager)
 		}
-		// Hotplug can replace the physical discovery ID. Rebind each configured
-		// device's selected QMI/AT control plane before collecting its snapshot.
-		configureDeviceBackends(ctx, logger, database, manager)
 		entries := manager.List()
 		// Each physical modem owns its own operation lock. Refresh them in
 		// parallel so a slow or wedged EC20 on one hub port cannot delay signal
@@ -1575,7 +1589,12 @@ func pollDeviceSnapshots(
 		var refreshGroup sync.WaitGroup
 		refreshSlots := make(chan struct{}, 4)
 		for _, entry := range entries {
-			if !entry.Discovered || entry.Candidate.DiscoveryIssue != "" {
+			if !entry.Discovered || entry.Candidate.DiscoveryIssue != "" || (!entry.Candidate.HasATPort() && entry.Candidate.HardwareKind != pcsc.HardwareKind) {
+				continue
+			}
+			// Native 410 firmware can miss physical SIM insertion events. Probe it
+			// every five seconds; retain normal discovery/other modem cadence.
+			if !fullRefresh && provisionedDeviceType(entry.Candidate) != store.DeviceTypeWiFi410 {
 				continue
 			}
 			entry := entry
@@ -1604,7 +1623,7 @@ func pollDeviceSnapshots(
 		refreshGroup.Wait()
 	}
 	refresh()
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
@@ -1702,8 +1721,9 @@ func reconcileCardPolicies(
 		mapper := integration.ATMapper{Store: database, Devices: manager}
 		for _, config := range configs {
 			entry, mapErr := mapper.Get(config.ID)
+			hotSwappableSIM := config.DeviceType == store.DeviceTypeUSBSIMReader || config.DeviceType == store.DeviceTypeWiFi410
 			if mapErr != nil || entry.Snapshot == nil {
-				if config.DeviceType == store.DeviceTypeUSBSIMReader && observedCards[config.ID] != "missing" {
+				if hotSwappableSIM && observedCards[config.ID] != "missing" {
 					if state, stateErr := vowifiManager.State(config.ID); stateErr == nil && state.ICCID != "" {
 						_, _ = vowifiManager.RequestReconnect(config.ID)
 					}
@@ -1713,7 +1733,7 @@ func reconcileCardPolicies(
 			}
 			iccid := strings.TrimSpace(entry.Snapshot.ICCID)
 			if iccid == "" {
-				if config.DeviceType == store.DeviceTypeUSBSIMReader && observedCards[config.ID] != "missing" {
+				if hotSwappableSIM && observedCards[config.ID] != "missing" {
 					if state, stateErr := vowifiManager.State(config.ID); stateErr == nil && state.ICCID != "" {
 						_, _ = vowifiManager.RequestReconnect(config.ID)
 					}
@@ -1768,7 +1788,7 @@ func reconcileCardPolicies(
 					_, _ = vowifiManager.RequestEnabled(config.ID, true)
 				case state.ICCID != "" && !strings.EqualFold(strings.TrimSpace(state.ICCID), iccid):
 					_, _ = vowifiManager.RequestReconnect(config.ID)
-				case config.DeviceType == store.DeviceTypeUSBSIMReader && previousObserved == "missing":
+				case hotSwappableSIM && previousObserved == "missing":
 					_, _ = vowifiManager.RequestReconnect(config.ID)
 				}
 				continue

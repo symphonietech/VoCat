@@ -129,6 +129,27 @@ func testOrchestrator(t *testing.T, id string) *vowifi.Orchestrator {
 	return orchestrator
 }
 
+func TestManagerCancelUSSIUnavailableNeverReportsSuccess(t *testing.T) {
+	manager := New(Options{})
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	if err := manager.CancelUSSI(context.Background(), "missing", "dialog-1"); !errors.Is(err, vowifi.ErrUSSINotReady) {
+		t.Fatalf("unregistered cancel = %v", err)
+	}
+	orchestrator := testOrchestrator(t, "saved")
+	if err := manager.Register(orchestrator); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.CancelUSSI(context.Background(), "saved", "dialog-1"); !errors.Is(err, vowifi.ErrUSSINotReady) {
+		t.Fatalf("idle cancel = %v", err)
+	}
+	if _, err := orchestrator.Enable(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.CancelUSSI(context.Background(), "saved", "dialog-1"); !errors.Is(err, vowifi.ErrUSSINotReady) {
+		t.Fatalf("unsupported cancel = %v", err)
+	}
+}
+
 func testOrchestratorWithTunnel(
 	t *testing.T,
 	id string,
@@ -455,4 +476,24 @@ func TestManagerCoalescesReconnectWhileLifecycleOperationIsBusy(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatal("queued reconnect did not run after the active operation")
+}
+
+func TestManagerUnregisterStopsWorkerAndRemovesDevice(t *testing.T) {
+	manager := New(Options{OperationTimeout: time.Second})
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	if err := manager.Register(testOrchestrator(t, "ec20-to-delete")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.State("ec20-to-delete"); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Unregister(context.Background(), "ec20-to-delete"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.State("ec20-to-delete"); !errors.Is(err, ErrNotRegistered) {
+		t.Fatalf("expected ErrNotRegistered, got %v", err)
+	}
+	if err := manager.Unregister(context.Background(), "ec20-to-delete"); err != nil {
+		t.Fatal(err)
+	}
 }

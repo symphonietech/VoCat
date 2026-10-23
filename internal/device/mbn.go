@@ -363,8 +363,8 @@ func profileSwitchHPLMN(snapshot Snapshot) string {
 }
 
 func isEC20Candidate(candidate modem.Candidate) bool {
-	return strings.EqualFold(strings.TrimSpace(candidate.VendorID), "2c7c") &&
-		strings.Contains(strings.ToUpper(candidate.Product), "EC20")
+	product := strings.ToUpper(candidate.Product)
+	return strings.EqualFold(candidate.VendorID, "2c7c") && strings.Contains(product, "EC20")
 }
 
 // ReconcileEC20MBNAfterProfileSwitch prevents an EC20 from carrying a known
@@ -408,6 +408,10 @@ func (manager *Manager) ReconcileEC20MBNAfterProfileSwitch(ctx context.Context, 
 		state.opMu.Unlock()
 		return fmt.Errorf("open EC20 for MBN validation: %w", err)
 	}
+	if err := manager.requireOnlineModemRestart(ctx, client); err != nil {
+		state.opMu.Unlock()
+		return fmt.Errorf("defer MBN selection requiring online restart: %w", err)
+	}
 	commandContext, cancelCommand := context.WithTimeout(ctx, manager.longTimeout)
 	changed, previous, selected, err := reconcileMBNSelection(commandContext, client, hplmn, override)
 	cancelCommand()
@@ -425,8 +429,10 @@ func (manager *Manager) ReconcileEC20MBNAfterProfileSwitch(ctx context.Context, 
 	rebootContext, cancelReboot := context.WithTimeout(ctx, manager.longTimeout)
 	_, rebootErr := client.Execute(rebootContext, "AT+CFUN=1,1")
 	cancelReboot()
-	_ = client.Close()
-	state.client = nil
+	if !isCommandInterrupted(rebootErr) {
+		_ = client.Close()
+		state.client = nil
+	}
 	state.preFlightMode = nil
 	manager.clearSnapshot(id, state)
 	state.opMu.Unlock()
@@ -470,6 +476,10 @@ func (manager *Manager) ReconcileEC20MBNAfterProfileSwitch(ctx context.Context, 
 
 func (manager *Manager) reconcileEC20MBNAfterProfileSwitchBestEffort(ctx context.Context, id, expectedICCID string) {
 	if err := manager.ReconcileEC20MBNAfterProfileSwitch(ctx, id, expectedICCID); err != nil && manager.logger != nil {
+		if errors.Is(err, ErrRFOffRestart) {
+			manager.logger.Info("EC20 MBN reconciliation deferred while cellular RF is disabled", "device_id", id)
+			return
+		}
 		// EnableProfile has already been committed and its ICCID verified. Keep
 		// this compatibility repair separate from switch success so callers can
 		// still restore the new card's saved radio, APN and VoWiFi policy.

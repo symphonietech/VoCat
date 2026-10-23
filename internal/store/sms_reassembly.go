@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"vocat/internal/smsdecode"
 )
 
 // ConcatMessageIDPrefix marks the stable message id that ingest points assign to
@@ -36,6 +38,16 @@ func ConcatSMSReadyToNotify(messageID string, extra json.RawMessage) bool {
 	}
 	complete, _ := document["concat_complete"].(bool)
 	return complete
+}
+
+// SMSDecodeError exposes safe parser status without exposing raw SMS bytes.
+func SMSDecodeError(extra json.RawMessage) string {
+	document, err := decodeJSONObject(extra)
+	if err != nil {
+		return ""
+	}
+	value, _ := document["decode_error"].(string)
+	return strings.TrimSpace(value)
 }
 
 func concatSMSKeepsDurableID(extra json.RawMessage) bool {
@@ -89,8 +101,16 @@ func mergeConcatSegment(
 	// Seed the per-segment texts from the previously stored parts so an
 	// out-of-order arrival always rebuilds in sequence order.
 	parts := map[int]string{}
+	decodeErrors := map[string]string{}
 	if len(existingExtra) > 0 {
 		if existing, derr := decodeJSONObject(existingExtra); derr == nil {
+			if storedErrors, ok := existing["concat_decode_errors"].(map[string]any); ok {
+				for key, value := range storedErrors {
+					if text, ok := value.(string); ok && text != "" {
+						decodeErrors[key] = text
+					}
+				}
+			}
 			if stored, ok := existing["concat_parts"].(map[string]any); ok {
 				for key, value := range stored {
 					n, aerr := strconv.Atoi(key)
@@ -109,10 +129,16 @@ func mergeConcatSegment(
 	// snapshot so normalizing that representation remains idempotent on a later
 	// redelivery of the same segment.
 	previousParts := maps.Clone(parts)
+	previousErrors := maps.Clone(decodeErrors)
+	if decodeError, _ := segment["decode_error"].(string); decodeError != "" {
+		decodeErrors[strconv.Itoa(sequence)] = decodeError
+	} else {
+		delete(decodeErrors, strconv.Itoa(sequence))
+	}
 	normalizeCumulativeConcatParts(previousParts)
 	parts[sequence] = segmentBody
 	normalizeCumulativeConcatParts(parts)
-	changed = !maps.Equal(previousParts, parts)
+	changed = !maps.Equal(previousParts, parts) || !maps.Equal(previousErrors, decodeErrors)
 
 	sequences := make([]int, 0, len(parts))
 	for n := range parts {
@@ -127,12 +153,22 @@ func mergeConcatSegment(
 		stored[strconv.Itoa(n)] = parts[n]
 	}
 	complete := total > 0 && len(parts) >= total
-
+	bodyText := joined.String()
 	merged := map[string]any{
 		"concat":          concat,
 		"concat_parts":    stored,
 		"concat_received": len(parts),
 		"concat_complete": complete,
+	}
+	if len(decodeErrors) > 0 {
+		merged["concat_decode_errors"] = decodeErrors
+		var descriptions []string
+		for _, n := range sequences {
+			if text := decodeErrors[strconv.Itoa(n)]; text != "" {
+				descriptions = append(descriptions, fmt.Sprintf("part %d: %s", n, text))
+			}
+		}
+		merged["decode_error"] = strings.Join(descriptions, "; ")
 	}
 	// Preserve non-concat metadata from the latest segment for context.
 	for _, key := range []string{"encoding", "storage", "transport", "source", "keep_durable_id_on_rescan"} {
@@ -140,11 +176,19 @@ func mergeConcatSegment(
 			merged[key] = value
 		}
 	}
+	// Concatenated WAP Push MMS notifications arrive as hex 8-bit segments.
+	// Decode the joined payload so the inbox and notifications show the
+	// subject instead of the raw WSP/MMS bytes. concat_parts stay hex so a
+	// later segment can still reassemble.
+	if text, ok := smsdecode.DecodeHexDisplayText(bodyText); ok {
+		bodyText = text
+		merged["encoding"] = "wap_push"
+	}
 	encoded, err := json.Marshal(merged)
 	if err != nil {
 		return "", nil, false, fmt.Errorf("encode merged concat extra: %w", err)
 	}
-	return joined.String(), json.RawMessage(encoded), changed, nil
+	return bodyText, json.RawMessage(encoded), changed, nil
 }
 
 // normalizeCumulativeConcatParts converts cumulative IMS segment bodies back

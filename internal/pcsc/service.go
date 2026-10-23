@@ -11,7 +11,10 @@ import (
 	"sync"
 )
 
-const usimAIDPrefix = "A0000000871002"
+const (
+	usimAIDPrefix = "A0000000871002"
+	isimAIDPrefix = "A0000000871004"
+)
 
 type Service struct {
 	mu      sync.Mutex
@@ -208,7 +211,7 @@ func (service *Service) CheckReady(
 	if expected := strings.TrimSpace(expectedICCID); expected != "" && !strings.EqualFold(expected, iccid) {
 		return "", ErrCardChanged
 	}
-	aid, err := selectUSIM(ctx, card)
+	aid, _, err := selectAKAApplication(ctx, card, "")
 	if err != nil {
 		return "", err
 	}
@@ -224,6 +227,17 @@ func (service *Service) Authenticate(
 	expectedICCID string,
 	pin string,
 	challenge AKAChallenge,
+) (AKAResult, error) {
+	return service.AuthenticateWithPreference(ctx, selector, expectedICCID, pin, challenge, "")
+}
+
+func (service *Service) AuthenticateWithPreference(
+	ctx context.Context,
+	selector Selector,
+	expectedICCID string,
+	pin string,
+	challenge AKAChallenge,
+	preference string,
 ) (AKAResult, error) {
 	if service == nil || service.backend == nil {
 		return AKAResult{}, ErrUnavailable
@@ -242,7 +256,8 @@ func (service *Service) Authenticate(
 	if expected := strings.TrimSpace(expectedICCID); expected != "" && !strings.EqualFold(expected, iccid) {
 		return AKAResult{}, ErrCardChanged
 	}
-	if _, err := selectUSIM(ctx, card); err != nil {
+	_, appName, err := selectAKAApplication(ctx, card, preference)
+	if err != nil {
 		return AKAResult{}, err
 	}
 	if err := verifyPIN(ctx, card, pin); err != nil {
@@ -256,13 +271,13 @@ func (service *Service) Authenticate(
 	apdu = append(apdu, 0x00)
 	data, sw, err := card.Transmit(ctx, apdu)
 	if err != nil {
-		return AKAResult{}, errors.New("pcsc: USIM authentication transport failed")
+		return AKAResult{}, fmt.Errorf("pcsc: %s authentication transport failed", appName)
 	}
 	if sw == 0x9862 {
 		return AKAResult{}, ErrAKARejected
 	}
 	if sw != 0x9000 {
-		return AKAResult{}, fmt.Errorf("pcsc: USIM authentication failed with status %04X", sw)
+		return AKAResult{}, fmt.Errorf("pcsc: %s authentication failed with status %04X", appName, sw)
 	}
 	return parseAKAResponse(data)
 }
@@ -352,13 +367,24 @@ func readICCID(ctx context.Context, card Card) (string, error) {
 }
 
 func selectUSIM(ctx context.Context, card Card) ([]byte, error) {
+	aid, app, err := selectAKAApplication(ctx, card, "")
+	if err != nil {
+		return nil, err
+	}
+	if app != "USIM" {
+		return nil, ErrUSIMUnavailable
+	}
+	return aid, nil
+}
+
+func readDIRAIDs(ctx context.Context, card Card) ([][]byte, error) {
 	if err := selectMF(ctx, card); err != nil {
 		return nil, err
 	}
 	if err := selectFile(ctx, card, []byte{0x2F, 0x00}); err != nil {
 		return nil, fmt.Errorf("pcsc: select EF_DIR: %w", err)
 	}
-	var usimAID []byte
+	var aids [][]byte
 	for record := 1; record <= 32; record++ {
 		data, sw, err := card.Transmit(ctx, []byte{0x00, 0xB2, byte(record), 0x04, 0x00})
 		if err != nil {
@@ -374,18 +400,45 @@ func selectUSIM(ctx context.Context, card Card) ([]byte, error) {
 		if len(aid) == 0 {
 			continue
 		}
+		aids = append(aids, append([]byte(nil), aid...))
+	}
+	return aids, nil
+}
+
+func selectAKAApplication(ctx context.Context, card Card, preference string) ([]byte, string, error) {
+	aids, err := readDIRAIDs(ctx, card)
+	if err != nil {
+		return nil, "", err
+	}
+	if strings.EqualFold(strings.TrimSpace(preference), "isim_strict") {
+		for _, aid := range aids {
+			if strings.HasPrefix(strings.ToUpper(hex.EncodeToString(aid)), isimAIDPrefix) {
+				if _, err := selectApplication(ctx, card, aid); err != nil {
+					return nil, "", err
+				}
+				return aid, "ISIM", nil
+			}
+		}
+		return nil, "", ErrISIMUnavailable
+	}
+
+	for _, aid := range aids {
 		if strings.HasPrefix(strings.ToUpper(hex.EncodeToString(aid)), usimAIDPrefix) {
-			usimAID = append([]byte(nil), aid...)
-			break
+			if _, err := selectApplication(ctx, card, aid); err != nil {
+				return nil, "", err
+			}
+			return aid, "USIM", nil
 		}
 	}
-	if len(usimAID) == 0 {
-		return nil, ErrUSIMUnavailable
+	for _, aid := range aids {
+		if strings.HasPrefix(strings.ToUpper(hex.EncodeToString(aid)), isimAIDPrefix) {
+			if _, err := selectApplication(ctx, card, aid); err != nil {
+				return nil, "", err
+			}
+			return aid, "ISIM", nil
+		}
 	}
-	if _, err := selectApplication(ctx, card, usimAID); err != nil {
-		return nil, err
-	}
-	return usimAID, nil
+	return nil, "", ErrUSIMUnavailable
 }
 
 func selectMF(ctx context.Context, card Card) error {
@@ -408,13 +461,13 @@ func selectFile(ctx context.Context, card Card, fileID []byte) error {
 
 func selectApplication(ctx context.Context, card Card, aid []byte) ([]byte, error) {
 	if len(aid) == 0 || len(aid) > 32 {
-		return nil, errors.New("pcsc: invalid USIM AID")
+		return nil, errors.New("pcsc: invalid application AID")
 	}
 	apdu := []byte{0x00, 0xA4, 0x04, 0x04, byte(len(aid))}
 	apdu = append(apdu, aid...)
 	apdu = append(apdu, 0x00)
 	data, sw, err := card.Transmit(ctx, apdu)
-	if err := requireStatus("select USIM application", sw, err); err != nil {
+	if err := requireStatus("select application", sw, err); err != nil {
 		return nil, err
 	}
 	return data, nil

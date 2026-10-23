@@ -805,7 +805,6 @@ export default function SmsTestPage() {
       <Modal
         open={endpointOpen}
         onClose={() => setEndpointOpen(false)}
-        width="max-w-2xl"
         title={endpointForm.id ? t("编辑接口") : t("新建接口")}
         footer={
           <div className="flex justify-end gap-2">
@@ -885,7 +884,6 @@ export default function SmsTestPage() {
       <Modal
         open={scheduleOpen}
         onClose={() => setScheduleOpen(false)}
-        width="max-w-2xl"
         title={scheduleForm.id ? t("编辑测试计划") : t("新建测试计划")}
         footer={
           <div className="flex justify-end gap-2">

@@ -21,6 +21,15 @@ const (
 	quectelVendorID = "2c7c"
 )
 
+var ml307USBIDs = [...]struct {
+	vendorID    string
+	productID   string
+	atInterface int
+}{
+	{"2ecc", "3012", 2},
+	{"2c91", "0002", 3},
+}
+
 type SysFSDiscoverer struct {
 	SysRoot string
 	DevRoot string
@@ -95,7 +104,10 @@ func (d *SysFSDiscoverer) Discover(ctx context.Context) ([]Candidate, error) {
 			// Re-admit them by vendor so their AT serial ports stay discoverable;
 			// the candidate is only kept if a ttyUSB/ttyACM node is actually
 			// found below, which is exactly the AT-bearing composition we want.
-			if !isQuectelUSBModem(vendorID) {
+			if !IsQuectelUSBModem(vendorID) && !IsML307(Candidate{
+				VendorID: vendorID, ProductID: productID,
+				Product: readTrimmed(filepath.Join(resolvedDevice, "product")),
+			}) {
 				continue
 			}
 		}
@@ -163,8 +175,19 @@ func (d *SysFSDiscoverer) Discover(ctx context.Context) ([]Candidate, error) {
 			}
 			return left.Name < right.Name
 		})
-		assignQuectelPortRoles(state.candidate.Ports)
-		state.candidate.ATPort = selectATPort(state.candidate.Ports)
+		if atInterface, ok := ml307ATInterface(state.candidate); ok {
+			for index := range state.candidate.Ports {
+				port := &state.candidate.Ports[index]
+				port.Role = PortRoleUnknown
+				if port.InterfaceNumber == atInterface {
+					port.Role = PortRoleAT
+					state.candidate.ATPort = *port
+				}
+			}
+		} else {
+			assignQuectelPortRoles(state.candidate.Ports)
+			state.candidate.ATPort = selectATPort(state.candidate.Ports)
+		}
 		if !state.candidate.HasATPort() {
 			// A modem without a usable AT port cannot be driven by vocat, but it
 			// is far more useful to surface it with a discovery issue than to
@@ -192,6 +215,26 @@ func (d *SysFSDiscoverer) Discover(ctx context.Context) ([]Candidate, error) {
 	return result, nil
 }
 
+// IsML307 identifies the ML307 USB modem family by its USB identity or product string.
+func IsML307(candidate Candidate) bool {
+	_, ok := ml307ATInterface(candidate)
+	return ok
+}
+
+func ml307ATInterface(candidate Candidate) (int, bool) {
+	vendorID := strings.TrimSpace(candidate.VendorID)
+	productID := strings.TrimSpace(candidate.ProductID)
+	for _, id := range ml307USBIDs {
+		if vendorID == id.vendorID && productID == id.productID {
+			return id.atInterface, true
+		}
+	}
+	if strings.Contains(strings.ToUpper(candidate.Product), "ML307") {
+		return 2, true
+	}
+	return 0, false
+}
+
 // IsDJI4GUSB reports whether a USB identity belongs to the first-generation
 // DJI/Baiwang 4G module. It keeps the factory 2ca3:4006 identity usable without
 // requiring a persistent AT+QCFG USB identity rewrite to Quectel 2c7c:0125.
@@ -200,21 +243,21 @@ func IsDJI4GUSB(vendorID, productID string) bool {
 		strings.EqualFold(strings.TrimSpace(productID), dji4GProductID)
 }
 
-// isQuectelUSBModem reports whether a USB identity belongs to a Quectel
+// IsQuectelUSBModem reports whether a USB identity belongs to a Quectel
 // module. Quectel's serial/RNDIS/ECM compositions (e.g. EC200A at 2c7c:6005)
 // do not bind qmi_wwan, so discovery must fall back to the vendor ID to keep
 // them visible. The candidate is only retained if it exposes an AT serial
 // port, which filters out unrelated Quectel-branded peripherals.
-func isQuectelUSBModem(vendorID string) bool {
+func IsQuectelUSBModem(vendorID string) bool {
 	return strings.EqualFold(strings.TrimSpace(vendorID), quectelVendorID)
 }
 
-// normalizeUSBIdentity replaces the placeholder strings shipped by the
-// classic Quectel EC20/EC25 USB composition. Linux faithfully exposes those
-// modules as "Android / Android", but that text is a firmware placeholder,
-// not the modem model or manufacturer.
+// normalizeUSBIdentity replaces the placeholder strings shipped by certain
+// modems. Linux faithfully exposes those modules as "Android / Android" or
+// "Linux / Linux", but those texts are firmware placeholders, not the modem
+// model or manufacturer.
 func normalizeUSBIdentity(vendorID, productID, manufacturer, product string) (string, string) {
-	if !isQuectelUSBModem(vendorID) ||
+	if !IsQuectelUSBModem(vendorID) ||
 		!strings.EqualFold(strings.TrimSpace(productID), "0125") {
 		return manufacturer, product
 	}
@@ -337,6 +380,9 @@ func (d *SysFSDiscoverer) discoverWWAN(ctx context.Context) ([]Candidate, error)
 		}
 		if len(group.qmiNames) > 0 {
 			candidate.QMIControl = filepath.Join(d.DevRoot, group.qmiNames[0])
+		}
+		if !candidate.HasATPort() {
+			candidate.DiscoveryIssue = "at_port_missing"
 		}
 		result = append(result, candidate)
 	}

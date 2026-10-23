@@ -15,6 +15,7 @@ const {
   DEFAULT_LARK_PAYLOAD_TEMPLATE,
   buildLarkPayload,
   buildNotificationsPayload,
+  defaultNotifyForms,
   formsFromNotifications,
 } = await import(moduleURL);
 
@@ -30,6 +31,7 @@ test("loads a masked signed Lark group bot config", () => {
   });
 
   assert.deepEqual(forms.lark, {
+    deviceIds: null,
     enabled: true,
     url: "********",
     signingEnabled: true,
@@ -84,8 +86,59 @@ test("includes Lark in the complete notification settings payload", () => {
   const payload = buildNotificationsPayload(forms);
 
   assert.deepEqual(payload.lark, {
+    deviceIds: null,
     enabled: false,
     signing_enabled: false,
     payload_template: DEFAULT_LARK_PAYLOAD_TEMPLATE,
   });
+});
+
+test("default webhook template identifies the receiving card and preserves custom templates", () => {
+  const defaults = formsFromNotifications({});
+  assert.match(defaults.webhook.textTemplate, /收信卡  \{\{recipient\}\}/);
+  assert.match(buildNotificationsPayload(defaults).webhook.textTemplate, /\{\{recipient\}\}/);
+
+  for (const textTemplate of ["", "legacy {{number}}: {{text}}", "{{local_phone}} / {{iccid}} / {{recipient}}"]) {
+    const forms = formsFromNotifications({ webhook: { textTemplate } });
+    assert.equal(forms.webhook.textTemplate, textTemplate);
+    assert.equal(buildNotificationsPayload(forms).webhook.textTemplate, textTemplate);
+  }
+});
+
+test("round-trips MeoW alongside the seven existing channels", () => {
+  const forms = formsFromNotifications({ meow: { enabled: true, nickname: " 昵称 ", url: " https://example.com ", imgUrl: " https://example.com/icon.png " } });
+  assert.deepEqual(buildNotificationsPayload(forms).meow, { enabled: true, nickname: "昵称", url: "https://example.com", imgUrl: "https://example.com/icon.png", deviceIds: null });
+  assert.deepEqual(Object.keys(buildNotificationsPayload(forms)).sort(), ["bark", "email", "lark", "meow", "pushplus", "telegram", "webhook", "wecom"].sort());
+});
+
+test("clear markers apply only to explicitly cleared Telegram and Email drafts", () => {
+  const forms = formsFromNotifications({ telegram: { enabled: true, botToken: "********", deviceIds: [] }, email: { enabled: false, password: "********", deviceIds: ["offline"] } });
+  const normal = buildNotificationsPayload(forms);
+  assert.equal(Object.hasOwn(normal.telegram, "clearSecrets"), false);
+  assert.equal(Object.hasOwn(normal.email, "clearSecrets"), false);
+  forms.telegram.botToken = "";
+  const cleared = buildNotificationsPayload(forms, ["telegram"]);
+  assert.equal(cleared.telegram.enabled, true);
+  assert.equal(cleared.telegram.botToken, "");
+  assert.equal(cleared.telegram.clearSecrets, true);
+  assert.deepEqual(cleared.telegram.deviceIds, []);
+  assert.equal(Object.hasOwn(cleared.email, "clearSecrets"), false);
+  forms.email.password = "new-password";
+  const rewritten = buildNotificationsPayload(forms, ["email"]);
+  assert.equal(rewritten.email.enabled, false);
+  assert.equal(rewritten.email.password, "new-password");
+  assert.equal(rewritten.email.clearSecrets, true);
+  assert.deepEqual(rewritten.email.deviceIds, ["offline"]);
+});
+
+test("device bindings round-trip missing, null, empty and selected scopes", () => {
+  const channels = Object.keys(defaultNotifyForms());
+  const scopes = [undefined, null, [], ["offline-device"]];
+  const data = Object.fromEntries(channels.map((channel, index) => [channel, { deviceIds: scopes[index % scopes.length] }]));
+  const forms = formsFromNotifications(data);
+  const payload = buildNotificationsPayload(forms);
+  for (const channel of channels) {
+    assert.deepEqual(forms[channel].deviceIds, data[channel].deviceIds ?? null);
+    assert.deepEqual(payload[channel].deviceIds, data[channel].deviceIds ?? null);
+  }
 });

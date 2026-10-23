@@ -12,6 +12,34 @@ import (
 	"testing"
 )
 
+func TestSysFSDiscoverySelectsML307Interface02(t *testing.T) {
+	root := t.TempDir()
+	sysRoot := filepath.Join(root, "sys")
+	devRoot := filepath.Join(root, "dev")
+	usbRoot := filepath.Join(sysRoot, "bus", "usb", "devices")
+	mustWrite(t, filepath.Join(usbRoot, "9-2", "idVendor"), "2ecc\n")
+	mustWrite(t, filepath.Join(usbRoot, "9-2", "idProduct"), "3012\n")
+	mustWrite(t, filepath.Join(usbRoot, "9-2", "product"), "Linux\n")
+
+	for number, tty := range map[string]string{"02": "ttyUSB4", "03": "ttyUSB3", "04": "ttyUSB2"} {
+		name := "9-2:1." + strings.TrimLeft(number, "0")
+		mustWrite(t, filepath.Join(usbRoot, name, "bInterfaceNumber"), number+"\n")
+		mustMkdir(t, filepath.Join(usbRoot, name, tty, "tty", tty))
+	}
+
+	candidates, err := NewSysFSDiscoverer(sysRoot, devRoot).Discover(context.Background())
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("got %d candidates, want 1", len(candidates))
+	}
+	candidate := candidates[0]
+	if candidate.ATPort.Name != "ttyUSB4" || candidate.ATPort.InterfaceNumber != 2 || candidate.ATPort.Role != PortRoleAT {
+		t.Fatalf("AT port = %#v, want interface 02", candidate.ATPort)
+	}
+}
+
 func TestSysFSDiscoverySelectsInterface04AndNeverInterface02(t *testing.T) {
 	root := t.TempDir()
 	sysRoot := filepath.Join(root, "sys")
@@ -580,5 +608,61 @@ func mustBindQMIWWAN(t *testing.T, sysRoot, interfaceName string) {
 	target := filepath.Join(sysRoot, "bus", "usb", "devices", interfaceName)
 	if err := os.Symlink(target, filepath.Join(driverDir, interfaceName)); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSysFSDiscoveryWWANWithoutATPortFlagsDiscoveryIssue(t *testing.T) {
+	root := t.TempDir()
+	sysRoot := filepath.Join(root, "sys")
+	devRoot := filepath.Join(root, "dev")
+	mustMkdir(t, filepath.Join(sysRoot, "class", "wwan", "wwan0qmi0"))
+	mustMkdir(t, devRoot)
+	mustWrite(t, filepath.Join(devRoot, "wwan0qmi0"), "")
+
+	candidates, err := NewSysFSDiscoverer(sysRoot, devRoot).Discover(context.Background())
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("got %d candidates, want 1", len(candidates))
+	}
+	candidate := candidates[0]
+	if candidate.ID != "mhi-wwan0" {
+		t.Fatalf("candidate ID = %q, want mhi-wwan0", candidate.ID)
+	}
+	if candidate.DiscoveryIssue != "at_port_missing" {
+		t.Fatalf("discovery issue = %q, want at_port_missing", candidate.DiscoveryIssue)
+	}
+	if candidate.HasATPort() {
+		t.Fatalf("candidate unexpectedly has an AT port: %#v", candidate.ATPort)
+	}
+}
+
+func TestSysFSDiscoveryWWANWithATPortHasNoDiscoveryIssue(t *testing.T) {
+	root := t.TempDir()
+	sysRoot := filepath.Join(root, "sys")
+	devRoot := filepath.Join(root, "dev")
+	mustMkdir(t, filepath.Join(sysRoot, "class", "wwan", "wwan0qmi0"))
+	mustMkdir(t, filepath.Join(sysRoot, "class", "wwan", "wwan0at0"))
+	mustMkdir(t, devRoot)
+	mustWrite(t, filepath.Join(devRoot, "wwan0qmi0"), "")
+	mustWrite(t, filepath.Join(devRoot, "wwan0at0"), "")
+
+	candidates, err := NewSysFSDiscoverer(sysRoot, devRoot).Discover(context.Background())
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("got %d candidates, want 1", len(candidates))
+	}
+	candidate := candidates[0]
+	if candidate.ID != "mhi-wwan0" {
+		t.Fatalf("candidate ID = %q, want mhi-wwan0", candidate.ID)
+	}
+	if candidate.DiscoveryIssue != "" {
+		t.Fatalf("discovery issue = %q, want empty", candidate.DiscoveryIssue)
+	}
+	if !candidate.HasATPort() {
+		t.Fatal("candidate must have an AT port")
 	}
 }

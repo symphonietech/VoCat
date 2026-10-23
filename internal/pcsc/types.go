@@ -18,6 +18,7 @@ var (
 	ErrPINTriesLow     = errors.New("pcsc: refusing PIN verification because too few attempts remain")
 	ErrPINRejected     = errors.New("pcsc: SIM PIN was rejected")
 	ErrUSIMUnavailable = errors.New("pcsc: no usable USIM application was found")
+	ErrISIMUnavailable = errors.New("pcsc: no usable ISIM application was found")
 	ErrCardChanged     = errors.New("pcsc: card identity changed during authentication")
 	ErrAKARejected     = errors.New("pcsc: USIM rejected the network authentication token")
 )

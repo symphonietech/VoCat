@@ -54,6 +54,7 @@ var (
 	ErrIMSNotRegistered          = errors.New("vowifi: IMS is not registered")
 	ErrSMSNotReady               = errors.New("vowifi: SMS over IMS is not ready")
 	ErrUSSINotReady              = errors.New("vowifi: USSI over IMS is not ready")
+	ErrUSSISessionNotFound       = errors.New("vowifi: USSI session not found or already closed")
 	ErrEAPAuthenticationRejected = errors.New("vowifi: EAP-AKA authentication rejected")
 	ErrResponderAUTHRequired     = errors.New("vowifi: verified IKE responder AUTH is required")
 	// ErrCleanupIncomplete marks a teardown that released its local IMS, tunnel,
@@ -302,8 +303,9 @@ type SMSSubmitResult struct {
 // first turn carries the service code in Code; a follow-up turn on an open
 // dialog carries the menu reply in Input and leaves Code empty.
 type USSISubmitRequest struct {
-	Code  string
-	Input string
+	SessionID string
+	Code      string
+	Input     string
 }
 
 // USSISubmitResult mirrors the device.USSDResult shape so the HTTP layer can
@@ -424,6 +426,12 @@ type SMSSender interface {
 // directly on a SIP MESSAGE with application/vnd.3gpp.ussd (TS 24.390).
 type USSISender interface {
 	SendUSSI(context.Context, USSISubmitRequest) (USSISubmitResult, error)
+}
+
+// USSICanceler is an optional capability of a registered IMS session to abort an
+// open USSD dialog.
+type USSICanceler interface {
+	CancelUSSI(context.Context, string) error
 }
 
 // Call describes one IMS call and reports whether an RTP media stream is

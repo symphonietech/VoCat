@@ -22,10 +22,11 @@ type PCSCAdapter struct {
 }
 
 var (
-	_ SIMIdentityReader = (*PCSCAdapter)(nil)
-	_ SMSCenterReader   = (*PCSCAdapter)(nil)
-	_ AKAProvider       = (*PCSCAdapter)(nil)
-	_ RadioController   = (*PCSCAdapter)(nil)
+	_ SIMIdentityReader    = (*PCSCAdapter)(nil)
+	_ SMSCenterReader      = (*PCSCAdapter)(nil)
+	_ AKAProvider          = (*PCSCAdapter)(nil)
+	_ PreferredAKAProvider = (*PCSCAdapter)(nil)
+	_ RadioController      = (*PCSCAdapter)(nil)
 )
 
 func NewPCSCAdapter(service *pcsc.Service, resolver PCSCBindingResolver) (*PCSCAdapter, error) {
@@ -49,6 +50,9 @@ func (adapter *PCSCAdapter) ReadIdentity(ctx context.Context, deviceID string) (
 	}
 	adapter.mu.Lock()
 	adapter.bindings[identity.ICCID] = strings.TrimSpace(deviceID)
+	if identity.IMSI != "" {
+		adapter.bindings[identity.IMSI] = strings.TrimSpace(deviceID)
+	}
 	adapter.mu.Unlock()
 	mncLength := identity.MNCLength
 	if mncLength != 2 && mncLength != 3 {
@@ -96,18 +100,53 @@ func (adapter *PCSCAdapter) CheckReady(ctx context.Context, identity SIMIdentity
 
 func (adapter *PCSCAdapter) deviceID(identity SIMIdentity) string {
 	adapter.mu.RLock()
-	deviceID := adapter.bindings[identity.ICCID]
-	adapter.mu.RUnlock()
-	return deviceID
+	defer adapter.mu.RUnlock()
+	if id, ok := adapter.bindings[identity.ICCID]; ok && id != "" {
+		return id
+	}
+	if id, ok := adapter.bindings[identity.IMSI]; ok && id != "" {
+		return id
+	}
+	var candidate string
+	for _, id := range adapter.bindings {
+		if id == "" {
+			continue
+		}
+		if candidate == "" {
+			candidate = id
+		} else if candidate != id {
+			return ""
+		}
+	}
+	return candidate
 }
 
 func (adapter *PCSCAdapter) Authenticate(ctx context.Context, identity SIMIdentity, challenge AKAChallenge) (AKAResult, error) {
+	return adapter.AuthenticateWithPreference(ctx, identity, challenge, "")
+}
+
+func (adapter *PCSCAdapter) AuthenticateWithPreference(
+	ctx context.Context,
+	identity SIMIdentity,
+	challenge AKAChallenge,
+	preference string,
+) (AKAResult, error) {
 	selector, pin, err := adapter.resolve(ctx, adapter.deviceID(identity))
 	if err != nil {
 		return AKAResult{}, err
 	}
-	result, err := adapter.service.Authenticate(ctx, selector, identity.ICCID, pin, pcsc.AKAChallenge(challenge))
+	result, err := adapter.service.AuthenticateWithPreference(
+		ctx,
+		selector,
+		identity.ICCID,
+		pin,
+		pcsc.AKAChallenge(challenge),
+		preference,
+	)
 	if err != nil {
+		if errors.Is(err, pcsc.ErrISIMUnavailable) || errors.Is(err, pcsc.ErrUSIMUnavailable) {
+			return AKAResult{}, errors.Join(ErrEC20ApplicationAbsent, err)
+		}
 		if errors.Is(err, pcsc.ErrAKARejected) {
 			return AKAResult{}, errors.Join(ErrEC20AKAMACFailure, err)
 		}

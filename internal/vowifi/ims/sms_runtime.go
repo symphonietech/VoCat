@@ -379,6 +379,9 @@ func (session *Session) exchangeRuntime(
 }
 
 func (session *Session) handleSIPRequest(request *sipRequest, respond func([]byte) error) {
+	if session.handleUSSIRequest(request, respond) {
+		return
+	}
 	if session.handleCallRequest(request, respond) {
 		return
 	}
@@ -441,7 +444,9 @@ func supportsUSSIContentType(value string) bool {
 	if err != nil {
 		return false
 	}
-	return strings.EqualFold(mediaType, ussiContentType)
+	return strings.EqualFold(mediaType, ussiContentType) ||
+		strings.EqualFold(mediaType, ussiXMLContentType) ||
+		strings.EqualFold(mediaType, "multipart/mixed")
 }
 
 func buildSIPResponse(request *sipRequest, status int, tag string) ([]byte, error) {
@@ -870,68 +875,7 @@ func extractUSSDString(body []byte) (raw []byte, dcs *int, text string) {
 // menu reply in request.Input. USSI does not require the +g.3gpp.smsip contact
 // to be confirmed — only IMS registration.
 func (session *Session) SendUSSI(ctx context.Context, request vowifi.USSISubmitRequest) (vowifi.USSISubmitResult, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	session.smsMu.Lock()
-	defer session.smsMu.Unlock()
-
-	session.mu.Lock()
-	if session.closed || !session.evidence.Registered {
-		session.mu.Unlock()
-		return vowifi.USSISubmitResult{}, vowifi.ErrUSSINotReady
-	}
-	target := session.ussiTarget()
-	session.mu.Unlock()
-
-	payload := strings.TrimSpace(firstNonEmpty(request.Input, request.Code))
-	if payload == "" {
-		return vowifi.USSISubmitResult{}, errors.New("ims: USSI payload is empty")
-	}
-	body, dcs, err := encodeUSSDBody(payload)
-	if err != nil {
-		return vowifi.USSISubmitResult{}, err
-	}
-	// TS 24.390 §5.2.1: [language indicator]? [length][DCS][USSD string].
-	// The length byte counts the DCS plus the string octets that follow it.
-	stringOctets := body
-	length := len(stringOctets) + 1
-	if length > 255 {
-		return vowifi.USSISubmitResult{}, errors.New("ims: USSD string exceeds 254 octets")
-	}
-	message := make([]byte, 0, 2+len(stringOctets))
-	message = append(message, byte(length), byte(*dcs))
-	message = append(message, stringOctets...)
-	response, sendErr := session.sendSIPMessageWith(ctx, target, message, "", ussiContentType, "ussd")
-	result := vowifi.USSISubmitResult{
-		SubmissionStatus: "pending",
-	}
-	if response != nil {
-		result.SIPCode = response.StatusCode
-	}
-	if sendErr != nil {
-		result.SubmissionStatus = "failed"
-		result.Raw = strings.ToUpper(hex.EncodeToString(message))
-		return result, sendErr
-	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		result.SubmissionStatus = "rejected_by_ims"
-		result.Status = "failed"
-		result.Raw = strings.ToUpper(hex.EncodeToString(message))
-		return result, fmt.Errorf("ims: USSI rejected with SIP %d", response.StatusCode)
-	}
-	// A 2xx response may carry the network's reply in the same MESSAGE body.
-	text, replyDCS := session.parseUSSIReply(response)
-	result.Text = text
-	result.DCS = replyDCS
-	result.Status = "final"
-	result.Continueable = false
-	result.Raw = strings.ToUpper(hex.EncodeToString(message))
-	if result.Status == "" {
-		result.Status = "final"
-	}
-	result.SubmissionStatus = "accepted_by_ims"
-	return result, nil
+	return session.sendUSSI(ctx, request)
 }
 
 // parseUSSIReply decodes the USSD body of a 2xx response when the network
