@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -22,7 +23,61 @@ var (
 	ErrUnauthorized       = errors.New("unauthorized")
 	ErrInvalidCSRF        = errors.New("invalid csrf token")
 	ErrEmptyPassword      = errors.New("password cannot be empty")
+	ErrInvalidTokenName   = errors.New("invalid api token name")
+	ErrDuplicateTokenName = errors.New("api token name already exists")
+	ErrUnknownToken       = errors.New("unknown api token")
 )
+
+// APITokenPrefix marks bearer credentials so they are identifiable in logs
+// and detectable by secret scanners. Symfive issues "sym_" where upstream
+// VoCat issues "vcat_".
+const APITokenPrefix = "sym_"
+
+// acceptedAPITokenPrefixes are the prefixed forms a presented token may
+// carry. A token is looked up by the SHA-256 of exactly the string presented,
+// so accepting a form here never rewrites or strips anything: it only lets
+// that form past the cheap reject in LooksLikeAPIToken.
+//
+//   - "sym_at_" is recognised alongside "sym_" at the operator's request,
+//     though CreateAPIToken never issues it.
+//   - "vocat_at_" is this fork's original form, issued before the prefix
+//     was dropped. Such tokens still authenticate with the prefix attached
+//     because their stored hash covers it.
+var acceptedAPITokenPrefixes = []string{"sym_at_", APITokenPrefix, "vocat_at_"}
+
+// legacyAPITokenLength is a prefix-less token: 32 random bytes encoded as
+// unpadded base64url, the form this fork issued between dropping "vocat_at_"
+// and adopting "sym_".
+const legacyAPITokenLength = 43
+
+// LooksLikeAPIToken reports whether a presented bearer credential has the
+// shape of a token Symfive issues or once issued. It is a cheap reject for
+// junk (an empty header, a session cookie, a JWT) before the database lookup,
+// and it gates which failures reach the audit trail. It says nothing about
+// whether the token is valid.
+func LooksLikeAPIToken(token string) bool {
+	for _, prefix := range acceptedAPITokenPrefixes {
+		if strings.HasPrefix(token, prefix) && len(token) > len(prefix) {
+			return true
+		}
+	}
+	if len(token) != legacyAPITokenLength {
+		return false
+	}
+	for _, character := range token {
+		if !(character >= 'a' && character <= 'z' ||
+			character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' ||
+			character == '-' || character == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+// apiTokenTouchInterval throttles the last_used_at write so each
+// authenticated request does not become a database write.
+const apiTokenTouchInterval = 5 * time.Minute
 
 const bcryptPasswordLimit = 72
 
@@ -53,10 +108,18 @@ type Credentials struct {
 }
 
 type AuthenticatedSession struct {
-	Principal Principal
-	ExpiresAt time.Time
-	tokenHash []byte
-	csrfHash  []byte
+	Principal     Principal
+	ExpiresAt     time.Time
+	LoginMethod   string
+	SecureCookies bool
+	tokenHash     []byte
+	csrfHash      []byte
+}
+
+// TokenHash returns a copy of the session digest for atomic authorization checks.
+// The browser's raw session credential is never exposed by an authenticated view.
+func (s AuthenticatedSession) TokenHash() []byte {
+	return append([]byte(nil), s.tokenHash...)
 }
 
 func New(database *store.Store, options Options) (*Service, error) {
@@ -142,7 +205,8 @@ func (s *Service) ResetAdminCredentials(ctx context.Context, username string, pa
 	return nil
 }
 
-func (s *Service) Login(ctx context.Context, username string, password string) (Credentials, error) {
+// Login verifies the local password and persists fresh session and CSRF credentials before returning them.
+func (s *Service) Login(ctx context.Context, username string, password string, secureCookies bool) (Credentials, error) {
 	admin, err := s.store.AdminByUsername(ctx, strings.TrimSpace(username))
 	if errors.Is(err, store.ErrNotFound) {
 		_ = comparePassword(s.dummyHash, password)
@@ -158,6 +222,20 @@ func (s *Service) Login(ctx context.Context, username string, password string) (
 	if err := s.store.DeleteExpiredSessions(ctx, time.Now()); err != nil {
 		return Credentials{}, err
 	}
+	credentials, err := s.PrepareCredentials(Principal{ID: admin.ID, Username: admin.Username})
+	if err != nil {
+		return Credentials{}, err
+	}
+	if err := s.store.CreateSession(ctx, admin.ID, hashToken(credentials.SessionToken), hashToken(credentials.CSRFToken), credentials.ExpiresAt, secureCookies); err != nil {
+		return Credentials{}, err
+	}
+	return credentials, nil
+}
+
+// PrepareCredentials generates independent local Session and CSRF material
+// without persisting it. The caller must atomically commit SSO authorization
+// before delivering these raw credentials to the browser.
+func (s *Service) PrepareCredentials(principal Principal) (Credentials, error) {
 	sessionToken, err := randomToken()
 	if err != nil {
 		return Credentials{}, err
@@ -167,26 +245,15 @@ func (s *Service) Login(ctx context.Context, username string, password string) (
 		return Credentials{}, err
 	}
 	expiresAt := time.Now().UTC().Add(s.sessionTTL)
-	if err := s.store.CreateSession(
-		ctx,
-		admin.ID,
-		hashToken(sessionToken),
-		hashToken(csrfToken),
-		expiresAt,
-	); err != nil {
-		return Credentials{}, err
-	}
 	return Credentials{
 		SessionToken: sessionToken,
 		CSRFToken:    csrfToken,
 		ExpiresAt:    expiresAt,
-		Principal: Principal{
-			ID:       admin.ID,
-			Username: admin.Username,
-		},
+		Principal:    principal,
 	}, nil
 }
 
+// Authenticate resolves a live session and exposes its principal, expiry, and original login method.
 func (s *Service) Authenticate(ctx context.Context, sessionToken string) (AuthenticatedSession, error) {
 	if sessionToken == "" {
 		return AuthenticatedSession{}, ErrUnauthorized
@@ -208,9 +275,11 @@ func (s *Service) Authenticate(ctx context.Context, sessionToken string) (Authen
 			ID:       session.Admin.ID,
 			Username: session.Admin.Username,
 		},
-		ExpiresAt: session.ExpiresAt,
-		tokenHash: tokenHash,
-		csrfHash:  session.CSRFHash,
+		ExpiresAt:     session.ExpiresAt,
+		LoginMethod:   session.LoginMethod,
+		SecureCookies: session.SecureCookies,
+		tokenHash:     tokenHash,
+		csrfHash:      session.CSRFHash,
 	}, nil
 }
 
@@ -282,117 +351,120 @@ func (s *Service) Logout(ctx context.Context, sessionToken string) error {
 	return nil
 }
 
-// apiTokenMinLength and apiTokenMaxLength bound what is worth a database
-// lookup. Deliberately loose rather than an equality test on 43: a token
-// issued before the "vocat_at_" prefix was dropped is 52 characters and must
-// still be accepted.
-const (
-	apiTokenMinLength = 20
-	apiTokenMaxLength = 256
-)
-
-// DefaultAPITokenTTL is applied by callers that do not pick their own
-// lifetime (the CLI's --ttl flag, for example).
-const DefaultAPITokenTTL = 30 * 24 * time.Hour
-
-type APITokenInfo struct {
-	ID         int64
-	Name       string
-	CreatedAt  time.Time
-	ExpiresAt  time.Time
-	LastUsedAt *time.Time
+// APITokenCredentials is returned once at creation; the raw token is never
+// stored or retrievable again.
+type APITokenCredentials struct {
+	Token     string
+	Name      string
+	ReadOnly  bool
+	ExpiresAt time.Time // zero means the token never expires
 }
 
-// CreateAPIToken mints a new long-lived, non-interactive credential and
-// returns the raw token exactly once; only its SHA-256 hash is persisted.
-func (s *Service) CreateAPIToken(ctx context.Context, name string, ttl time.Duration) (string, APITokenInfo, error) {
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return "", APITokenInfo{}, errors.New("auth: api token name is required")
+// APITokenPrincipal identifies an authenticated bearer credential.
+type APITokenPrincipal struct {
+	Name     string
+	ReadOnly bool
+}
+
+// CreateAPIToken issues a bearer credential. ttl <= 0 creates a token that
+// never expires.
+func (s *Service) CreateAPIToken(
+	ctx context.Context,
+	name string,
+	readOnly bool,
+	ttl time.Duration,
+) (APITokenCredentials, error) {
+	if !validTokenName(name) {
+		return APITokenCredentials{}, fmt.Errorf("%w: use 1-64 letters, digits, dots, underscores, or hyphens", ErrInvalidTokenName)
 	}
-	if ttl <= 0 {
-		return "", APITokenInfo{}, errors.New("auth: api token ttl must be positive")
+	if _, err := s.store.APITokenByName(ctx, name); err == nil {
+		return APITokenCredentials{}, fmt.Errorf("%w: %s", ErrDuplicateTokenName, name)
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return APITokenCredentials{}, fmt.Errorf("auth: read api tokens: %w", err)
 	}
-	secret, err := randomToken()
+	random, err := randomToken()
 	if err != nil {
-		return "", APITokenInfo{}, err
+		return APITokenCredentials{}, err
 	}
-	// The raw token is the secret and nothing else. It used to carry a
-	// "vocat_at_" prefix so a leaked token was recognisable on sight and to
-	// secret scanners; that was removed by request. Tokens minted before the
-	// change keep working -- see AuthenticateAPIToken.
-	rawToken := secret
-	expiresAt := time.Now().UTC().Add(ttl)
-	record, err := s.store.CreateAPIToken(ctx, name, hashToken(rawToken), expiresAt)
-	if err != nil {
-		return "", APITokenInfo{}, err
+	token := APITokenPrefix + random
+	var expiresAt time.Time
+	if ttl > 0 {
+		expiresAt = time.Now().UTC().Add(ttl)
 	}
-	return rawToken, APITokenInfo{
-		ID:        record.ID,
-		Name:      record.Name,
-		CreatedAt: record.CreatedAt,
-		ExpiresAt: record.ExpiresAt,
+	if _, err := s.store.CreateAPIToken(ctx, name, hashToken(token), readOnly, expiresAt); err != nil {
+		return APITokenCredentials{}, fmt.Errorf("auth: create api token: %w", err)
+	}
+	return APITokenCredentials{
+		Token:     token,
+		Name:      name,
+		ReadOnly:  readOnly,
+		ExpiresAt: expiresAt,
 	}, nil
 }
 
-// AuthenticateAPIToken validates a raw bearer token and returns the
-// principal it grants access as. VoCat has a single administrator, so a
-// valid token always authenticates as the current admin. Expired tokens are
-// deleted so ListAPITokens does not accumulate dead rows.
-func (s *Service) AuthenticateAPIToken(ctx context.Context, rawToken string) (Principal, error) {
-	// A token is looked up by the hash of exactly the string presented, and
-	// nothing here rewrites it, so a token minted while the "vocat_at_"
-	// prefix existed still authenticates with its prefix attached: its stored
-	// hash covers the whole string including those nine bytes. Stripping a
-	// prefix here instead would have invalidated every token already issued.
-	//
-	// The length bounds replace the prefix test as the cheap reject for
-	// something that is plainly not a token -- an empty header, a session
-	// cookie, a JWT -- and are wide enough for both forms: 43 characters for
-	// a current token (32 random bytes, base64url) and 52 for a prefixed one.
-	if len(rawToken) < apiTokenMinLength || len(rawToken) > apiTokenMaxLength {
-		return Principal{}, ErrUnauthorized
+// AuthenticateAPIToken validates a presented bearer credential. Opportunistic
+// cleanup and usage bookkeeping never reject an otherwise valid credential:
+// a transient store hiccup must not read as "invalid token" to the client.
+func (s *Service) AuthenticateAPIToken(ctx context.Context, token string) (APITokenPrincipal, error) {
+	if !LooksLikeAPIToken(token) {
+		return APITokenPrincipal{}, ErrUnauthorized
 	}
-	record, err := s.store.APITokenByHash(ctx, hashToken(rawToken))
+	digest := hashToken(token)
+	if err := s.store.DeleteExpiredAPITokens(ctx, time.Now()); err != nil {
+		slog.Warn("prune expired api tokens failed", "error", err)
+	}
+	stored, err := s.store.APITokenByHash(ctx, digest)
 	if errors.Is(err, store.ErrNotFound) {
-		return Principal{}, ErrUnauthorized
+		return APITokenPrincipal{}, ErrUnauthorized
 	}
 	if err != nil {
-		return Principal{}, fmt.Errorf("auth: load api token: %w", err)
+		return APITokenPrincipal{}, fmt.Errorf("auth: load api token: %w", err)
 	}
-	if !record.ExpiresAt.After(time.Now().UTC()) {
-		_ = s.store.DeleteAPIToken(ctx, record.ID)
-		return Principal{}, ErrUnauthorized
+	if !stored.ExpiresAt.IsZero() && !stored.ExpiresAt.After(time.Now().UTC()) {
+		return APITokenPrincipal{}, ErrUnauthorized
 	}
-	admin, err := s.store.CurrentAdmin(ctx)
-	if err != nil {
-		return Principal{}, fmt.Errorf("auth: read administrator: %w", err)
+	if err := s.store.TouchAPIToken(ctx, digest, apiTokenTouchInterval); err != nil {
+		slog.Warn("touch api token failed", "error", err)
 	}
-	// Best-effort: a failed last-used update must never block the request.
-	_ = s.store.TouchAPIToken(ctx, record.ID, time.Now().UTC())
-	return Principal{ID: admin.ID, Username: admin.Username}, nil
+	return APITokenPrincipal{Name: stored.Name, ReadOnly: stored.ReadOnly}, nil
 }
 
-func (s *Service) ListAPITokens(ctx context.Context) ([]APITokenInfo, error) {
-	records, err := s.store.ListAPITokens(ctx)
+// ListAPITokens returns the stored token inventory, never the credentials.
+func (s *Service) ListAPITokens(ctx context.Context) ([]store.APIToken, error) {
+	tokens, err := s.store.APITokens(ctx)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("auth: list api tokens: %w", err)
 	}
-	infos := make([]APITokenInfo, 0, len(records))
-	for _, record := range records {
-		infos = append(infos, APITokenInfo{
-			ID:         record.ID,
-			Name:       record.Name,
-			CreatedAt:  record.CreatedAt,
-			ExpiresAt:  record.ExpiresAt,
-			LastUsedAt: record.LastUsedAt,
-		})
-	}
-	return infos, nil
+	return tokens, nil
 }
 
-func (s *Service) RevokeAPIToken(ctx context.Context, id int64) error {
-	return s.store.DeleteAPIToken(ctx, id)
+// RevokeAPIToken deletes one token by name.
+func (s *Service) RevokeAPIToken(ctx context.Context, name string) error {
+	if err := s.store.DeleteAPIToken(ctx, name); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("%w: %s", ErrUnknownToken, name)
+		}
+		return fmt.Errorf("auth: revoke api token: %w", err)
+	}
+	return nil
+}
+
+// validTokenName applies the same character rules as device IDs; callers trim
+// surrounding whitespace before calling.
+func validTokenName(name string) bool {
+	if len(name) < 1 || len(name) > 64 {
+		return false
+	}
+	for index, character := range name {
+		if character >= 'a' && character <= 'z' ||
+			character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' ||
+			(index > 0 && (character == '.' || character == '_' || character == '-')) {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // ChangePassword verifies the current password, replaces it with a fresh
@@ -482,3 +554,6 @@ func hashToken(token string) []byte {
 	digest := sha256.Sum256([]byte(token))
 	return digest[:]
 }
+
+// TokenHash derives the digest used by the store for session and CSRF material.
+func TokenHash(token string) []byte { return hashToken(token) }

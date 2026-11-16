@@ -223,32 +223,6 @@ func (s *Server) smsStoreFilter(ctx context.Context, deviceID, requestedIMEI str
 	return filter
 }
 
-// blockedSMSDestination reports whether the recipient is in a barred country.
-// Normalization mirrors the PDU/IMS paths so the block cannot be sidestepped by
-// dropping the leading "+" or using a 00 international prefix.
-func blockedSMSDestination(phone string) (bool, string) {
-	var digits strings.Builder
-	for _, c := range strings.TrimSpace(phone) {
-		if c >= '0' && c <= '9' {
-			digits.WriteRune(c)
-		}
-	}
-	d := digits.String()
-	if strings.HasPrefix(d, "00") {
-		d = d[2:]
-	}
-	// Disabled deliberately: this deployment sends to a +86 handset the
-	// operator owns. Commented rather than deleted so the rule, and the
-	// normalization above that it depends on, can be restored by
-	// uncommenting these three lines.
-	//
-	// if strings.HasPrefix(d, "86") {
-	// 	return true, "SMS to +86 (China) destinations is not allowed"
-	// }
-	_ = d
-	return false, ""
-}
-
 func (s *Server) handleSMSSend(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodPost) {
 		return
@@ -271,7 +245,7 @@ func (s *Server) handleSMSSend(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "device_required", "a sending device is required")
 		return
 	}
-	if blocked, reason := blockedSMSDestination(request.Phone); blocked {
+	if blocked, reason := device.BlockedSMSDestination(request.Phone); blocked {
 		writeError(w, http.StatusBadRequest, "blocked_destination", reason)
 		return
 	}
@@ -751,6 +725,7 @@ func (s *Server) syncModemSMS(ctx context.Context, onlyDevice string) {
 			config.ModemIMEI,
 		)
 		concatSources := modemSMSConcatSources(messages)
+		timestampProfile := modemSMSTimestampProfile(currentEntry.Snapshot)
 		autoClear := developer.AutoClearModemStorage(ctx, s.store)
 		var clearSlots []modemSMSSlot
 		// Multipart IDs derive from the first segment's slot in this scan, so
@@ -810,8 +785,9 @@ func (s *Server) syncModemSMS(ctx context.Context, onlyDevice string) {
 			}
 			peer := firstNonEmpty(message.From, message.To, "未知发送方")
 			timestamp := time.Now().UTC()
-			if message.ServiceCenterTimestamp != nil {
-				timestamp = message.ServiceCenterTimestamp.UTC()
+			serviceCenterTimestamp, timestampCorrection := timestampProfile.NormalizeSMSTimestamp(message.ServiceCenterTimestamp)
+			if serviceCenterTimestamp != nil {
+				timestamp = serviceCenterTimestamp.UTC()
 			} else if message.DischargeTimestamp != nil {
 				timestamp = message.DischargeTimestamp.UTC()
 			}
@@ -820,7 +796,7 @@ func (s *Server) syncModemSMS(ctx context.Context, onlyDevice string) {
 				direction = "outbound"
 			}
 			messageID := modemSMSMessageID(message, modemIMEI, config.ID, peer, concatSources[modemSMSStorageKey(message)])
-			extra, _ := json.Marshal(map[string]any{
+			metadata := map[string]any{
 				"modem_index":        message.Index,
 				"storage":            message.Storage,
 				"storage_status":     message.StorageStatus,
@@ -837,7 +813,12 @@ func (s *Server) syncModemSMS(ctx context.Context, onlyDevice string) {
 				// segment differently on a later pass, otherwise notification
 				// providers can treat the old message as newly inserted.
 				"keep_durable_id_on_rescan": true,
-			})
+			}
+			if timestampCorrection != nil {
+				metadata["service_center_timestamp"] = serviceCenterTimestamp.UTC()
+				metadata["service_center_timestamp_correction"] = timestampCorrection
+			}
+			extra, _ := json.Marshal(metadata)
 			saveResult, saveErr := s.store.SaveSMSMessageWithResult(ctx, store.SMSMessage{
 				MessageID:     messageID,
 				DeviceID:      config.ID,
@@ -983,6 +964,27 @@ func modemSMSMessageID(message device.SMSMessage, modemIMEI, deviceID, peer, con
 type smsSubscriptionIdentity struct {
 	ICCID string
 	IMSI  string
+}
+
+func modemSMSTimestampProfile(snapshot *device.Snapshot) vowifi.CarrierProfile {
+	if snapshot == nil {
+		return vowifi.ResolveCarrierProfile(vowifi.SIMIdentity{})
+	}
+	identity := vowifi.SIMIdentity{
+		ICCID: snapshot.ICCID, IMSI: snapshot.IMSI, SPN: snapshot.SPN,
+		GID1: snapshot.GID1, GID2: snapshot.GID2,
+	}
+	// Use the SIM's home network, never the visited registration operator or
+	// the host's location. CarrierForSIM also handles DITO sponsor identities.
+	if (snapshot.MNCLength == 2 || snapshot.MNCLength == 3) && len(snapshot.IMSI) >= 3+snapshot.MNCLength {
+		identity.HomeMCC, identity.HomeMNC = snapshot.IMSI[:3], snapshot.IMSI[3:3+snapshot.MNCLength]
+	} else if plmn, _, _, ok := device.CarrierForSIM(device.CarrierIdentity{
+		ICCID: snapshot.ICCID, IMSI: snapshot.IMSI, SPN: snapshot.SPN,
+		GID1: snapshot.GID1, GID2: snapshot.GID2, MNCLength: snapshot.MNCLength,
+	}); ok && len(plmn) >= 5 {
+		identity.HomeMCC, identity.HomeMNC = plmn[:3], plmn[3:]
+	}
+	return vowifi.ResolveCarrierProfile(identity)
 }
 
 func smsIdentityFromSnapshot(snapshot *device.Snapshot) smsSubscriptionIdentity {

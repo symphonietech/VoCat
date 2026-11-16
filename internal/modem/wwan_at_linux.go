@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -18,6 +19,8 @@ import (
 // used by ordinary serial libraries fail even though raw AT read/write works.
 type nativeWWANATTransport struct {
 	mu          sync.RWMutex
+	readMu      sync.Mutex
+	reader      *nativeWWANATReader
 	fd          int
 	readTimeout time.Duration
 	closed      atomic.Bool
@@ -28,10 +31,71 @@ func openNativeWWANATTransport(path string) (Transport, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &nativeWWANATTransport{fd: fd, readTimeout: -1}, nil
+	// Reader and writer need distinct open file descriptions. Clearing O_NONBLOCK
+	// on a dup would also make writes block and prevent Close from releasing them.
+	readFD, err := unix.Open(path, unix.O_RDWR|unix.O_NONBLOCK|unix.O_NOCTTY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		// Keep the existing poll transport for drivers that require exclusive open.
+		return &nativeWWANATTransport{fd: fd, readTimeout: -1}, nil
+	}
+	return newNativeWWANATTransport(readFD, fd)
+}
+
+// newNativeWWANATTransport owns both independently opened descriptors. A reader
+// process isolates the blocking syscall so closing a session can stop it without
+// leaving a thread that competes with a later session for modem responses.
+func newNativeWWANATTransport(readFD, writeFD int) (*nativeWWANATTransport, error) {
+	flags, err := unix.FcntlInt(uintptr(readFD), unix.F_GETFL, 0)
+	if err == nil {
+		_, err = unix.FcntlInt(uintptr(readFD), unix.F_SETFL, flags&^unix.O_NONBLOCK)
+	}
+	if err != nil {
+		_ = unix.Close(readFD)
+		return &nativeWWANATTransport{fd: writeFD, readTimeout: -1}, nil
+	}
+	reader, err := startNativeWWANATReader(readFD)
+	if err != nil {
+		_ = unix.Close(writeFD)
+		return nil, fmt.Errorf("start WWAN AT reader: %w", err)
+	}
+	return &nativeWWANATTransport{fd: writeFD, reader: reader, readTimeout: -1}, nil
 }
 
 func (transport *nativeWWANATTransport) Read(buffer []byte) (int, error) {
+	if transport.closed.Load() {
+		return 0, io.ErrClosedPipe
+	}
+	if len(buffer) == 0 {
+		return 0, nil
+	}
+	if transport.reader != nil {
+		transport.readMu.Lock()
+		defer transport.readMu.Unlock()
+		transport.mu.RLock()
+		timeout := transport.readTimeout
+		transport.mu.RUnlock()
+		if transport.closed.Load() {
+			return 0, io.ErrClosedPipe
+		}
+		deadline := time.Time{}
+		if timeout >= 0 {
+			deadline = time.Now().Add(timeout)
+		}
+		if err := transport.reader.SetReadDeadline(deadline); err != nil {
+			if transport.closed.Load() {
+				return 0, io.ErrClosedPipe
+			}
+			return 0, err
+		}
+		n, err := transport.reader.Read(buffer)
+		if transport.closed.Load() {
+			return 0, io.ErrClosedPipe
+		}
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			return n, nil
+		}
+		return n, err
+	}
 	transport.mu.RLock()
 	defer transport.mu.RUnlock()
 	if transport.closed.Load() {
@@ -123,6 +187,18 @@ func (transport *nativeWWANATTransport) Drain() error {
 }
 
 func (transport *nativeWWANATTransport) ResetInputBuffer() error {
+	if transport.reader != nil {
+		transport.readMu.Lock()
+		defer transport.readMu.Unlock()
+		if transport.closed.Load() {
+			return io.ErrClosedPipe
+		}
+		err := transport.reader.ResetInputBuffer()
+		if transport.closed.Load() {
+			return io.ErrClosedPipe
+		}
+		return err
+	}
 	transport.mu.RLock()
 	defer transport.mu.RUnlock()
 	if transport.closed.Load() {
@@ -165,12 +241,17 @@ func (transport *nativeWWANATTransport) SetReadTimeout(timeout time.Duration) er
 
 func (transport *nativeWWANATTransport) Close() error {
 	transport.closed.Store(true)
+	var readerErr error
+	if transport.reader != nil {
+		// Closing the pipe wakes Read even when it has an infinite deadline.
+		readerErr = transport.reader.Close()
+	}
 	transport.mu.Lock()
 	defer transport.mu.Unlock()
 	if transport.fd < 0 {
-		return nil
+		return readerErr
 	}
 	err := unix.Close(transport.fd)
 	transport.fd = -1
-	return err
+	return errors.Join(readerErr, err)
 }

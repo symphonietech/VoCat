@@ -34,14 +34,15 @@ func newTestService(t *testing.T) *Service {
 	return service
 }
 
+// TestLoginAuthenticateCSRFAndLogout checks the complete local session lifecycle and rejection of invalid credentials.
 func TestLoginAuthenticateCSRFAndLogout(t *testing.T) {
 	ctx := context.Background()
 	service := newTestService(t)
 
-	if _, err := service.Login(ctx, "admin", "wrong-password"); !errors.Is(err, ErrInvalidCredentials) {
+	if _, err := service.Login(ctx, "admin", "wrong-password", false); !errors.Is(err, ErrInvalidCredentials) {
 		t.Fatalf("Login() error = %v, want ErrInvalidCredentials", err)
 	}
-	credentials, err := service.Login(ctx, "admin", "correct-password")
+	credentials, err := service.Login(ctx, "admin", "correct-password", false)
 	if err != nil {
 		t.Fatalf("Login() error = %v", err)
 	}
@@ -79,10 +80,11 @@ func TestLoginAuthenticateCSRFAndLogout(t *testing.T) {
 	}
 }
 
+// TestEnsureAdminRevokesSessionOnPasswordChange verifies that replacing administrator credentials revokes existing sessions.
 func TestEnsureAdminRevokesSessionOnPasswordChange(t *testing.T) {
 	ctx := context.Background()
 	service := newTestService(t)
-	credentials, err := service.Login(ctx, "admin", "correct-password")
+	credentials, err := service.Login(ctx, "admin", "correct-password", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,15 +95,16 @@ func TestEnsureAdminRevokesSessionOnPasswordChange(t *testing.T) {
 	if _, err := service.Authenticate(ctx, credentials.SessionToken); !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("old session error = %v, want ErrUnauthorized", err)
 	}
-	if _, err := service.Login(ctx, "admin", "new-password"); err != nil {
+	if _, err := service.Login(ctx, "admin", "new-password", false); err != nil {
 		t.Fatalf("login with new password: %v", err)
 	}
 }
 
+// TestResetAdminCredentialsChangesUsernameAndPasswordWithoutOldPassword checks administrative credential recovery and rejection of superseded credentials.
 func TestResetAdminCredentialsChangesUsernameAndPasswordWithoutOldPassword(t *testing.T) {
 	ctx := context.Background()
 	service := newTestService(t)
-	credentials, err := service.Login(ctx, "admin", "correct-password")
+	credentials, err := service.Login(ctx, "admin", "correct-password", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,10 +112,10 @@ func TestResetAdminCredentialsChangesUsernameAndPasswordWithoutOldPassword(t *te
 	if err := service.ResetAdminCredentials(ctx, "new-admin", "replacement-password"); err != nil {
 		t.Fatalf("ResetAdminCredentials() error = %v", err)
 	}
-	if _, err := service.Login(ctx, "admin", "correct-password"); !errors.Is(err, ErrInvalidCredentials) {
+	if _, err := service.Login(ctx, "admin", "correct-password", false); !errors.Is(err, ErrInvalidCredentials) {
 		t.Fatalf("old credentials error = %v, want ErrInvalidCredentials", err)
 	}
-	if _, err := service.Login(ctx, "new-admin", "replacement-password"); err != nil {
+	if _, err := service.Login(ctx, "new-admin", "replacement-password", false); err != nil {
 		t.Fatalf("new credentials login error = %v", err)
 	}
 	if _, err := service.Authenticate(ctx, credentials.SessionToken); !errors.Is(err, ErrUnauthorized) {
@@ -139,6 +142,7 @@ func TestResetAdminCredentialsValidatesInput(t *testing.T) {
 	}
 }
 
+// TestResetAdminCredentialsAcceptsPasswordsWithoutComplexityRules keeps administrative recovery independent of password complexity rules.
 func TestResetAdminCredentialsAcceptsPasswordsWithoutComplexityRules(t *testing.T) {
 	ctx := context.Background()
 	for _, password := range []string{"1", strings.Repeat("x", 256)} {
@@ -146,12 +150,13 @@ func TestResetAdminCredentialsAcceptsPasswordsWithoutComplexityRules(t *testing.
 		if err := service.ResetAdminCredentials(ctx, "admin", password); err != nil {
 			t.Fatalf("ResetAdminCredentials(%d-byte password) error = %v", len(password), err)
 		}
-		if _, err := service.Login(ctx, "admin", password); err != nil {
+		if _, err := service.Login(ctx, "admin", password, false); err != nil {
 			t.Fatalf("Login(%d-byte password) error = %v", len(password), err)
 		}
 	}
 }
 
+// TestChangePasswordAcceptsPasswordsWithoutComplexityRules keeps authenticated password changes independent of complexity rules.
 func TestChangePasswordAcceptsPasswordsWithoutComplexityRules(t *testing.T) {
 	ctx := context.Background()
 	for _, password := range []string{"1", strings.Repeat("long-password-", 32)} {
@@ -159,12 +164,13 @@ func TestChangePasswordAcceptsPasswordsWithoutComplexityRules(t *testing.T) {
 		if err := service.ChangePassword(ctx, "admin", "correct-password", password); err != nil {
 			t.Fatalf("ChangePassword(%d-byte password) error = %v", len(password), err)
 		}
-		if _, err := service.Login(ctx, "admin", password); err != nil {
+		if _, err := service.Login(ctx, "admin", password, false); err != nil {
 			t.Fatalf("Login(%d-byte password) error = %v", len(password), err)
 		}
 	}
 }
 
+// TestEnsureAdminIfMissingDoesNotOverwriteChangedPassword preserves an existing administrator when startup credentials differ.
 func TestEnsureAdminIfMissingDoesNotOverwriteChangedPassword(t *testing.T) {
 	ctx := context.Background()
 	service := newTestService(t)
@@ -178,134 +184,115 @@ func TestEnsureAdminIfMissingDoesNotOverwriteChangedPassword(t *testing.T) {
 	if created {
 		t.Fatal("existing administrator was reported as newly created")
 	}
-	if _, err := service.Login(ctx, "admin", "changed-password"); err != nil {
+	if _, err := service.Login(ctx, "admin", "changed-password", false); err != nil {
 		t.Fatalf("database password was overwritten: %v", err)
 	}
-	if _, err := service.Login(ctx, "admin", "stale-config-password"); !errors.Is(err, ErrInvalidCredentials) {
+	if _, err := service.Login(ctx, "admin", "stale-config-password", false); !errors.Is(err, ErrInvalidCredentials) {
 		t.Fatalf("stale configured password became active: %v", err)
 	}
 }
 
-func TestCreateAndAuthenticateAPIToken(t *testing.T) {
+// Symfive issues "sym_" tokens: the prefix makes a leaked token recognisable
+// on sight and to secret scanners. Pin the exact form so neither upstream's
+// "vcat_" nor a prefix-less token creeps back in through a merge.
+func TestCreateAPITokenIssuesSymPrefix(t *testing.T) {
 	ctx := context.Background()
 	service := newTestService(t)
 
-	rawToken, info, err := service.CreateAPIToken(ctx, "ci script", time.Hour)
+	credentials, err := service.CreateAPIToken(ctx, "ci-script", false, time.Hour)
 	if err != nil {
 		t.Fatalf("CreateAPIToken() error = %v", err)
 	}
-	// The token is the secret alone. The "vocat_at_" prefix it used to carry
-	// was removed by request, so assert its absence rather than leaving the
-	// format unpinned -- otherwise a prefix could creep back unnoticed.
-	if strings.Contains(rawToken, "_at_") || strings.HasPrefix(rawToken, "vocat") {
-		t.Fatalf("raw token = %q, want no prefix", rawToken)
+	if !strings.HasPrefix(credentials.Token, "sym_") || strings.HasPrefix(credentials.Token, "sym_at_") {
+		t.Fatalf("token = %q, want the sym_ prefix", credentials.Token)
 	}
-	if len(rawToken) != 43 {
-		t.Fatalf("raw token length = %d, want 43 (32 random bytes, base64url)", len(rawToken))
+	if got, want := len(credentials.Token), len("sym_")+legacyAPITokenLength; got != want {
+		t.Fatalf("token length = %d, want %d (prefix + 32 random bytes, base64url)", got, want)
 	}
-	if info.Name != "ci script" {
-		t.Fatalf("info.Name = %q", info.Name)
-	}
-
-	principal, err := service.AuthenticateAPIToken(ctx, rawToken)
+	principal, err := service.AuthenticateAPIToken(ctx, credentials.Token)
 	if err != nil {
 		t.Fatalf("AuthenticateAPIToken() error = %v", err)
 	}
-	if principal.Username != "admin" {
-		t.Fatalf("principal = %+v, want admin", principal)
+	if principal.Name != "ci-script" || principal.ReadOnly {
+		t.Fatalf("principal = %+v, want ci-script read-write", principal)
 	}
+}
+
+// Tokens issued in an earlier form must keep working: a prefix-less token
+// (issued after "vocat_at_" was dropped and before "sym_" was adopted), the
+// original "vocat_at_" form, and "sym_at_", which the operator asked to have
+// recognised. Each is stored as the hash of the whole string, so validation
+// must hash exactly what the caller presents and strip nothing.
+func TestAuthenticateAPITokenAcceptsEarlierForms(t *testing.T) {
+	ctx := context.Background()
+	service := newTestService(t)
+
+	for _, form := range []struct {
+		name   string
+		prefix string
+	}{
+		{name: "prefix-less", prefix: ""},
+		{name: "vocat-at", prefix: "vocat_at_"},
+		{name: "sym-at", prefix: "sym_at_"},
+	} {
+		secret, err := randomToken()
+		if err != nil {
+			t.Fatalf("randomToken: %v", err)
+		}
+		token := form.prefix + secret
+		if _, err := service.store.CreateAPIToken(ctx, form.name, hashToken(token), false, time.Time{}); err != nil {
+			t.Fatalf("%s: store token: %v", form.name, err)
+		}
+		principal, err := service.AuthenticateAPIToken(ctx, token)
+		if err != nil {
+			t.Fatalf("%s: AuthenticateAPIToken() error = %v, want success", form.name, err)
+		}
+		if principal.Name != form.name {
+			t.Fatalf("%s: principal = %+v", form.name, principal)
+		}
+	}
+}
+
+func TestAuthenticateAPITokenRejectsUnknownAndJunk(t *testing.T) {
+	ctx := context.Background()
+	service := newTestService(t)
 
 	for name, candidate := range map[string]string{
-		"legacy-shaped but unknown": "vocat_at_not-a-real-token-padded-out-to-length",
-		"bare but unknown":          "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-		"too short to be a token":   "short",
+		"empty":               "",
+		"too short":           "short",
+		"unknown sym":         "sym_" + strings.Repeat("A", 43),
+		"unknown sym_at":      "sym_at_" + strings.Repeat("A", 43),
+		"unknown vocat_at":    "vocat_at_" + strings.Repeat("A", 43),
+		"unknown prefix-less": strings.Repeat("A", 43),
+		"upstream vcat form":  "vcat_" + strings.Repeat("A", 43),
+		"bare prefix":         "sym_",
+		"not base64url":       strings.Repeat("A", 42) + "+",
+		"one character short": strings.Repeat("A", 42),
 	} {
 		if _, err := service.AuthenticateAPIToken(ctx, candidate); !errors.Is(err, ErrUnauthorized) {
 			t.Fatalf("AuthenticateAPIToken(%s) error = %v, want ErrUnauthorized", name, err)
 		}
 	}
-	if _, err := service.AuthenticateAPIToken(ctx, ""); !errors.Is(err, ErrUnauthorized) {
-		t.Fatalf("AuthenticateAPIToken(empty) error = %v, want ErrUnauthorized", err)
-	}
-
-	tokens, err := service.ListAPITokens(ctx)
-	if err != nil {
-		t.Fatalf("ListAPITokens() error = %v", err)
-	}
-	if len(tokens) != 1 || tokens[0].ID != info.ID {
-		t.Fatalf("ListAPITokens() = %+v", tokens)
-	}
-	if tokens[0].LastUsedAt == nil {
-		t.Fatal("LastUsedAt was not updated by AuthenticateAPIToken")
-	}
-
-	if err := service.RevokeAPIToken(ctx, info.ID); err != nil {
-		t.Fatalf("RevokeAPIToken() error = %v", err)
-	}
-	if _, err := service.AuthenticateAPIToken(ctx, rawToken); !errors.Is(err, ErrUnauthorized) {
-		t.Fatalf("AuthenticateAPIToken() after revoke error = %v, want ErrUnauthorized", err)
-	}
 }
 
-func TestAPITokenExpires(t *testing.T) {
-	ctx := context.Background()
-	service := newTestService(t)
-
-	rawToken, _, err := service.CreateAPIToken(ctx, "short-lived", time.Nanosecond)
-	if err != nil {
-		t.Fatalf("CreateAPIToken() error = %v", err)
-	}
-	time.Sleep(time.Millisecond)
-	if _, err := service.AuthenticateAPIToken(ctx, rawToken); !errors.Is(err, ErrUnauthorized) {
-		t.Fatalf("AuthenticateAPIToken(expired) error = %v, want ErrUnauthorized", err)
-	}
-	tokens, err := service.ListAPITokens(ctx)
-	if err != nil {
-		t.Fatalf("ListAPITokens() error = %v", err)
-	}
-	if len(tokens) != 0 {
-		t.Fatalf("expired token was not pruned: %+v", tokens)
-	}
-}
-
-func TestCreateAPITokenValidatesInput(t *testing.T) {
-	ctx := context.Background()
-	service := newTestService(t)
-
-	if _, _, err := service.CreateAPIToken(ctx, "", time.Hour); err == nil {
-		t.Fatal("CreateAPIToken() with empty name should fail")
-	}
-	if _, _, err := service.CreateAPIToken(ctx, "name", 0); err == nil {
-		t.Fatal("CreateAPIToken() with non-positive ttl should fail")
-	}
-}
-
-// A token issued while the "vocat_at_" prefix existed must keep working. Its
-// stored hash covers the whole string, prefix included, so validation has to
-// hash exactly what the caller presents and must not strip anything. Removing
-// the prefix from minting is not allowed to invalidate credentials already in
-// use somewhere.
-func TestAuthenticateAPITokenAcceptsALegacyPrefixedToken(t *testing.T) {
-	ctx := context.Background()
-	service := newTestService(t)
-
-	// Mint the way the old code did: prefix + secret, hashed together.
-	secret, err := randomToken()
-	if err != nil {
-		t.Fatalf("randomToken: %v", err)
-	}
-	legacy := "vocat_at_" + secret
-	if _, err := service.store.CreateAPIToken(
-		ctx, "issued before the prefix was dropped",
-		hashToken(legacy), time.Now().UTC().Add(time.Hour)); err != nil {
-		t.Fatalf("CreateAPIToken: %v", err)
-	}
-
-	principal, err := service.AuthenticateAPIToken(ctx, legacy)
-	if err != nil {
-		t.Fatalf("AuthenticateAPIToken(legacy) error = %v, want success", err)
-	}
-	if principal.Username != "admin" {
-		t.Fatalf("principal = %+v, want admin", principal)
+func TestLooksLikeAPIToken(t *testing.T) {
+	secret := strings.Repeat("a", legacyAPITokenLength-1) + "_"
+	for token, want := range map[string]bool{
+		"sym_" + secret:      true,
+		"sym_at_" + secret:   true,
+		"vocat_at_" + secret: true,
+		secret:               true,
+		// A bare prefix is not a token. ("sym_at_" alone passes, being
+		// "sym_" followed by "at_": this is a cheap filter, not validation.)
+		"sym_":             false,
+		"vcat_" + secret:   false,
+		secret[1:]:         false,
+		secret + "a":       false,
+		"Bearer " + secret: false,
+		"":                 false,
+	} {
+		if got := LooksLikeAPIToken(token); got != want {
+			t.Errorf("LooksLikeAPIToken(%q) = %v, want %v", token, got, want)
+		}
 	}
 }

@@ -36,6 +36,10 @@ const isdRAID = "A0000005591010FFFFFFFF8900000100"
 // state is never changed during discovery.
 const xesimISDRAID = "A0000005591010FFFFFFFF8900000177"
 
+// fiveBerISDRAID is the ISD-R application of 5ber removable eUICC cards. They
+// answer 6A82 to the standard ...0100 AID and expose ES10 only here.
+const fiveBerISDRAID = "A0000005591010FFFFFFFF8900050500"
+
 // eSTK multi-SE products expose each eUICC storage through its own vendor
 // ISD-R AID. The standard GSMA AID aliases one of them, so probing only that
 // AID silently hides the second storage.
@@ -64,6 +68,10 @@ var (
 // ErrNoEUICC is returned when the inserted card exposes no eUICC ISD-R, so the
 // HTTP layer can render the empty state instead of an error.
 var ErrNoEUICC = errNoEUICC
+
+// ErrESIMRecovering reports an active profile switch or detached SIM recovery.
+// Callers should wait for recovery instead of starting another reset or probe.
+var ErrESIMRecovering = errESIMRecovering
 
 // ErrESIMManagementUnavailable 表示 eSTK 产品应用可访问，但两个管理应用均返回 6A82。
 // 普通 SIM 的 ErrNoEUICC 不属于此类异常，不能据此重置 SIM。
@@ -229,28 +237,6 @@ func isHexAID(id string) bool {
 	return false
 }
 
-// parseCSIM extracts the payload and status word from an AT+CSIM response.
-func parseCSIM(response modem.Response) ([]byte, int, error) {
-	value := valueAfterPrefix(response, "+CSIM:")
-	if value == "" {
-		return nil, 0, errors.New("esim: modem did not return a +CSIM result")
-	}
-	parts := csvValues(value)
-	if len(parts) < 2 {
-		return nil, 0, fmt.Errorf("esim: malformed +CSIM result %q", value)
-	}
-	hexData := strings.Trim(parts[1], `"`)
-	if len(hexData) < 4 {
-		return nil, 0, fmt.Errorf("esim: short +CSIM data %q", hexData)
-	}
-	raw, err := hex.DecodeString(hexData)
-	if err != nil {
-		return nil, 0, fmt.Errorf("esim: decode +CSIM data: %w", err)
-	}
-	sw := int(raw[len(raw)-2])<<8 | int(raw[len(raw)-1])
-	return raw[:len(raw)-2], sw, nil
-}
-
 // euiccChannel is an open logical channel to the eUICC's ISD-R.
 type euiccChannel struct {
 	manager      *Manager
@@ -324,10 +310,12 @@ const csimAPDUTimeout = 30 * time.Second
 
 // csim sends one raw APDU over AT+CSIM and returns payload + status word.
 func (manager *Manager) csim(ctx context.Context, id string, apdu []byte) ([]byte, int, error) {
-	command := fmt.Sprintf("AT+CSIM=%d,\"%s\"", len(apdu)*2, strings.ToUpper(hex.EncodeToString(apdu)))
 	state, err := manager.lookup(id)
 	if err != nil {
 		return nil, 0, err
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	if err := lockMutexContext(ctx, &state.opMu); err != nil {
 		return nil, 0, err
@@ -336,19 +324,22 @@ func (manager *Manager) csim(ctx context.Context, id string, apdu []byte) ([]byt
 	if err := manager.validateActive(id, state); err != nil {
 		return nil, 0, err
 	}
-	client, err := manager.clientLocked(ctx, state, manager.candidateFor(state))
+	candidate := manager.candidateFor(state)
+	client, err := manager.clientLocked(ctx, state, candidate)
+	if err != nil {
+		err = sanitizeManagerAPDUError(err)
+		manager.setResult(id, state, nil, err)
+		return nil, 0, err
+	}
+	response, err := manager.executeAPDULocked(ctx, id, state, client, modem.APDUCSIM, 0, apdu)
 	if err != nil {
 		return nil, 0, err
 	}
-	// Give each eUICC APDU its own generous deadline (withTimeout preserves an
-	// existing one, so a shorter caller deadline still wins).
-	apduCtx, cancel := context.WithTimeout(ctx, csimAPDUTimeout)
-	defer cancel()
-	response, err := manager.command(apduCtx, client, command)
-	if err != nil {
-		return nil, 0, err
+	if len(response) < 2 {
+		return nil, 0, modem.ErrAPDUResponseInvalid
 	}
-	return parseCSIM(response)
+	sw := int(response[len(response)-2])<<8 | int(response[len(response)-1])
+	return response[:len(response)-2], sw, nil
 }
 
 // openEuicc opens a logical channel and selects the ISD-R AID on it.
@@ -572,17 +563,17 @@ func (manager *Manager) discoverEuiccAIDsForInventory(ctx context.Context, id st
 		managementMissing = missing == 2
 	}
 
-	var found []string
-	for _, aid := range []string{isdRAID, xesimISDRAID} {
+	// The standard and vendor ISD-R AIDs are alternatives: a card exposes ES10
+	// through exactly one of them. Stop at the first match so an optional
+	// vendor probe cannot spend the caller's deadline after discovery has
+	// already succeeded.
+	for _, aid := range []string{isdRAID, xesimISDRAID, fiveBerISDRAID} {
 		channel, err := manager.openEuiccAID(ctx, id, aid)
 		if err != nil {
 			continue
 		}
 		channel.close(context.Background())
-		found = append(found, aid)
-	}
-	if len(found) > 0 {
-		return found, nil
+		return []string{aid}, nil
 	}
 	if managementMissing {
 		return nil, ErrESIMManagementUnavailable
@@ -593,6 +584,10 @@ func (manager *Manager) discoverEuiccAIDsForInventory(ctx context.Context, id st
 }
 
 func isTransientEuiccCME(err error) bool {
+	var rejected *modem.APDUCommandRejectedError
+	if errors.As(err, &rejected) {
+		return rejected.Final == "+CME ERROR: 0"
+	}
 	var commandErr *modem.CommandError
 	return errors.As(err, &commandErr) &&
 		strings.EqualFold(strings.TrimSpace(commandErr.Final), "+CME ERROR: 0")
@@ -991,6 +986,42 @@ func boundESIMContext(ctx context.Context) (context.Context, context.CancelFunc)
 	return context.WithTimeout(ctx, 10*time.Second)
 }
 
+// resolveProfileISDR returns the ISD-R that owns iccid when a caller (such as
+// the MCP switch tool) omits the AID. It prefers the cached inventory, then
+// falls back to read-only discovery and GetProfilesInfo on each candidate. An
+// empty result keeps the standard ISD-R default. The caller holds the eSIM lock.
+func (manager *Manager) resolveProfileISDR(ctx context.Context, id, iccid string) string {
+	clean := strings.TrimSpace(iccid)
+	if cached, ok := manager.cachedESIMInfo(id); ok && strings.TrimSpace(cached.AID) != "" {
+		for _, profile := range cached.Profiles {
+			if strings.TrimSpace(profile.ICCID) == clean {
+				return strings.TrimSpace(cached.AID)
+			}
+		}
+	}
+	aids := manager.discoverEuiccAIDs(ctx, id)
+	if len(aids) == 1 {
+		return aids[0]
+	}
+	for _, aid := range aids {
+		channel, err := manager.openEuiccAID(ctx, id, aid)
+		if err != nil {
+			continue
+		}
+		payload, err := channel.es10(ctx, []byte{0xBF, 0x2D, 0x00}) // GetProfilesInfo
+		channel.close(context.Background())
+		if err != nil {
+			continue
+		}
+		for _, profile := range parseProfilesInfo(payload) {
+			if strings.TrimSpace(profile.ICCID) == clean {
+				return aid
+			}
+		}
+	}
+	return ""
+}
+
 // resolveProfileAID attempts to look up the ISD-P AID for a profile by its ICCID.
 // It checks the in-memory eSIM cache first; if missing and an active eUICC
 // channel is provided, it executes a live GetProfilesInfo (BF2D) on the open channel.
@@ -1024,18 +1055,53 @@ func (manager *Manager) resolveProfileAID(ctx context.Context, id string, channe
 // retain their own REFRESH handling. Accepting EnableProfile is not sufficient:
 // recovery must expose the requested ICCID before this method reports success.
 func (manager *Manager) ESIMSwitchProfile(ctx context.Context, id string, iccid string, aidHex string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if strings.TrimSpace(iccid) == "" {
+		return errors.New("esim: an ICCID is required")
+	}
+	lease, err := manager.beginProfileSwitchLease(ctx, id, true)
+	if err != nil {
+		return err
+	}
+	defer manager.releaseProfileSwitchLease(id, lease)
+	ownerContext := context.WithValue(ctx, esimSwitchLeaseKey{}, lease)
+	// RF-off and EnableProfile belong to the same transaction. An ordinary
+	// policy operation already running when we reserved the gate may have
+	// re-enabled RF after the HTTP layer's earlier RF-off request.
+	flight, err := manager.SetFlight(ownerContext, id, true)
+	if err != nil {
+		return fmt.Errorf("esim: disable RF before switching profile: %w", err)
+	}
+	if !flight.RadioOff {
+		return errors.New("esim: profile switch requires verified RF-off mode")
+	}
+	return manager.esimSwitchProfile(ownerContext, id, iccid, aidHex)
+}
+
+func (manager *Manager) esimSwitchProfile(ctx context.Context, id string, iccid string, aidHex string) error {
 	iccid = strings.TrimSpace(iccid)
 	if iccid == "" {
 		return errors.New("esim: an ICCID is required")
+	}
+	state, err := manager.lookup(id)
+	if err != nil {
+		return err
 	}
 	_, nativeQMI, nativeErr := manager.nativeQMIControl(id)
 	if nativeErr != nil {
 		return nativeErr
 	}
-	manager.lockESIM()
+	if err := manager.lockESIMContext(ctx); err != nil {
+		return err
+	}
 	if err := manager.waitForESIMRecovery(ctx, id); err != nil {
 		manager.unlockESIM()
 		return err
+	}
+	if strings.TrimSpace(aidHex) == "" {
+		aidHex = manager.resolveProfileISDR(ctx, id, iccid)
 	}
 	channel, err := manager.openEuiccAID(ctx, id, targetEuiccAID(aidHex))
 	if err != nil {
@@ -1093,6 +1159,10 @@ func (manager *Manager) ESIMSwitchProfile(ctx context.Context, id string, iccid 
 	// disconnect or reverse-proxy timeout must not cancel it halfway through and
 	// skip post-commit recovery; EC20 may otherwise remain in SIM failure
 	// (+CME 13).
+	// From this point the old identity is no longer trustworthy, including
+	// when the commit response is lost. Keep lastICCID only for changed-card
+	// detection; ordinary policy reconciliation must await a fresh snapshot.
+	manager.clearSnapshot(id, state)
 	commitContext, cancelCommit := context.WithTimeout(context.WithoutCancel(ctx), csimAPDUTimeout)
 	payload, err := channel.es10(commitContext, der)
 	cancelCommit()
@@ -1113,13 +1183,11 @@ func (manager *Manager) ESIMSwitchProfile(ctx context.Context, id string, iccid 
 					aidCommitContext, cancelAIDCommit := context.WithTimeout(context.WithoutCancel(ctx), csimAPDUTimeout)
 					aidPayload, aidErr := channel.es10(aidCommitContext, aidDer)
 					cancelAIDCommit()
-					if aidErr == nil {
-						if aidRes, aidOk := enableProfileResult(aidPayload); aidOk {
-							payload = aidPayload
-							resultBeforeClose = aidRes
-							resultPresentBeforeClose = aidOk
-						}
-					}
+					// The second commit may have reached the card even when its
+					// response is lost. Keep its actual outcome so uncertainty
+					// starts recovery instead of returning the first rejection.
+					payload, err = aidPayload, aidErr
+					resultBeforeClose, resultPresentBeforeClose = enableProfileResult(payload)
 				}
 			}
 		}
@@ -1157,7 +1225,7 @@ func (manager *Manager) ESIMSwitchProfile(ctx context.Context, id string, iccid 
 		// The card may have committed immediately before the transport error. A
 		// detached reset is safe in either case and prevents an uncertain switch
 		// from leaving the modem's SIM cache unusable.
-		manager.startProfileSwitchRecovery(id)
+		manager.startProfileSwitchRecovery(id, iccid)
 		manager.unlockESIM()
 		return err
 	}
@@ -1166,7 +1234,7 @@ func (manager *Manager) ESIMSwitchProfile(ctx context.Context, id string, iccid 
 	// it so a rejected switch is surfaced instead of reported as "switched".
 	result, ok := enableProfileResult(payload)
 	if !ok {
-		manager.startProfileSwitchRecovery(id)
+		manager.startProfileSwitchRecovery(id, iccid)
 		manager.unlockESIM()
 		return fmt.Errorf("esim: unexpected EnableProfile response %s", strings.ToUpper(hex.EncodeToString(payload)))
 	}
@@ -1180,7 +1248,7 @@ func (manager *Manager) ESIMSwitchProfile(ctx context.Context, id string, iccid 
 					return ctx.Err()
 				case <-time.After(2 * time.Second):
 				}
-				return manager.ESIMSwitchProfile(context.WithValue(ctx, esimCATBusyRetryKey{}, attempt+1), id, iccid, aidHex)
+				return manager.esimSwitchProfile(context.WithValue(ctx, esimCATBusyRetryKey{}, attempt+1), id, iccid, aidHex)
 			}
 		}
 		manager.unlockESIM()
@@ -1219,7 +1287,7 @@ func (manager *Manager) ESIMSwitchProfile(ctx context.Context, id string, iccid 
 	// The eUICC accepted the target profile. Reset and repopulate the modem in
 	// a detached recovery so it survives an HTTP disconnect, but keep this API
 	// call pending until the live modem ICCID proves that the switch took effect.
-	recovery := manager.startProfileSwitchRecovery(id)
+	recovery := manager.startProfileSwitchRecovery(id, iccid)
 	manager.unlockESIM()
 
 	verifyContext, cancelVerify := context.WithTimeout(context.WithoutCancel(ctx), profileSwitchVerificationTimeout(manager))
@@ -1227,9 +1295,8 @@ func (manager *Manager) ESIMSwitchProfile(ctx context.Context, id string, iccid 
 	if err := manager.waitForESIMRecoveryResult(verifyContext, recovery); err != nil {
 		return err
 	}
-	if err := manager.verifySwitchedICCID(verifyContext, id, iccid); err != nil {
-		return err
-	}
+	// The retained recovery result includes live target-ICCID verification;
+	// do not issue a second independent read after releasing its QMI lease.
 	mbnContext, cancelMBN := context.WithTimeout(context.WithoutCancel(ctx), profileSwitchVerificationTimeout(manager))
 	defer cancelMBN()
 	manager.reconcileEC20MBNAfterProfileSwitchBestEffort(mbnContext, id, iccid)
@@ -1238,6 +1305,159 @@ func (manager *Manager) ESIMSwitchProfile(ctx context.Context, id string, iccid 
 
 type esimCATBusyRetryKey struct{}
 
+type esimSwitchLeaseKey struct{}
+
+// A lease spans the initiating switch, its live-ICCID verification, and any
+// detached recovery. References are protected by esimRecoveryMu; the last
+// holder releases the device's exclusive snapshot/auto-recovery gate.
+type esimSwitchLease struct {
+	state *managedDevice
+	refs  int
+}
+
+func (manager *Manager) beginProfileSwitchLease(ctx context.Context, id string, fresh bool) (*esimSwitchLease, error) {
+	state, err := manager.lookup(id)
+	if err != nil {
+		return nil, err
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		manager.esimRecoveryMu.Lock()
+		existing := manager.esimSwitchLeases[id]
+		if !fresh && existing != nil && existing.state == state {
+			existing.refs++
+			manager.esimRecoveryMu.Unlock()
+			return existing, nil
+		}
+		_, pending := manager.esimSwitchPending[id]
+		active := existing != nil || (fresh && (pending || manager.esimRecoveries[id] != nil))
+		if active {
+			manager.esimRecoveryMu.Unlock()
+			return nil, errESIMRecovering
+		}
+		if !pending {
+			if manager.esimSwitchPending == nil {
+				manager.esimSwitchPending = make(map[string]struct{})
+			}
+			manager.esimSwitchPending[id] = struct{}{}
+			manager.esimRecoveryMu.Unlock()
+			break
+		}
+		manager.esimRecoveryMu.Unlock()
+		// A direct recovery can race a fresh switch's reservation. Wait for
+		// that switch to publish its lease or give way to this recovery.
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	defer func() {
+		manager.esimRecoveryMu.Lock()
+		delete(manager.esimSwitchPending, id)
+		manager.esimRecoveryMu.Unlock()
+	}()
+	// Reserving before draining readers gives the writer priority without
+	// blocking nested readers behind RWMutex.Lock or holding recoveryMu.
+	for !state.profileSwitchMu.TryLock() {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		state.profileSwitchMu.Unlock()
+		return nil, err
+	}
+	if err := manager.validateActive(id, state); err != nil {
+		state.profileSwitchMu.Unlock()
+		return nil, err
+	}
+	lease := &esimSwitchLease{state: state, refs: 1}
+	manager.esimRecoveryMu.Lock()
+	if manager.esimSwitchLeases[id] != nil || (fresh && manager.esimRecoveries[id] != nil) {
+		manager.esimRecoveryMu.Unlock()
+		state.profileSwitchMu.Unlock()
+		return nil, errESIMRecovering
+	}
+	if manager.esimSwitchLeases == nil {
+		manager.esimSwitchLeases = make(map[string]*esimSwitchLease)
+	}
+	manager.esimSwitchLeases[id] = lease
+	if fresh {
+		delete(manager.esimLastRecoveries, id)
+	}
+	manager.esimRecoveryMu.Unlock()
+	return lease, nil
+}
+
+func (manager *Manager) releaseProfileSwitchLease(id string, lease *esimSwitchLease) {
+	manager.esimRecoveryMu.Lock()
+	manager.releaseProfileSwitchLeaseLocked(id, lease)
+	manager.esimRecoveryMu.Unlock()
+}
+
+func (manager *Manager) releaseProfileSwitchLeaseLocked(id string, lease *esimSwitchLease) {
+	lease.refs--
+	finished := lease.refs == 0
+	if finished && manager.esimSwitchLeases[id] == lease {
+		delete(manager.esimSwitchLeases, id)
+	}
+	if finished {
+		lease.state.profileSwitchMu.Unlock()
+	}
+}
+
+// AcquireSIMRead protects a policy read and its resulting device changes from
+// profile switches. Callers must read the current snapshot after acquiring it
+// and release it when the decision and updates finish.
+func (manager *Manager) AcquireSIMRead(ctx context.Context, id string) (func(), error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	state, err := manager.lookup(id)
+	if err != nil {
+		return nil, err
+	}
+	return manager.lockProfileSwitchRead(ctx, id, state)
+}
+
+// Readers take the gate before opMu/QMI access; the switch takes its writer
+// before esimMu/uiccMu. No reader waits for a writer while holding those locks.
+// Only a live owner lease may bypass the gate, including through derived or
+// detached contexts. A retained context cannot bypass a later transaction.
+func (manager *Manager) lockProfileSwitchRead(ctx context.Context, id string, state *managedDevice) (func(), error) {
+	lease, _ := ctx.Value(esimSwitchLeaseKey{}).(*esimSwitchLease)
+	manager.esimRecoveryMu.Lock()
+	owner := lease != nil && lease.state == state && manager.esimSwitchLeases[id] == lease
+	_, pending := manager.esimSwitchPending[id]
+	active := pending || manager.esimSwitchLeases[id] != nil || manager.esimRecoveries[id] != nil
+	manager.esimRecoveryMu.Unlock()
+	if owner {
+		return func() {}, nil
+	}
+	if active || !state.profileSwitchMu.TryRLock() {
+		return nil, errESIMRecovering
+	}
+	// Close the race with a writer reserving just after the first check.
+	// Existing readers can finish; newly arriving work must let them drain.
+	manager.esimRecoveryMu.Lock()
+	_, pending = manager.esimSwitchPending[id]
+	active = pending || manager.esimSwitchLeases[id] != nil || manager.esimRecoveries[id] != nil
+	manager.esimRecoveryMu.Unlock()
+	if active {
+		state.profileSwitchMu.RUnlock()
+		return nil, errESIMRecovering
+	}
+	return state.profileSwitchMu.RUnlock, nil
+}
+
 // esimRecovery retains an initiating operation's result after the active entry
 // is removed. Closing done publishes err to all waiters.
 type esimRecovery struct {
@@ -1245,7 +1465,7 @@ type esimRecovery struct {
 	err  error
 }
 
-func (manager *Manager) startProfileSwitchRecovery(id string) *esimRecovery {
+func (manager *Manager) startProfileSwitchRecovery(id string, expectedICCID ...string) *esimRecovery {
 	recovery := &esimRecovery{done: make(chan struct{})}
 	manager.esimRecoveryMu.Lock()
 	if manager.esimRecoveries == nil {
@@ -1256,11 +1476,37 @@ func (manager *Manager) startProfileSwitchRecovery(id string) *esimRecovery {
 		return active
 	}
 	manager.esimRecoveries[id] = recovery
+	if manager.esimLastRecoveries == nil {
+		manager.esimLastRecoveries = make(map[string]*esimRecovery)
+	}
+	manager.esimLastRecoveries[id] = recovery
+	lease := manager.esimSwitchLeases[id]
+	if lease != nil {
+		lease.refs++
+	}
 	manager.esimRecoveryMu.Unlock()
 	go func() {
-		err := manager.recoverAfterProfileSwitch(id)
+		// Bound gate acquisition as well as the reset. Direct callers such as
+		// DisableProfile have no switch lease and may still hold esimMu here;
+		// never wait synchronously for an in-flight snapshot to finish.
+		recoveryContext, cancelRecovery := context.WithTimeout(context.Background(), profileSwitchVerificationTimeout(manager))
+		defer cancelRecovery()
+		var err error
+		if lease == nil {
+			lease, err = manager.beginProfileSwitchLease(recoveryContext, id, false)
+		}
+		if err == nil {
+			recoveryContext = context.WithValue(recoveryContext, esimSwitchLeaseKey{}, lease)
+			err = manager.recoverAfterProfileSwitch(recoveryContext, id)
+			if err == nil && len(expectedICCID) > 0 && strings.TrimSpace(expectedICCID[0]) != "" {
+				err = manager.verifySwitchedICCID(recoveryContext, id, expectedICCID[0])
+			}
+		}
 		manager.esimRecoveryMu.Lock()
 		recovery.err = err
+		if lease != nil {
+			manager.releaseProfileSwitchLeaseLocked(id, lease)
+		}
 		if manager.esimRecoveries[id] == recovery {
 			delete(manager.esimRecoveries, id)
 		}
@@ -1268,6 +1514,19 @@ func (manager *Manager) startProfileSwitchRecovery(id string) *esimRecovery {
 		manager.esimRecoveryMu.Unlock()
 	}()
 	return recovery
+}
+
+// WaitESIMRecovery waits for this device's most recent detached recovery,
+// including a completed failure. It does not turn an uncertain EnableProfile
+// transport error into success: the caller must retain that original error.
+func (manager *Manager) WaitESIMRecovery(ctx context.Context, id string) error {
+	manager.esimRecoveryMu.Lock()
+	recovery := manager.esimLastRecoveries[id]
+	if active := manager.esimRecoveries[id]; active != nil {
+		recovery = active
+	}
+	manager.esimRecoveryMu.Unlock()
+	return manager.waitForESIMRecoveryResult(ctx, recovery)
 }
 
 func (manager *Manager) waitForESIMRecovery(ctx context.Context, id string) error {
@@ -1278,6 +1537,12 @@ func (manager *Manager) waitForESIMRecovery(ctx context.Context, id string) erro
 }
 
 func (manager *Manager) waitForESIMRecoveryResult(ctx context.Context, recovery *esimRecovery) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("esim: wait for profile-switch recovery: %w", err)
+	}
 	if recovery == nil {
 		return nil
 	}
@@ -1385,12 +1650,12 @@ func (manager *Manager) renameCachedProfile(id, iccid, nickname string) {
 
 // recoverAfterProfileSwitch owns the post-commit SIM reset independently of the
 // initiating HTTP request.
-func (manager *Manager) recoverAfterProfileSwitch(id string) error {
-	resetContext, cancelReset := context.WithTimeout(context.Background(), manager.longTimeout)
+func (manager *Manager) recoverAfterProfileSwitch(ctx context.Context, id string) error {
+	resetContext, cancelReset := context.WithTimeout(ctx, manager.longTimeout)
 	if native, err := manager.powerCycleNativeQMISIM(resetContext, id); native {
 		cancelReset()
 		if err == nil {
-			time.Sleep(1 * time.Second)
+			err = waitNativeQMIRecovery(ctx, time.Second)
 		}
 		// Native WWAN identity and profile verification are both QMI-backed.
 		// Do not enter the AT refresh path: OpenStick firmware can accept the
@@ -1400,46 +1665,61 @@ func (manager *Manager) recoverAfterProfileSwitch(id string) error {
 	cancelReset()
 	var resetErr error
 	if !manager.isPCSCDevice(id) {
-		resetContext, cancelReset := context.WithTimeout(context.Background(), manager.commandTimeout*2)
+		resetContext, cancelReset := context.WithTimeout(ctx, manager.commandTimeout*2)
 		resetErr = manager.softResetForProfileSwitch(resetContext, id)
 		cancelReset()
 	}
-	manager.refreshAfterProfileSwitch(id)
-	return resetErr
+	return errors.Join(resetErr, manager.refreshAfterProfileSwitchContext(ctx, id))
 }
 
 // refreshAfterProfileSwitch repopulates the device snapshot in the background
 // after an eSIM profile switch.
 func (manager *Manager) refreshAfterProfileSwitch(id string) {
+	_ = manager.refreshAfterProfileSwitchContext(context.Background(), id)
+}
+
+func (manager *Manager) refreshAfterProfileSwitchContext(parent context.Context, id string) error {
+	var lastErr error
 	if manager.isPCSCDevice(id) {
-		time.Sleep(500 * time.Millisecond)
+		if err := waitNativeQMIRecovery(parent, 500*time.Millisecond); err != nil {
+			return err
+		}
 		for attempt := 0; attempt < 5; attempt++ {
-			ctx, cancel := context.WithTimeout(context.Background(), manager.commandTimeout*2)
+			ctx, cancel := context.WithTimeout(parent, manager.commandTimeout*2)
 			_, _ = manager.Discover(ctx)
 			_, err := manager.Refresh(ctx, id)
 			cancel()
 			if err == nil {
-				return
+				return nil
 			}
-			time.Sleep(500 * time.Millisecond)
+			lastErr = err
+			if err := waitNativeQMIRecovery(parent, 500*time.Millisecond); err != nil {
+				return err
+			}
 		}
-		return
+		return fmt.Errorf("esim: refresh reader after profile recovery: %w", lastErr)
 	}
 	const (
 		settle   = 1 * time.Second
 		interval = 1 * time.Second
 		attempts = 5
 	)
-	time.Sleep(settle)
+	if err := waitNativeQMIRecovery(parent, settle); err != nil {
+		return err
+	}
 	for attempt := 0; attempt < attempts; attempt++ {
-		ctx, cancel := context.WithTimeout(context.Background(), manager.commandTimeout*2)
+		ctx, cancel := context.WithTimeout(parent, manager.commandTimeout*2)
 		_, err := manager.Refresh(ctx, id)
 		cancel()
 		if err == nil {
-			return
+			return nil
 		}
-		time.Sleep(interval)
+		lastErr = err
+		if err := waitNativeQMIRecovery(parent, interval); err != nil {
+			return err
+		}
 	}
+	return fmt.Errorf("esim: refresh modem after profile recovery: %w", lastErr)
 }
 
 func (manager *Manager) isPCSCDevice(id string) bool {
@@ -1594,7 +1874,7 @@ func (manager *Manager) verifySwitchedICCIDAttempts(
 			}
 			lastErr = err
 		} else {
-			for _, command := range []string{"AT+CCID", "AT+QCCID", "AT+MCCID"} {
+			for _, command := range manager.identityICCIDCommands(id) {
 				commandContext, cancel := context.WithTimeout(ctx, manager.commandTimeout)
 				response, err := manager.ExecuteAT(commandContext, id, command)
 				cancel()
@@ -1602,7 +1882,7 @@ func (manager *Manager) verifySwitchedICCIDAttempts(
 					lastErr = err
 					continue
 				}
-				live := parseICCIDIdentifier(response, []string{"+CCID:", "+QCCID:", "+MCCID:"}, 18, 22)
+				live := parseICCIDIdentifier(response, iccidResponsePrefixes, 18, 22)
 				if live == "" {
 					lastErr = errors.New("modem response contained no valid ICCID")
 					continue

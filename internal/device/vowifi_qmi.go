@@ -34,6 +34,22 @@ func (manager *Manager) withNativeQMIVoWiFiSession(ctx context.Context, id strin
 // port exists, first wake the SIM interface in RF-off mode before taking the
 // QMI lease. Primitive return values keep device independent from VoWiFi.
 func (manager *Manager) ReadNativeQMIIdentity(ctx context.Context, id string) (iccid, imsi, imei, mcc, mnc string, err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	state, lookupErr := manager.lookup(id)
+	if lookupErr != nil {
+		err = lookupErr
+		return
+	}
+	// Identity reads may recover SIM power as a side effect. Treat them like
+	// snapshot polling so an eSIM transaction is the only reset owner.
+	unlockProfileRead, gateErr := manager.lockProfileSwitchRead(ctx, id, state)
+	if gateErr != nil {
+		err = gateErr
+		return
+	}
+	defer unlockProfileRead()
 	// A missing/unpowered card may never answer READ TRANSPARENT. Do not hold
 	// the shared QMI lease for the lifecycle's two-minute SIM-ready timeout.
 	ctx, cancelIdentity := context.WithTimeout(ctx, 25*time.Second)
@@ -322,5 +338,43 @@ func (manager *Manager) powerCycleNativeQMISIM(ctx context.Context, id string) (
 		return true, ctx.Err()
 	case <-time.After(time.Second):
 	}
+	if provisioner, ok := session.(nativeQMIProvisioningSession); ok {
+		if err := rebindNativeQMIPrimaryGWProvisioning(ctx, provisioner); err != nil {
+			return true, err
+		}
+	}
 	return true, nil
+}
+
+// rebindNativeQMIPrimaryGWProvisioning binds the USIM selected by the newly
+// active eUICC profile to the primary GSM/LTE provisioning session.  This is
+// performed through VoCat's existing QMI lease, rather than a competing
+// qmicli/ModemManager client, so the VoCat process stays alive after a profile
+// switch.
+func rebindNativeQMIPrimaryGWProvisioning(ctx context.Context, session nativeQMIProvisioningSession) error {
+	if session == nil {
+		return errors.New("native QMI provisioning session is unavailable")
+	}
+	var lastErr error
+	for attempt := 0; attempt < 5; attempt++ {
+		aid, err := session.GetUSIMAID(ctx)
+		if err == nil && len(aid) > 0 {
+			if err := session.RebindPrimaryGWProvisioning(ctx, 1, aid); err != nil {
+				return fmt.Errorf("rebind primary GSM/LTE provisioning session: %w", err)
+			}
+			return nil
+		}
+		if err != nil {
+			lastErr = err
+		} else {
+			lastErr = errors.New("USIM AID is empty")
+		}
+		if attempt == 4 {
+			break
+		}
+		if err := waitNativeQMIRecovery(ctx, time.Second); err != nil {
+			return err
+		}
+	}
+	return fmt.Errorf("read USIM AID after profile switch: %w", lastErr)
 }

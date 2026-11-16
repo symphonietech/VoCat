@@ -1,6 +1,6 @@
 export type ApiStatus = "ok" | "error";
 
-export type DeviceType = "wifi_410" | "dji_4g" | "ml307" | "pcie_ec20_ec25" | "usb_sim_reader";
+export type DeviceType = "wifi_410" | "dji_4g" | "ml307" | "pcie_ec20_ec25" | "usb_sim_reader" | "zxic";
 
 export interface Session {
   authenticated: boolean;
@@ -481,6 +481,13 @@ export type NotificationConfig<T = Record<string, unknown>> = T & {
 
 export interface NotificationSettings {
   meow: NotificationConfig<{ enabled: boolean; nickname: string; url: string; imgUrl: string }>;
+  qqbot: NotificationConfig<{
+    enabled: boolean;
+    appId: string;
+    appSecret: string;
+    targetOpenid: string;
+    proxy: string;
+  }>;
   telegram: NotificationConfig;
   webhook: NotificationConfig;
   bark: NotificationConfig;
@@ -491,6 +498,14 @@ export interface NotificationSettings {
 }
 
 // 网络访问控制策略：默认仅放行内网网段，可切换到对公网开放。
+export interface ApiTokenListItem {
+  name: string;
+  readOnly: boolean;
+  createdAt: string;
+  lastUsedAt: string;
+  expiresAt: string;
+}
+
 export interface SecuritySettings {
   mode: "internal" | "public";
   allowedCidrs: string[];
@@ -883,3 +898,62 @@ export type AsteriskRoutes = {
   unknownDevices?: string[];
   error?: string;
 };
+export type SSOProviderKind = "pocketid" | "github" | "generic";
+
+export interface SSOConfigInput {
+  enabled: boolean;
+  kind: SSOProviderKind;
+  displayName: string;
+  publicOrigin: string;
+  clientId: string;
+  issuerUrl: string;
+  authUrl: string;
+  tokenUrl: string;
+  userInfoUrl: string;
+  userIdField: string;
+  scopes: string[];
+  tokenAuthMethod: "auto" | "client_secret_basic" | "client_secret_post";
+  pkceMode: "s256" | "disabled";
+}
+
+export interface SSOConfig extends SSOConfigInput {
+  revision: number;
+}
+
+export interface SSOBinding {
+  bound: boolean;
+  displayName: string;
+  email: string;
+  createdAt: string | null;
+  lastLoginAt: string | null;
+}
+
+export interface SSOSettings {
+  config: SSOConfig;
+  binding: SSOBinding;
+  configured: boolean;
+  hasClientSecret: boolean;
+  reauthenticationRequired?: boolean;
+}
+
+export interface SSOSaveRequest {
+  expectedRevision: number;
+  config: SSOConfigInput;
+  clientSecret?: string;
+  resetBinding?: boolean;
+}
+
+export interface SSOProviders {
+  sso: {
+    enabled: boolean;
+    displayName?: string;
+  };
+}
+
+export interface SSOCheckResult {
+  revision: number;
+}
+
+export interface SSOUnbindResult {
+  reauthenticationRequired: boolean;
+}

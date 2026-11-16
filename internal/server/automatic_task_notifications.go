@@ -91,6 +91,9 @@ func sendAutomaticTaskNotification(ctx context.Context, channel string, config m
 	if channel == "meow" {
 		return sendMeowNotification(ctx, config, &message.Task.DeviceID, message.Title, message.DetailText())
 	}
+	if channel == "qqbot" {
+		return sendQQBotNotification(ctx, config, &message.Task.DeviceID, message.Title, message.DetailText())
+	}
 	switch channel {
 	case "telegram":
 		return sendTelegramTextNotification(ctx, config, message.Task.DeviceID, message.Text)
@@ -135,7 +138,8 @@ func sendTelegramTextNotification(ctx context.Context, config map[string]any, de
 }
 
 func sendBarkTextNotification(ctx context.Context, config map[string]any, deviceID, title, text string) error {
-	if !notificationMatchesDevice(configStrings(config, "device_ids"), deviceID) {
+	destinations := notificationDestinations(config, deviceID)
+	if len(destinations) == 0 {
 		return nil
 	}
 	client, err := restrictedHTTPClient(ctx, 8*time.Second, "")
@@ -149,7 +153,7 @@ func sendBarkTextNotification(ctx context.Context, config map[string]any, device
 		}
 	}
 	encoded, _ := json.Marshal(payload)
-	for _, destination := range configStrings(config, "urls") {
+	for _, destination := range destinations {
 		parsed, err := validateOutboundURL(ctx, destination, false)
 		if err != nil {
 			return err

@@ -295,6 +295,90 @@ func TestDisableProfileCommandErrorAndSGP22Results(t *testing.T) {
 	}
 }
 
+func TestESIMCSIMDialectFallbackAndLearnedShape(t *testing.T) {
+	client := &transcriptClient{steps: []clientStep{
+		{
+			command:  `AT+CSIM=10,"0070000001"`,
+			response: modem.Response{Final: "ERROR"},
+			err:      &modem.CommandError{Command: `AT+CSIM=10,"0070000001"`, Final: "ERROR"},
+		},
+		{command: `AT+CSIM=10,0070000001`, response: okResponse(`+CSIM: 6,019000`)},
+		{command: `AT+CSIM=10,0070800100`, response: okResponse(`+CSIM: 4,9000`)},
+	}}
+	manager, id := newStartedTestManager(t, client)
+
+	payload, sw, err := manager.csim(context.Background(), id, []byte{0x00, 0x70, 0x00, 0x00, 0x01})
+	if err != nil {
+		t.Fatalf("first CSIM exchange: %v", err)
+	}
+	if !bytes.Equal(payload, []byte{0x01}) || sw != 0x9000 {
+		t.Fatalf("first CSIM response = %X/%04X, want 01/9000", payload, sw)
+	}
+
+	payload, sw, err = manager.csim(context.Background(), id, []byte{0x00, 0x70, 0x80, 0x01, 0x00})
+	if err != nil {
+		t.Fatalf("learned-shape CSIM exchange: %v", err)
+	}
+	if len(payload) != 0 || sw != 0x9000 {
+		t.Fatalf("learned-shape CSIM response = %X/%04X, want empty/9000", payload, sw)
+	}
+	client.assertDone(t)
+}
+
+func TestESIMCSIMSharesManagerAPDUDialect(t *testing.T) {
+	client := &transcriptClient{steps: []clientStep{
+		{
+			command:  `AT+CSIM=4,"00A4"`,
+			response: modem.Response{Final: "ERROR"},
+			err:      &modem.CommandError{Command: `AT+CSIM=4,"00A4"`, Final: "ERROR"},
+		},
+		{command: `AT+CSIM=4,00A4`, response: okResponse(`+CSIM: 4,9000`)},
+		{command: `AT+CSIM=4,00B0`, response: okResponse(`+CSIM: 4,9000`)},
+	}}
+	manager, id := newStartedTestManager(t, client)
+
+	if _, sw, err := manager.csim(context.Background(), id, []byte{0x00, 0xA4}); err != nil || sw != 0x9000 {
+		t.Fatalf("eSIM CSIM exchange = %04X, %v; want 9000", sw, err)
+	}
+	response, err := manager.ExecuteAPDU(context.Background(), id, modem.APDUCSIM, 0, []byte{0x00, 0xB0})
+	if err != nil || !bytes.Equal(response, []byte{0x90, 0x00}) {
+		t.Fatalf("Manager.ExecuteAPDU response = %X, %v; want 9000", response, err)
+	}
+	client.assertDone(t)
+}
+
+func TestESIMCSIMPreservesTransientFailureWithoutQuotingRetry(t *testing.T) {
+	const command = `AT+CSIM=10,"0070000001"`
+	client := &transcriptClient{steps: []clientStep{{
+		command:  command,
+		response: modem.Response{Final: "+CME ERROR: 0"},
+		err:      &modem.CommandError{Command: command, Final: "+CME ERROR: 0"},
+	}}}
+	manager, id := newStartedTestManager(t, client)
+	_, _, err := manager.csim(context.Background(), id, []byte{0x00, 0x70, 0x00, 0x00, 0x01})
+	if !isTransientEuiccCME(err) {
+		t.Fatalf("initial card failure must retain eSIM recovery classification: %v", err)
+	}
+	client.assertDone(t)
+}
+
+func TestOpenEuiccRetriesTransientFailureWithOriginalQuoting(t *testing.T) {
+	const command = `AT+CSIM=10,"0070000001"`
+	client := &transcriptClient{steps: []clientStep{
+		{command: command, err: &modem.CommandError{Command: command, Final: "+CME ERROR: 0"}},
+		{command: command, response: okResponse(`+CSIM: 6,"019000"`)},
+		{command: fmt.Sprintf(`AT+CSIM=42,"01A4040010%s"`, isdRAID), response: okResponse(`+CSIM: 4,"9000"`)},
+		{command: `AT+CSIM=10,"0070800100"`, response: okResponse(`+CSIM: 4,"9000"`)},
+	}}
+	manager, id := newStartedTestManager(t, client)
+	channel, err := manager.openEuiccAID(context.Background(), id, isdRAID)
+	if err != nil {
+		t.Fatalf("transient card failure did not reach the existing recovery retry: %v", err)
+	}
+	channel.close(context.Background())
+	client.assertDone(t)
+}
+
 func TestESIMSwitchProfileFallsBackToAIDOnCommandError(t *testing.T) {
 	const targetICCID = "894921007608519523"
 	targetAIDHex := "A0000005591010FFFFFFFF8900000101"
@@ -330,6 +414,8 @@ func TestESIMSwitchProfileFallsBackToAIDOnCommandError(t *testing.T) {
 	}
 
 	client := &transcriptClient{steps: []clientStep{
+		{command: "AT+CFUN?", response: okResponse("+CFUN: 4")},
+		{command: "AT+CFUN?", response: okResponse("+CFUN: 4")},
 		manageChannelOpen,
 		selectISDR,
 		enableICCIDStoreData,
@@ -449,20 +535,42 @@ func TestEuiccSASTrimsCardPadding(t *testing.T) {
 	}
 }
 
-func TestOpenEuiccGETResponsePreservesTransportError(t *testing.T) {
-	for _, cause := range []error{modem.ErrCommandTimeout, context.Canceled, context.DeadlineExceeded,
-		&modem.CommandError{Command: `AT+CSIM=10,"81C0000010"`, Final: "+CME ERROR: 0"}} {
-		t.Run(cause.Error(), func(t *testing.T) {
+func TestOpenEuiccGETResponsePreservesTransportErrorAndSanitizesRejection(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		cause         error
+		commandReject bool
+	}{
+		{name: "command timeout", cause: modem.ErrCommandTimeout},
+		{name: "context canceled", cause: context.Canceled},
+		{name: "deadline exceeded", cause: context.DeadlineExceeded},
+		{
+			name: "CME command rejection", commandReject: true,
+			cause: &modem.CommandError{Command: `AT+CSIM=10,"81C0000010"`, Final: "+CME ERROR: 0"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
 			client := &transcriptClient{steps: []clientStep{
 				{command: `AT+CSIM=10,"0070000001"`, response: okResponse(`+CSIM: 6,"019000"`)},
 				{command: fmt.Sprintf(`AT+CSIM=42,"01A4040010%s"`, isdRAID), response: okResponse(`+CSIM: 4,"6110"`)},
-				{command: `AT+CSIM=10,"81C0000010"`, err: cause},
+				{command: `AT+CSIM=10,"81C0000010"`, err: test.cause},
 				{command: `AT+CSIM=10,"0070800100"`, response: okResponse(`+CSIM: 4,"9000"`)},
 			}}
 			manager, id := newStartedTestManager(t, client)
 			channel, err := manager.openEuiccOnceAID(context.Background(), id, isdRAID)
-			if channel != nil || !errors.Is(err, cause) || errors.Is(err, errNoEUICC) {
-				t.Fatalf("open eUICC = %v, %v; want transport error %v, not absent eUICC", channel, err, cause)
+			if channel != nil || errors.Is(err, errNoEUICC) {
+				t.Fatalf("open eUICC = %v, %v; want a command failure, not absent eUICC", channel, err)
+			}
+			if test.commandReject {
+				var rejected *modem.APDUCommandRejectedError
+				if !errors.As(err, &rejected) || rejected.Final != "+CME ERROR: 0" {
+					t.Fatalf("open eUICC rejection = %T; want sanitized CME rejection", err)
+				}
+				if strings.Contains(err.Error(), `AT+CSIM=10,"81C0000010"`) {
+					t.Fatal("eSIM rejection leaked the original AT command")
+				}
+			} else if !errors.Is(err, test.cause) {
+				t.Fatalf("open eUICC error = %v; want transport error class %v", err, test.cause)
 			}
 			client.assertDone(t)
 		})
@@ -479,6 +587,12 @@ func TestTransientEuiccCMEClassification(t *testing.T) {
 	}
 	if isTransientEuiccCME(&modem.CommandError{Final: "+CME ERROR: 13"}) {
 		t.Fatal("SIM failure must not be classified as a transient SELECT error")
+	}
+	if !isTransientEuiccCME(&modem.APDUCommandRejectedError{
+		Command: modem.APDUCSIM,
+		Final:   "+CME ERROR: 0",
+	}) {
+		t.Fatal("sanitized +CME ERROR: 0 must retain transient eUICC recovery classification")
 	}
 }
 
@@ -511,12 +625,48 @@ func TestDiscoverEuiccAIDsFindsXeSIMAlternateISDR(t *testing.T) {
 		manageChannel,
 		selectStep(xesimISDRAID, "9000"),
 		closeChannel,
+		// Discovery stops at the first ISD-R; the 5ber AID is not probed.
 	}}
 	manager, id := newStartedTestManager(t, client)
 
 	aids := manager.discoverEuiccAIDs(context.Background(), id)
 	if len(aids) != 1 || aids[0] != xesimISDRAID {
 		t.Fatalf("discovered AIDs = %#v, want XeSIM %s", aids, xesimISDRAID)
+	}
+	client.assertDone(t)
+}
+
+func TestDiscoverEuiccAIDsFinds5berISDR(t *testing.T) {
+	manageChannel := clientStep{
+		command:  `AT+CSIM=10,"0070000001"`,
+		response: okResponse(`+CSIM: 6,"019000"`),
+	}
+	closeChannel := clientStep{
+		command:  `AT+CSIM=10,"0070800100"`,
+		response: okResponse(`+CSIM: 4,"9000"`),
+	}
+	selectStep := func(aid, response string) clientStep {
+		return clientStep{
+			command:  fmt.Sprintf(`AT+CSIM=42,"01A4040010%s"`, aid),
+			response: okResponse(fmt.Sprintf(`+CSIM: 4,"%s"`, response)),
+		}
+	}
+
+	client := &transcriptClient{steps: []clientStep{
+		manageChannel, selectStep(estkProductAID, "6A82"), closeChannel,
+		// 5ber cards reject both the GSMA and XeSIM ISD-R AIDs...
+		manageChannel, selectStep(isdRAID, "6A82"), closeChannel,
+		manageChannel, selectStep(xesimISDRAID, "6A82"), closeChannel,
+		// ...and answer SELECT on their own ISD-R with response data pending.
+		manageChannel, selectStep(fiveBerISDRAID, "6121"),
+		{command: `AT+CSIM=10,"81C0000021"`, response: okResponse(`+CSIM: 4,"9000"`)},
+		closeChannel,
+	}}
+	manager, id := newStartedTestManager(t, client)
+
+	aids := manager.discoverEuiccAIDs(context.Background(), id)
+	if len(aids) != 1 || aids[0] != fiveBerISDRAID {
+		t.Fatalf("discovered AIDs = %#v, want 5ber %s", aids, fiveBerISDRAID)
 	}
 	client.assertDone(t)
 }
@@ -670,4 +820,48 @@ func TestMarkCachedProfileEnabled(t *testing.T) {
 	if info.Profiles[1].State != 1 || info.Profiles[1].StateText != "已启用" {
 		t.Fatalf("target profile state = %#v", info.Profiles[1])
 	}
+}
+
+func TestDiscoverEuiccAIDsStopsAtStandardISDR(t *testing.T) {
+	client := &transcriptClient{steps: append(
+		simResetSelectSteps(estkProductAID, "6A82"),
+		simResetSelectSteps(isdRAID, "9000")...,
+	)}
+	manager, id := newStartedTestManager(t, client)
+	aids := manager.discoverEuiccAIDs(context.Background(), id)
+	if len(aids) != 1 || aids[0] != isdRAID {
+		t.Fatalf("discovered AIDs = %#v, want only %s", aids, isdRAID)
+	}
+	client.assertDone(t)
+}
+
+func TestResolveProfileISDRUsesCachedInventory(t *testing.T) {
+	client := &transcriptClient{}
+	manager, id := newStartedTestManager(t, client)
+	manager.cacheESIMInfo(id, EsimInfo{
+		AID:      fiveBerISDRAID,
+		Profiles: []EsimProfile{{ICCID: "8944000000000000001"}},
+	})
+	if got := manager.resolveProfileISDR(context.Background(), id, "8944000000000000001"); got != fiveBerISDRAID {
+		t.Fatalf("resolved ISD-R = %q, want %s", got, fiveBerISDRAID)
+	}
+	client.assertDone(t)
+}
+
+func TestResolveProfileISDRDiscoversSingleISDR(t *testing.T) {
+	var steps []clientStep
+	for _, aid := range []string{estkProductAID, isdRAID, xesimISDRAID} {
+		steps = append(steps, simResetSelectSteps(aid, "6A82")...)
+	}
+	steps = append(steps,
+		clientStep{command: `AT+CSIM=10,"0070000001"`, response: okResponse(`+CSIM: 6,"019000"`)},
+		clientStep{command: fmt.Sprintf(`AT+CSIM=42,"01A4040010%s"`, fiveBerISDRAID), response: okResponse(`+CSIM: 4,"9000"`)},
+		clientStep{command: `AT+CSIM=10,"0070800100"`, response: okResponse(`+CSIM: 4,"9000"`)},
+	)
+	client := &transcriptClient{steps: steps}
+	manager, id := newStartedTestManager(t, client)
+	if got := manager.resolveProfileISDR(context.Background(), id, "8944000000000000001"); got != fiveBerISDRAID {
+		t.Fatalf("resolved ISD-R = %q, want %s", got, fiveBerISDRAID)
+	}
+	client.assertDone(t)
 }

@@ -317,6 +317,7 @@ func TestNewRequiresIndex(t *testing.T) {
 	}
 }
 
+// TestSecureCookieAttributes checks Secure, HttpOnly, SameSite, and deletion attributes for authentication cookies.
 func TestSecureCookieAttributes(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	server := &Server{secureCookies: true}
@@ -325,6 +326,7 @@ func TestSecureCookieAttributes(t *testing.T) {
 		"session-token",
 		"csrf-token",
 		time.Now().Add(time.Hour),
+		true,
 	)
 
 	var sessionCookie *http.Cookie
@@ -430,10 +432,11 @@ func TestBearerAPITokenAuthenticatesWithoutCookieOrCSRF(t *testing.T) {
 	app := newTestApplication(t)
 	ctx := context.Background()
 
-	rawToken, _, err := app.auth.CreateAPIToken(ctx, "ci", time.Hour)
+	credentials, err := app.auth.CreateAPIToken(ctx, "ci", false, time.Hour)
 	if err != nil {
 		t.Fatalf("CreateAPIToken() error = %v", err)
 	}
+	rawToken := credentials.Token
 
 	// A plain client with no cookie jar: the token alone must carry auth.
 	bearerClient := &http.Client{}
@@ -480,7 +483,7 @@ func TestBearerAPITokenRejectsInvalidOrExpiredToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	badRequest.Header.Set("Authorization", "Bearer vocat_at_not-a-real-token")
+	badRequest.Header.Set("Authorization", "Bearer sym_not-a-real-token")
 	badResponse, err := client.Do(badRequest)
 	if err != nil {
 		t.Fatal(err)
@@ -490,10 +493,11 @@ func TestBearerAPITokenRejectsInvalidOrExpiredToken(t *testing.T) {
 		t.Fatalf("bad token status = %d, want 401", badResponse.StatusCode)
 	}
 
-	expiredToken, _, err := app.auth.CreateAPIToken(ctx, "short-lived", time.Nanosecond)
+	expired, err := app.auth.CreateAPIToken(ctx, "short-lived", false, time.Nanosecond)
 	if err != nil {
 		t.Fatalf("CreateAPIToken() error = %v", err)
 	}
+	expiredToken := expired.Token
 	time.Sleep(time.Millisecond)
 	expiredRequest, err := http.NewRequest(http.MethodGet, app.server.URL+"/api/system/info", nil)
 	if err != nil {

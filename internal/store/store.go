@@ -14,12 +14,14 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// 31, not upstream's 27: this fork's migrations 25-28 were already applied to
-// live databases, so upstream's three new ones are appended as 29-31 rather
-// than renumbered into 25-27. Renumbering ours instead would leave a database
-// sitting at user_version 28 skipping straight past them, and it would never
-// get the automatic_tasks rebuild, revert_profile or sms_raw_records at all.
-const schemaVersion = 31
+// 34, not upstream's 30. This fork's migrations 25-28 were already applied to
+// live databases, so upstream's additions are appended after ours instead of
+// sharing numbers: its 25-27 run here as 29-31 and its 28-30 as 32-34.
+// Renumbering ours instead would leave a database at user_version 28 skipping
+// straight past them. Migration 32 differs from upstream's 28 on purpose: this
+// fork created api_tokens at 24, so upstream's CREATE TABLE IF NOT EXISTS
+// would be a no-op here and 32 rebuilds the existing table instead.
+const schemaVersion = 34
 
 var ErrNotFound = errors.New("store: not found")
 
@@ -44,11 +46,14 @@ type Admin struct {
 }
 
 type Session struct {
-	TokenHash []byte
-	CSRFHash  []byte
-	ExpiresAt time.Time
-	CreatedAt time.Time
-	Admin     Admin
+	TokenHash     []byte
+	CSRFHash      []byte
+	ExpiresAt     time.Time
+	CreatedAt     time.Time
+	LoginMethod   string
+	SSOBindingID  string
+	SecureCookies bool
+	Admin         Admin
 }
 
 // Open creates the parent directory, opens SQLite, applies safety pragmas and
@@ -91,6 +96,9 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		}
 	}
 	s := &Store{db: db}
+	if err := s.DeleteExpiredSSOFlows(ctx, time.Now()); err != nil {
+		return closeOnError(err)
+	}
 	// Captured before this process can save an SMS; see StartupSMSMessageID.
 	if s.startupSMSID, err = s.LatestSMSMessageID(ctx); err != nil {
 		return closeOnError(err)
@@ -116,6 +124,7 @@ func isFilesystemPath(path string) bool {
 	return path != ":memory:" && !strings.HasPrefix(path, "file:")
 }
 
+// migrate applies supported schema upgrades transactionally and rejects databases created by newer binaries.
 func migrate(ctx context.Context, db *sql.DB) error {
 	var version int
 	if err := db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
@@ -145,9 +154,12 @@ func migrate(ctx context.Context, db *sql.DB) error {
 					(nextVersion == 19 && strings.Contains(statement, "ADD COLUMN")) ||
 					(nextVersion == 23 && strings.Contains(statement, "ADD COLUMN")) ||
 					(nextVersion == 28 && strings.Contains(statement, "ADD COLUMN mbn_profile")) ||
-					// Upstream guards this at 26, where it put the migration.
-					// Here it is 30, for the reason given on schemaVersion.
-					(nextVersion == 30 && strings.Contains(statement, "ADD COLUMN revert_profile"))
+					// Upstream guards these at 26, 29 and 30, where it put the
+					// migrations. Here they are 30, 33 and 34, for the reason
+					// given on schemaVersion.
+					(nextVersion == 30 && strings.Contains(statement, "ADD COLUMN revert_profile")) ||
+					(nextVersion == 33 && strings.Contains(statement, "ADD COLUMN")) ||
+					(nextVersion == 34 && strings.Contains(statement, "ADD COLUMN"))
 				if duplicateAdditiveColumn && strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
 					continue
 				}
@@ -230,7 +242,7 @@ func scanAdmin(row rowScanner) (Admin, error) {
 }
 
 // SetAdmin inserts or replaces the single configured administrator and
-// atomically revokes all existing sessions.
+// atomically revokes all existing sessions and API tokens.
 func (s *Store) SetAdmin(ctx context.Context, username string, passwordHash []byte) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -253,6 +265,12 @@ func (s *Store) SetAdmin(ctx context.Context, username string, passwordHash []by
 	if _, err := tx.ExecContext(ctx, "DELETE FROM sessions"); err != nil {
 		return fmt.Errorf("revoke sessions after admin update: %w", err)
 	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM api_tokens"); err != nil {
+		return fmt.Errorf("revoke api tokens after admin update: %w", err)
+	}
+	if err := invalidateSSOAfterAdminUpdate(ctx, tx); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit admin update: %w", err)
 	}
@@ -266,24 +284,27 @@ func (s *Store) DeleteAllSessions(ctx context.Context) error {
 	return nil
 }
 
+// CreateSession persists credentials and their cookie transport policy in one insert.
 func (s *Store) CreateSession(
 	ctx context.Context,
 	adminID int64,
 	tokenHash []byte,
 	csrfHash []byte,
 	expiresAt time.Time,
+	secureCookies bool,
 ) error {
 	now := time.Now().UTC().Unix()
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO sessions (token_hash, admin_id, csrf_hash, expires_at, created_at)
-		VALUES (?, ?, ?, ?, ?)
-	`, tokenHash, adminID, csrfHash, expiresAt.UTC().Unix(), now)
+		INSERT INTO sessions (token_hash, admin_id, csrf_hash, expires_at, created_at, secure_cookies)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, tokenHash, adminID, csrfHash, expiresAt.UTC().Unix(), now, secureCookies)
 	if err != nil {
 		return fmt.Errorf("create session: %w", err)
 	}
 	return nil
 }
 
+// SessionByTokenHash loads a live session, its login source, and its administrator by credential digest.
 func (s *Store) SessionByTokenHash(ctx context.Context, tokenHash []byte) (Session, error) {
 	var session Session
 	var expiresAt int64
@@ -296,6 +317,9 @@ func (s *Store) SessionByTokenHash(ctx context.Context, tokenHash []byte) (Sessi
 			s.csrf_hash,
 			s.expires_at,
 			s.created_at,
+			s.login_method,
+			COALESCE(s.sso_binding_id, ''),
+			s.secure_cookies,
 			a.id,
 			a.username,
 			a.created_at,
@@ -308,6 +332,9 @@ func (s *Store) SessionByTokenHash(ctx context.Context, tokenHash []byte) (Sessi
 		&session.CSRFHash,
 		&expiresAt,
 		&createdAt,
+		&session.LoginMethod,
+		&session.SSOBindingID,
+		&session.SecureCookies,
 		&session.Admin.ID,
 		&session.Admin.Username,
 		&adminCreatedAt,
@@ -324,6 +351,23 @@ func (s *Store) SessionByTokenHash(ctx context.Context, tokenHash []byte) (Sessi
 	session.Admin.CreatedAt = time.Unix(adminCreatedAt, 0).UTC()
 	session.Admin.UpdatedAt = time.Unix(adminUpdatedAt, 0).UTC()
 	return session, nil
+}
+
+// RequireSessionSecureCookies permanently upgrades a live session's cookie policy.
+// Missing request metadata on later requests can never undo this requirement.
+func (s *Store) RequireSessionSecureCookies(ctx context.Context, tokenHash []byte) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE sessions SET secure_cookies = 1 WHERE token_hash = ? AND expires_at > ?`, tokenHash, time.Now().UTC().Unix())
+	if err != nil {
+		return fmt.Errorf("secure session cookies: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read secure session update result: %w", err)
+	}
+	if affected == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (s *Store) UpdateSessionCSRF(ctx context.Context, tokenHash []byte, csrfHash []byte) error {

@@ -128,6 +128,7 @@ func TestFreshDatabaseAppliesTheWholeChain(t *testing.T) {
 	for _, table := range []string{
 		"smstest_endpoints", "call_records", "asterisk_registrations",
 		"automatic_tasks", "automatic_task_runs", "sms_raw_records",
+		"api_tokens", "sso_bindings", "sso_flows",
 	} {
 		var name string
 		if err := database.db.QueryRowContext(ctx,
@@ -135,5 +136,130 @@ func TestFreshDatabaseAppliesTheWholeChain(t *testing.T) {
 		).Scan(&name); err != nil {
 			t.Fatalf("%s missing from a fresh database: %v", table, err)
 		}
+	}
+}
+
+// Every deployment of this fork sits at user_version 31 with api_tokens in
+// the layout this fork created at 24. Upstream's token table arrives as 32,
+// which must rebuild that table, not skip it: upstream's CREATE TABLE IF NOT
+// EXISTS would be a no-op here and its token code would then fail on columns
+// that do not exist. The tokens already issued must keep authenticating,
+// which means their hashes survive untouched.
+func TestUpgradeFromForkSchema31RebuildsAPITokens(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "v31.db")
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw.SetMaxOpenConns(1)
+	if _, err := raw.ExecContext(ctx, "PRAGMA foreign_keys = ON"); err != nil {
+		t.Fatal(err)
+	}
+	for version := 1; version <= 31; version++ {
+		for _, statement := range migrationStatements(version) {
+			if _, err := raw.ExecContext(ctx, statement); err != nil {
+				t.Fatalf("schema %d: %v", version, err)
+			}
+		}
+	}
+	if _, err := raw.ExecContext(ctx, "PRAGMA user_version = 31"); err != nil {
+		t.Fatal(err)
+	}
+
+	expires := time.Now().Add(24 * time.Hour).Unix()
+	created := time.Now().Add(-time.Hour).Unix()
+	rows := []struct {
+		id       int64
+		name     string
+		hash     []byte
+		lastUsed any
+	}{
+		{1, "claude", []byte("hash-prefix-less-token-000000001"), nil},
+		{2, "claude", []byte("hash-vocat-at-token-000000000002"), int64(1_700_000_000)},
+		{3, "my script", []byte("hash-name-with-a-space-000000003"), nil},
+		{4, "-leading", []byte("hash-leading-hyphen-000000000004"), nil},
+		{5, "ok.name_1-x", []byte("hash-every-allowed-character-005"), nil},
+	}
+	for _, row := range rows {
+		if _, err := raw.ExecContext(ctx,
+			`INSERT INTO api_tokens (id, name, token_hash, created_at, expires_at, last_used_at)
+			 VALUES (?, ?, ?, ?, ?, ?)`,
+			row.id, row.name, row.hash, created, expires, row.lastUsed); err != nil {
+			t.Fatalf("seed token %d: %v", row.id, err)
+		}
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	database := openTestStore(t, path)
+
+	var version int
+	if err := database.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != schemaVersion {
+		t.Fatalf("user_version = %d, want %d", version, schemaVersion)
+	}
+
+	wantNames := map[int64]string{
+		1: "claude",
+		2: "legacy-2", // repeats an earlier name; tokens are revoked by name now
+		3: "legacy-3", // a space is not allowed in a name
+		4: "legacy-4", // must start with a letter or digit
+		5: "ok.name_1-x",
+	}
+	for _, row := range rows {
+		token, err := database.APITokenByHash(ctx, row.hash)
+		if err != nil {
+			t.Fatalf("token %d is not found by its hash after the upgrade: %v", row.id, err)
+		}
+		if token.Name != wantNames[row.id] {
+			t.Fatalf("token %d name = %q, want %q", row.id, token.Name, wantNames[row.id])
+		}
+		if token.ReadOnly {
+			t.Fatalf("token %d became read-only; every existing token had full access", row.id)
+		}
+		if token.ExpiresAt.Unix() != expires {
+			t.Fatalf("token %d expires_at = %v, want %v", row.id, token.ExpiresAt.Unix(), expires)
+		}
+		if row.lastUsed == nil && !token.LastUsedAt.IsZero() {
+			t.Fatalf("token %d last_used_at = %v, want zero for never used", row.id, token.LastUsedAt)
+		}
+		if row.lastUsed != nil && token.LastUsedAt.Unix() != row.lastUsed.(int64) {
+			t.Fatalf("token %d last_used_at = %v, want %v", row.id, token.LastUsedAt.Unix(), row.lastUsed)
+		}
+	}
+	// Upstream's code revokes by name, which needs the new names to resolve.
+	if err := database.DeleteAPIToken(ctx, "legacy-3"); err != nil {
+		t.Fatalf("revoke a renamed token by name: %v", err)
+	}
+	// And the table now enforces what upstream's code assumes.
+	if _, err := database.CreateAPIToken(ctx, "claude", []byte("hash-a-second-claude-00000000006"), false, time.Time{}); err == nil {
+		t.Fatal("a duplicate token name was accepted; name must be UNIQUE after migration 32")
+	}
+
+	// Migrations 33 and 34: upstream's SSO tables and session cookie policy.
+	var name string
+	for _, table := range []string{"sso_bindings", "sso_flows"} {
+		if err := database.db.QueryRowContext(ctx,
+			`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`, table,
+		).Scan(&name); err != nil {
+			t.Fatalf("%s is absent, so migration 33 did not run: %v", table, err)
+		}
+	}
+	for column, migration := range map[string]int{"login_method": 33, "sso_binding_id": 33, "secure_cookies": 34} {
+		var count int
+		if err := database.db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = ?`, column,
+		).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("sessions.%s count = %d error = %v, so migration %d did not run", column, count, err, migration)
+		}
+	}
+
+	var table string
+	if err := database.db.QueryRowContext(ctx, "PRAGMA foreign_key_check").Scan(&table); err != sql.ErrNoRows {
+		t.Fatalf("foreign key check failed after the upgrade: %v", err)
 	}
 }

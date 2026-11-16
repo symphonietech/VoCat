@@ -1,5 +1,6 @@
 package store
 
+// migrationStatements returns the ordered SQL statements for one schema version, or nil if unsupported.
 func migrationStatements(version int) []string {
 	switch version {
 	case 1:
@@ -650,6 +651,108 @@ func migrationStatements(version int) []string {
 				UNIQUE(hardware_key, storage, slot, pdu_hash)
 			)`,
 			`CREATE INDEX IF NOT EXISTS sms_raw_records_device_idx ON sms_raw_records(device_id, id DESC)`,
+		}
+	case 32:
+		// Upstream's migration 28. Upstream creates api_tokens here with
+		// CREATE TABLE IF NOT EXISTS, but this fork already created the table
+		// at 24 in its own layout, where that statement would be a silent
+		// no-op and leave upstream's token code reading columns that do not
+		// exist. So the existing table is rebuilt into upstream's layout:
+		//
+		//   - name becomes UNIQUE, limited to what upstream's CLI and
+		//     Settings card accept (1-64 letters, digits, dots, underscores
+		//     or hyphens, starting with a letter or digit), because tokens
+		//     are now revoked by name. A name that breaks those rules or
+		//     repeats an earlier one becomes "legacy-<id>".
+		//   - read_only is new. Every existing token had full access.
+		//   - last_used_at becomes NOT NULL, with 0 for never used.
+		//   - expires_at keeps its value. 0 now means never expires, which
+		//     no existing row uses: this fork always set an expiry.
+		//
+		// token_hash is copied unchanged, so every token already issued, in
+		// whatever prefix form, keeps authenticating.
+		return []string{
+			`CREATE TABLE api_tokens_v32 (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				name TEXT NOT NULL UNIQUE,
+				token_hash BLOB NOT NULL UNIQUE,
+				read_only INTEGER NOT NULL DEFAULT 0 CHECK (read_only IN (0, 1)),
+				expires_at INTEGER NOT NULL DEFAULT 0,
+				created_at INTEGER NOT NULL,
+				last_used_at INTEGER NOT NULL DEFAULT 0
+			)`,
+			`INSERT INTO api_tokens_v32 (id, name, token_hash, read_only, expires_at, created_at, last_used_at)
+				SELECT id,
+					CASE WHEN length(name) BETWEEN 1 AND 64
+						AND name GLOB '[A-Za-z0-9]*'
+						AND name NOT GLOB '*[^A-Za-z0-9._-]*'
+						AND NOT EXISTS (
+							SELECT 1 FROM api_tokens AS earlier
+							WHERE earlier.name = api_tokens.name AND earlier.id < api_tokens.id
+						)
+					THEN name ELSE 'legacy-' || id END,
+					token_hash, 0, expires_at, created_at, COALESCE(last_used_at, 0)
+				FROM api_tokens`,
+			`DROP TABLE api_tokens`,
+			`ALTER TABLE api_tokens_v32 RENAME TO api_tokens`,
+		}
+	case 33:
+		// Upstream's migration 29.
+		return []string{
+			`CREATE TABLE IF NOT EXISTS sso_bindings (
+				id TEXT PRIMARY KEY,
+				admin_id INTEGER NOT NULL UNIQUE REFERENCES admins(id) ON DELETE CASCADE,
+				provider_instance_id TEXT NOT NULL,
+				protocol TEXT NOT NULL CHECK (protocol IN ('oauth2', 'oidc')),
+				authority TEXT NOT NULL,
+				subject TEXT NOT NULL CHECK (length(subject) > 0),
+				display_name TEXT NOT NULL DEFAULT '',
+				email TEXT NOT NULL DEFAULT '',
+				created_at INTEGER NOT NULL,
+				updated_at INTEGER NOT NULL,
+				last_login_at INTEGER NOT NULL DEFAULT 0,
+				UNIQUE(provider_instance_id, authority, subject)
+			)`,
+			`ALTER TABLE sessions ADD COLUMN login_method TEXT NOT NULL DEFAULT 'password'
+				CHECK (login_method IN ('password', 'sso'))`,
+			`ALTER TABLE sessions ADD COLUMN sso_binding_id TEXT REFERENCES sso_bindings(id) ON DELETE CASCADE`,
+			`CREATE INDEX IF NOT EXISTS sessions_sso_binding_idx ON sessions(sso_binding_id)`,
+			`CREATE TRIGGER IF NOT EXISTS sessions_sso_insert_guard BEFORE INSERT ON sessions
+				WHEN (NEW.login_method = 'sso' AND (NEW.sso_binding_id IS NULL OR NOT EXISTS (
+					SELECT 1 FROM sso_bindings WHERE id = NEW.sso_binding_id AND admin_id = NEW.admin_id
+				))) OR (NEW.login_method = 'password' AND NEW.sso_binding_id IS NOT NULL)
+				BEGIN SELECT RAISE(ABORT, 'invalid session login source'); END`,
+			`CREATE TRIGGER IF NOT EXISTS sessions_sso_update_guard BEFORE UPDATE OF login_method, sso_binding_id, admin_id ON sessions
+				WHEN (NEW.login_method = 'sso' AND (NEW.sso_binding_id IS NULL OR NOT EXISTS (
+					SELECT 1 FROM sso_bindings WHERE id = NEW.sso_binding_id AND admin_id = NEW.admin_id
+				))) OR (NEW.login_method = 'password' AND NEW.sso_binding_id IS NOT NULL)
+				BEGIN SELECT RAISE(ABORT, 'invalid session login source'); END`,
+			`CREATE TABLE IF NOT EXISTS sso_flows (
+				id TEXT PRIMARY KEY,
+				state_hash BLOB NOT NULL UNIQUE CHECK (length(state_hash) = 32),
+				browser_token_hash BLOB NOT NULL CHECK (length(browser_token_hash) = 32),
+				purpose TEXT NOT NULL CHECK (purpose IN ('login', 'bind')),
+				provider_instance_id TEXT NOT NULL,
+				config_revision INTEGER NOT NULL,
+				initiating_session_hash BLOB REFERENCES sessions(token_hash) ON DELETE CASCADE,
+				admin_id INTEGER REFERENCES admins(id) ON DELETE CASCADE,
+				nonce_hash BLOB,
+				pkce_verifier TEXT NOT NULL DEFAULT '',
+				redirect_uri TEXT NOT NULL,
+				return_path TEXT NOT NULL,
+				created_at INTEGER NOT NULL,
+				expires_at INTEGER NOT NULL,
+				claimed_at INTEGER NOT NULL DEFAULT 0,
+				CHECK (expires_at > created_at),
+				CHECK ((purpose = 'login' AND initiating_session_hash IS NULL AND admin_id IS NULL)
+					OR (purpose = 'bind' AND initiating_session_hash IS NOT NULL AND admin_id IS NOT NULL))
+			)`,
+			`CREATE INDEX IF NOT EXISTS sso_flows_expires_idx ON sso_flows(expires_at)`,
+		}
+	case 34:
+		// Upstream's migration 30.
+		return []string{
+			`ALTER TABLE sessions ADD COLUMN secure_cookies INTEGER NOT NULL DEFAULT 0 CHECK (secure_cookies IN (0, 1))`,
 		}
 	default:
 		return nil

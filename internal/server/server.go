@@ -25,6 +25,7 @@ import (
 	"vocat/internal/httpsmode"
 	"vocat/internal/loghub"
 	"vocat/internal/smstest"
+	"vocat/internal/sso"
 	"vocat/internal/store"
 	"vocat/internal/update"
 	"vocat/internal/vowifi"
@@ -65,46 +66,65 @@ type Options struct {
 	// outbound SMS unrenderable, which is correct: there is nothing to send
 	// it to.
 	SIPTrunkAddress string
+	// MCP, when set, mounts the MCP Streamable HTTP endpoint at /mcp behind
+	// bearer-token authentication. nil keeps the endpoint off.
+	MCP *MCPHandlers
+	// SSO optionally injects a flow service for protocol and browser tests.
+	SSO *sso.Service
 }
 
 // Server is the single HTTP handler for the JSON API and embedded SPA.
 type Server struct {
-	store                     *store.Store
-	auth                      *auth.Service
-	devices                   DeviceController
-	vowifi                    VoWiFiController
-	ussdSessions              ussdSessionStore
-	logs                      *loghub.Hub
-	assets                    fs.FS
-	indexHTML                 []byte
-	fileServer                http.Handler
-	logger                    *slog.Logger
-	secureCookies             bool
-	maxRequestBodyBytes       int64
-	startedAt                 time.Time
-	handler                   http.Handler
-	e911Sessions              *e911SessionManager
-	accessMu                  sync.RWMutex
-	access                    parsedAccessConfig
-	loginLimiter              *loginRateLimiter
-	extensions                *extensions.Manager
-	exportProxy               *exportproxy.Manager
-	developerEnabled          bool
-	updateRepository          string
-	updateToken               string
-	updateCheck               func(context.Context, string, string, string) (update.CheckResult, error)
-	updateApply               func(context.Context, *slog.Logger, update.Options, bool) (update.CheckResult, error)
-	updateRestart             func(*slog.Logger) error
-	updateMu                  sync.Mutex
-	updateApplying            bool
-	https                     *httpsmode.Manager
-	netTraffic                *liveNetTracker
-	hostStats                 *hostStatsSampler
-	publicIPMu                sync.RWMutex
-	publicIPs                 map[string]cachedPublicIP
-	lookupPublicIP            func(context.Context, string) (exportproxy.PublicIPInfo, error)
-	automaticTasks            *automaticTaskScheduler
-	smsSyncMu                 sync.Mutex
+	store               *store.Store
+	auth                *auth.Service
+	sso                 *sso.Service
+	ssoLimiter          *ssoRateLimiter
+	devices             DeviceController
+	vowifi              VoWiFiController
+	ussdSessions        ussdSessionStore
+	logs                *loghub.Hub
+	assets              fs.FS
+	indexHTML           []byte
+	fileServer          http.Handler
+	logger              *slog.Logger
+	secureCookies       bool
+	maxRequestBodyBytes int64
+	startedAt           time.Time
+	handler             http.Handler
+	e911Sessions        *e911SessionManager
+	accessMu            sync.RWMutex
+	access              parsedAccessConfig
+	loginLimiter        *loginRateLimiter
+	extensions          *extensions.Manager
+	exportProxy         *exportproxy.Manager
+	developerEnabled    bool
+	updateRepository    string
+	updateToken         string
+	updateCheck         func(context.Context, string, string, string) (update.CheckResult, error)
+	updateApply         func(context.Context, *slog.Logger, update.Options, bool) (update.CheckResult, error)
+	updateRestart       func(*slog.Logger) error
+	updateMu            sync.Mutex
+	updateApplying      bool
+	https               *httpsmode.Manager
+	mcp                 *MCPHandlers
+	netTraffic          *liveNetTracker
+	hostStats           *hostStatsSampler
+	publicIPMu          sync.RWMutex
+	publicIPs           map[string]cachedPublicIP
+	lookupPublicIP      func(context.Context, string) (exportproxy.PublicIPInfo, error)
+	automaticTasks      *automaticTaskScheduler
+	smsSyncMu           sync.Mutex
+	// qqBotBindMu 保护 qqBotBind：当前或最近一次 QQ 机器人接收方绑定。
+	qqBotBindMu sync.Mutex
+	qqBotBind   *qqBotBindSession
+	// qqBotConfigRevision is protected by qqBotBindMu and invalidates older binding drafts.
+	qqBotConfigRevision uint64
+	// qqBotBindWork 跟踪绑定期间启动的后台协程；StopQQBotBinding 据此等待其退出。
+	qqBotBindWork sync.WaitGroup
+	// qqBotWorkCtx 是这些协程的父 context，由 qqBotBindMu 保护，StopQQBotBinding 取消它。
+	qqBotWorkCtx              context.Context
+	qqBotWorkCancel           context.CancelFunc
+	qqBotStopping             bool            // 由 qqBotBindMu 保护：StopQQBotBinding 开始后为真。
 	esimSIMResetAttempted     map[string]bool // 由 smsSyncMu 保护；读取成功后允许下一次故障恢复。
 	smsStorageMu              sync.Mutex
 	smsStorage                map[string]device.SMSStorageUsage
@@ -133,6 +153,7 @@ type Server struct {
 	callOrigin   map[string]time.Time
 }
 
+// New validates server dependencies, initializes services and middleware, and registers application routes.
 func New(options Options) (*Server, error) {
 	if options.Store == nil {
 		return nil, errors.New("server: store is required")
@@ -160,6 +181,8 @@ func New(options Options) (*Server, error) {
 	server := &Server{
 		store:               options.Store,
 		auth:                options.Auth,
+		sso:                 options.SSO,
+		ssoLimiter:          newSSORateLimiter(),
 		devices:             options.Devices,
 		vowifi:              options.VoWiFi,
 		ussdSessions:        newUSSDSessionStore(),
@@ -183,6 +206,7 @@ func New(options Options) (*Server, error) {
 		asteriskAMI:         options.AsteriskAMI,
 		asteriskDialplanDir: options.AsteriskDialplanDir,
 		sipTrunkAddress:     options.SIPTrunkAddress,
+		mcp:                 options.MCP,
 		netTraffic:          newLiveNetTracker(),
 		hostStats:           newHostStatsSampler(),
 		publicIPs:           make(map[string]cachedPublicIP),
@@ -191,6 +215,12 @@ func New(options Options) (*Server, error) {
 		updateCheck:         update.CheckLatest,
 		updateApply:         update.ApplyLatest,
 		updateRestart:       update.RestartService,
+	}
+	if server.sso == nil {
+		server.sso = sso.New(options.Store, sso.Options{})
+	}
+	if err := server.sso.Cleanup(context.Background()); err != nil {
+		return nil, fmt.Errorf("server: clean expired SSO flows: %w", err)
 	}
 	server.cellularDataRuntime()
 	server.loadAccessConfig(context.Background())
@@ -205,6 +235,14 @@ func New(options Options) (*Server, error) {
 	mux.HandleFunc("/api/auth/login", server.handleLogin)
 	mux.HandleFunc("/api/auth/session", server.handleSession)
 	mux.HandleFunc("/api/auth/logout", server.handleLogout)
+	mux.HandleFunc("/api/auth/providers", server.handleAuthProviders)
+	mux.HandleFunc("/api/auth/sso/start", server.handleSSOStart)
+	mux.HandleFunc("/api/auth/sso/callback", server.handleSSOCallback)
+	mux.HandleFunc("/api/auth/sso/bind", server.handleSSOBind)
+	mux.HandleFunc("/api/auth/sso/binding", server.handleSSOUnbind)
+	mux.HandleFunc("/api/settings/sso", server.handleSSOSettings)
+	mux.HandleFunc("/api/settings/sso/check", server.handleSSOCheck)
+	mux.HandleFunc("/mcp", server.handleMCP)
 	mux.HandleFunc("/api", server.handleAPI)
 	mux.HandleFunc("/api/", server.handleAPI)
 	mux.HandleFunc("/plugin-assets/", server.handlePluginAsset)
@@ -273,6 +311,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleLogin verifies local credentials, applies rate limits, and issues cookies using the request transport policy.
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	if !requireMethod(w, r, http.MethodPost) {
@@ -295,7 +334,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	credentials, err := s.auth.Login(r.Context(), request.Username, request.Password)
+	secure := s.secureCookiesForRequest(r)
+	credentials, err := s.auth.Login(r.Context(), request.Username, request.Password, secure)
 	if errors.Is(err, auth.ErrInvalidCredentials) {
 		lockout, newlyLocked := s.loginLimiter.recordFailure(limiterKey)
 		s.auditAuth(r, request.Username, "failure")
@@ -315,7 +355,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	s.loginLimiter.recordSuccess(limiterKey)
 	s.auditAuth(r, credentials.Principal.Username, "success")
-	s.setAuthCookies(w, credentials.SessionToken, credentials.CSRFToken, credentials.ExpiresAt)
+	s.setAuthCookies(w, credentials.SessionToken, credentials.CSRFToken, credentials.ExpiresAt, secure)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"data": map[string]any{
 			"user":          credentials.Principal,
@@ -334,6 +374,7 @@ func (s *Server) loginKey(r *http.Request, username string) string {
 	return address.String() + "|" + strings.ToLower(strings.TrimSpace(username))
 }
 
+// handleSession authenticates the session and persists cookie policy upgrades before issuing or rotating CSRF credentials.
 func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	if !requireMethod(w, r, http.MethodGet) {
@@ -347,6 +388,37 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	if cookie, cookieErr := r.Cookie(csrfCookieName); cookieErr == nil {
 		existingCSRF = cookie.Value
 	}
+	session, err := s.auth.Authenticate(r.Context(), sessionToken)
+	if errors.Is(err, auth.ErrUnauthorized) {
+		s.authenticationRequired(w, r)
+		return
+	}
+	if err != nil {
+		s.logger.Error("load session failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal_error", "an internal error occurred")
+		return
+	}
+	secure := session.SecureCookies || s.secureCookiesForRequest(r)
+	if !secure && session.LoginMethod == "sso" {
+		secure, err = s.ssoSessionSecureCookies(r)
+		if err != nil {
+			s.writeSSOError(w, err)
+			return
+		}
+	}
+	if secure && !session.SecureCookies {
+		if err := s.store.RequireSessionSecureCookies(r.Context(), session.TokenHash()); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				s.authenticationRequired(w, r)
+				return
+			}
+			s.logger.Error("persist secure cookie policy failed", "error", err)
+			writeError(w, http.StatusInternalServerError, "internal_error", "an internal error occurred")
+			return
+		}
+	}
+	// Persist any policy upgrade before CSRFToken can replace the stored hash.
+	// A failed policy write must leave the browser's current CSRF credential valid.
 	session, csrfToken, err := s.auth.CSRFToken(r.Context(), sessionToken, existingCSRF)
 	if errors.Is(err, auth.ErrUnauthorized) {
 		s.authenticationRequired(w, r)
@@ -357,7 +429,16 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal_error", "an internal error occurred")
 		return
 	}
-	s.setCSRFCookie(w, csrfToken, session.ExpiresAt)
+	// The reauthentication also observes policy upgrades made by another request.
+	secure = secure || session.SecureCookies
+	if secure {
+		// Upgrade both browser cookies, including retries after the policy was
+		// persisted but the response was lost. Keep the original token and expiry.
+		s.setAuthCookies(w, sessionToken, csrfToken, session.ExpiresAt, true)
+	} else if existingCSRF != csrfToken {
+		// Leave a valid cookie's attributes intact when transport hints are absent.
+		s.setCSRFCookie(w, csrfToken, session.ExpiresAt, false)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"data": map[string]any{
 			"user":          session.Principal,
@@ -368,6 +449,7 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleLogout requires session-bound CSRF proof before revoking the session and clearing authentication cookies.
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	if !requireMethod(w, r, http.MethodPost) {
@@ -398,7 +480,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal_error", "an internal error occurred")
 		return
 	}
-	s.clearAuthCookies(w)
+	s.clearAuthCookies(w, r)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"data": map[string]bool{"logged_out": true},
 	})
@@ -416,17 +498,15 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.writeUIPreferences(w, r)
 		return
 	}
-	if !s.requireAuthenticated(w, r) {
+	if _, present := bearerToken(r); present {
+		authenticated, ok := s.requireBearer(w, r)
+		if !ok {
+			return
+		}
+		r = authenticated
+	} else if !s.requireAuthenticated(w, r) {
 		return
-	}
-	// A bearer API token is immune to CSRF (browsers cannot attach a custom
-	// Authorization header cross-site), and it has no session cookie to pair
-	// a double-submit token against, so the CSRF flow below applies only to
-	// cookie-authenticated requests.
-	_, viaBearer := s.bearerToken(r)
-	if !viaBearer && r.Method != http.MethodGet &&
-		r.Method != http.MethodHead &&
-		r.Method != http.MethodOptions {
+	} else if mutatingMethod(r.Method) {
 		sessionToken, ok := s.sessionToken(w, r)
 		if !ok {
 			return
@@ -519,41 +599,7 @@ func (s *Server) sessionToken(w http.ResponseWriter, r *http.Request) (string, b
 	return cookie.Value, true
 }
 
-const bearerAuthPrefix = "Bearer "
-
-// bearerToken extracts a raw API token from an Authorization: Bearer header.
-// It does not validate the token; callers pass it to auth.AuthenticateAPIToken.
-func (s *Server) bearerToken(r *http.Request) (string, bool) {
-	header := r.Header.Get("Authorization")
-	if !strings.HasPrefix(header, bearerAuthPrefix) {
-		return "", false
-	}
-	token := strings.TrimSpace(strings.TrimPrefix(header, bearerAuthPrefix))
-	if token == "" {
-		return "", false
-	}
-	return token, true
-}
-
-// requireAuthenticated accepts either an API token (Authorization: Bearer)
-// or a browser session cookie. A request carrying an Authorization header is
-// treated as token auth exclusively — it never falls back to the cookie, so
-// a bad or expired token fails the request instead of silently degrading to
-// a different identity.
 func (s *Server) requireAuthenticated(w http.ResponseWriter, r *http.Request) bool {
-	if token, ok := s.bearerToken(r); ok {
-		if _, err := s.auth.AuthenticateAPIToken(r.Context(), token); err != nil {
-			if errors.Is(err, auth.ErrUnauthorized) {
-				w.Header().Set("Cache-Control", "no-store")
-				writeError(w, http.StatusUnauthorized, "unauthorized", "authentication is required")
-			} else {
-				s.logger.Error("API token authentication failed", "error", err)
-				writeError(w, http.StatusInternalServerError, "internal_error", "an internal error occurred")
-			}
-			return false
-		}
-		return true
-	}
 	sessionToken, ok := s.sessionToken(w, r)
 	if !ok {
 		return false
@@ -575,7 +621,7 @@ func (s *Server) requireAuthenticated(w http.ResponseWriter, r *http.Request) bo
 // raw {"error":...} document. Frontend fetches explicitly request JSON and
 // are handled by the shared vocat:unauthorized event.
 func (s *Server) authenticationRequired(w http.ResponseWriter, r *http.Request) {
-	s.clearAuthCookies(w)
+	s.clearAuthCookies(w, r)
 	w.Header().Set("Cache-Control", "no-store")
 	if (r.Method == http.MethodGet || r.Method == http.MethodHead) &&
 		strings.Contains(strings.ToLower(r.Header.Get("Accept")), "text/html") {
@@ -596,7 +642,8 @@ func (s *Server) validateDoubleSubmitCSRF(w http.ResponseWriter, r *http.Request
 	return headerToken, true
 }
 
-func (s *Server) setAuthCookies(w http.ResponseWriter, sessionToken string, csrfToken string, expiresAt time.Time) {
+// setAuthCookies issues Session and CSRF cookies with one consistent transport policy.
+func (s *Server) setAuthCookies(w http.ResponseWriter, sessionToken string, csrfToken string, expiresAt time.Time, secure bool) {
 	maxAge := int(time.Until(expiresAt).Seconds())
 	if maxAge < 1 {
 		maxAge = 1
@@ -608,13 +655,14 @@ func (s *Server) setAuthCookies(w http.ResponseWriter, sessionToken string, csrf
 		Expires:  expiresAt,
 		MaxAge:   maxAge,
 		HttpOnly: true,
-		Secure:   s.secureCookies,
+		Secure:   secure,
 		SameSite: http.SameSiteStrictMode,
 	})
-	s.setCSRFCookie(w, csrfToken, expiresAt)
+	s.setCSRFCookie(w, csrfToken, expiresAt, secure)
 }
 
-func (s *Server) setCSRFCookie(w http.ResponseWriter, csrfToken string, expiresAt time.Time) {
+// setCSRFCookie sets the readable session-bound CSRF cookie with the selected transport policy.
+func (s *Server) setCSRFCookie(w http.ResponseWriter, csrfToken string, expiresAt time.Time, secure bool) {
 	maxAge := int(time.Until(expiresAt).Seconds())
 	if maxAge < 1 {
 		maxAge = 1
@@ -626,12 +674,13 @@ func (s *Server) setCSRFCookie(w http.ResponseWriter, csrfToken string, expiresA
 		Expires:  expiresAt,
 		MaxAge:   maxAge,
 		HttpOnly: false,
-		Secure:   s.secureCookies,
+		Secure:   secure,
 		SameSite: http.SameSiteStrictMode,
 	})
 }
 
-func (s *Server) clearAuthCookies(w http.ResponseWriter) {
+// clearAuthCookies expires authentication cookies using the current request cookie policy.
+func (s *Server) clearAuthCookies(w http.ResponseWriter, r *http.Request) {
 	for _, name := range []string{sessionCookieName, csrfCookieName} {
 		http.SetCookie(w, &http.Cookie{
 			Name:     name,
@@ -640,7 +689,7 @@ func (s *Server) clearAuthCookies(w http.ResponseWriter) {
 			Expires:  time.Unix(1, 0),
 			MaxAge:   -1,
 			HttpOnly: name == sessionCookieName,
-			Secure:   s.secureCookies,
+			Secure:   s.secureCookiesForRequest(r),
 			SameSite: http.SameSiteStrictMode,
 		})
 	}

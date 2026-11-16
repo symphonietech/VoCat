@@ -17,6 +17,7 @@ type ATDeviceController interface {
 	List() []device.Device
 	ExecuteAT(context.Context, string, string) (modem.Response, error)
 	ExecuteSensitiveAT(context.Context, string, string) (modem.Response, error)
+	ExecuteAPDU(context.Context, string, modem.APDUCommand, int, []byte) ([]byte, error)
 }
 
 // ATMapper lets runtime IDs remain stable configuration IDs even when Linux
@@ -73,6 +74,20 @@ func (mapper ATMapper) ExecuteSensitiveAT(
 		return modem.Response{}, err
 	}
 	return mapper.Devices.ExecuteSensitiveAT(ctx, physicalID, command)
+}
+
+func (mapper ATMapper) ExecuteAPDU(
+	ctx context.Context,
+	configuredID string,
+	command modem.APDUCommand,
+	channel int,
+	apdu []byte,
+) ([]byte, error) {
+	physicalID, err := mapper.resolve(ctx, configuredID)
+	if err != nil {
+		return nil, err
+	}
+	return mapper.Devices.ExecuteAPDU(ctx, physicalID, command, channel, apdu)
 }
 
 // ReadSMSCenter reads the SIM-provisioned service-centre address through the
@@ -134,14 +149,25 @@ func (mapper ATMapper) ReadSIMMetadata(ctx context.Context, configuredID string)
 	}, nil
 }
 
-func (mapper ATMapper) resolve(
+// DeviceLister is the read side ResolvePhysicalID needs.
+type DeviceLister interface {
+	List() []device.Device
+}
+
+// ResolvePhysicalID maps a configured device ID to the live physical device
+// ID using the same scored matching as the AT paths. Transports beyond the
+// HTTP API (for example the MCP tool surface) resolve device addresses
+// through this so every consumer picks the same modem.
+func ResolvePhysicalID(
 	ctx context.Context,
+	database *store.Store,
+	devices DeviceLister,
 	configuredID string,
 ) (string, error) {
-	if mapper.Store == nil || mapper.Devices == nil {
-		return "", errors.New("vowifi AT mapper is not configured")
+	if database == nil || devices == nil {
+		return "", errors.New("physical device resolver is not configured")
 	}
-	config, err := mapper.Store.Device(ctx, configuredID)
+	config, err := database.Device(ctx, configuredID)
 	if err != nil {
 		return "", err
 	}
@@ -152,7 +178,7 @@ func (mapper ATMapper) resolve(
 	// two logical devices issuing APDUs to the same SIM.
 	bestID := ""
 	bestScore := 0
-	for _, entry := range mapper.Devices.List() {
+	for _, entry := range devices.List() {
 		if !entry.Discovered {
 			continue
 		}
@@ -166,6 +192,13 @@ func (mapper ATMapper) resolve(
 		return bestID, nil
 	}
 	return "", device.ErrNotFound
+}
+
+func (mapper ATMapper) resolve(
+	ctx context.Context,
+	configuredID string,
+) (string, error) {
+	return ResolvePhysicalID(ctx, mapper.Store, mapper.Devices, configuredID)
 }
 
 func physicalMatchScore(configuredID string, config store.Device, entry device.Device) int {

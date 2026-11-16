@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"vocat/internal/modem"
 )
@@ -26,6 +27,36 @@ type qmiDataSession interface {
 	RuntimeIPv4(context.Context) (qmiIPv4Settings, error)
 	Close() error
 }
+
+// atHostDataSession is a live host-side lease for the AT data backend. The
+// session owns its DHCP process and the protected policy routing generation;
+// Close must tear down every host path it created.
+type atHostDataSession interface {
+	Status(context.Context) (bool, string, error)
+	Close(context.Context) error
+}
+
+// atHostDataLink starts a host-side lease on a cellular network interface.
+// Linux runs a foreground busybox udhcpc with protected routing; other
+// platforms return ErrDataBackendUnavailable. If startup cleanup fails, Start
+// returns the remaining session with its error so the caller retains ownership
+// and can retry cleanup before allowing another backend to use the interface.
+type atHostDataLink interface {
+	Start(ctx context.Context, networkInterface string) (atHostDataSession, error)
+}
+
+// atDataPDPContextID is the single PDP context the AT data backend manages.
+// Modems such as the ZXIC platform auto-activate their default PDN on context 1,
+// so the enable flow deactivates it before reconfiguring.
+const atDataPDPContextID = 1
+
+// Data-path AT timeouts follow vendor FAQ budgets (observed on the ZXIC
+// ZXIC platform manual): attach may retry for ~75s, activation for ~150s.
+const (
+	atDataAttachTimeout   = 90 * time.Second
+	atDataActivateTimeout = 150 * time.Second
+	atDataCleanupTimeout  = 20 * time.Second
+)
 
 // qmiDataEventSource is an optional capability implemented by native QMI
 // sessions. The event channel only carries a wake-up signal; the caller must
@@ -200,6 +231,9 @@ func (manager *Manager) SetNetwork(
 	id string,
 	request NetworkRequest,
 ) (NetworkResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	state, err := manager.lookup(id)
 	if err != nil {
 		return NetworkResult{}, err
@@ -219,6 +253,11 @@ func (manager *Manager) SetNetwork(
 	if ipVersion == "" {
 		return NetworkResult{}, errors.New("IP version must be IP, IPV6, or IPV4V6")
 	}
+	unlockProfileRead, err := manager.lockProfileSwitchRead(ctx, id, state)
+	if err != nil {
+		return NetworkResult{}, err
+	}
+	defer unlockProfileRead()
 
 	candidate := manager.candidateFor(state)
 	backend := strings.ToLower(strings.TrimSpace(request.Backend))
@@ -237,8 +276,13 @@ func (manager *Manager) SetNetwork(
 		// not hold opMu while an external QMI transaction is in flight: a stale
 		// WDS client may take seconds to time out, and blocking opMu here also
 		// blocks SMS synchronization, IMS status and ordinary health probes.
-		state.dataMu.Lock()
+		if err := lockMutexContext(ctx, &state.dataMu); err != nil {
+			return NetworkResult{}, err
+		}
 		defer state.dataMu.Unlock()
+		if err := ctx.Err(); err != nil {
+			return NetworkResult{}, err
+		}
 		if err := manager.validateActive(id, state); err != nil {
 			return NetworkResult{}, err
 		}
@@ -250,6 +294,16 @@ func (manager *Manager) SetNetwork(
 		}
 		if candidate.QMIControl == "" || candidate.NetworkInterface == "" {
 			return NetworkResult{}, fmt.Errorf("%w: QMI control device and network interface are required", ErrDataBackendUnavailable)
+		}
+		// Switching to the QMI backend must tear the AT host session down
+		// first. Both backends own the same host interface: a surviving
+		// udhcpc would keep reapplying its lease, and its later deconfig
+		// would flush the address and routes the QMI session just
+		// installed. Both backends hold dataMu until the previous owner has
+		// finished cleanup and the replacement setup has completed.
+		state.dataBackend = "qmi"
+		if err := manager.closeATHostSessionLocked(state); err != nil {
+			return NetworkResult{}, err
 		}
 		// OpenStick's native WWAN path must drive registration through QMI NAS.
 		// AT+COPS only updates the legacy AT facade on this firmware and can leave
@@ -289,8 +343,21 @@ func (manager *Manager) SetNetwork(
 		return result, err
 	}
 
-	state.opMu.Lock()
+	if err := lockMutexContext(ctx, &state.opMu); err != nil {
+		return NetworkResult{}, err
+	}
 	defer state.opMu.Unlock()
+	// AT commands need the serial actor as well as exclusive ownership of the
+	// host data path. Always acquire opMu before dataMu; the QMI branch never
+	// takes opMu while holding dataMu. Keep dataMu until teardown and startup
+	// have finished so a competing backend cannot replace a half-built lease.
+	if err := lockMutexContext(ctx, &state.dataMu); err != nil {
+		return NetworkResult{}, err
+	}
+	defer state.dataMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return NetworkResult{}, err
+	}
 	if err := manager.validateActive(id, state); err != nil {
 		return NetworkResult{}, err
 	}
@@ -301,58 +368,207 @@ func (manager *Manager) SetNetwork(
 		}
 	}
 	candidate = manager.candidateFor(state)
+	state.dataBackend = "at"
 
-	client, err := manager.clientLocked(ctx, state, candidate)
-	if err != nil {
-		manager.setResult(id, state, nil, err)
+	result, err := manager.setATNetwork(
+		ctx, state, candidate, request.Enabled,
+		apn, ipVersion, request.Username, request.Password, authentication,
+	)
+	manager.setResult(id, state, nil, err)
+	return result, err
+}
+
+// setATNetwork drives the AT data backend: PDP commands come from the
+// resolved profile, and a successful activation is followed by a host-side
+// lease on the candidate's network interface. Disable is fail-closed: the
+// host path is removed before the modem is asked to deactivate.
+func (manager *Manager) setATNetwork(
+	ctx context.Context,
+	state *managedDevice,
+	candidate modem.Candidate,
+	enabled bool,
+	apn string,
+	ipVersion string,
+	username string,
+	password string,
+	authentication string,
+) (NetworkResult, error) {
+	networkInterface := strings.TrimSpace(candidate.NetworkInterface)
+	profile := state.atProfile.PDP
+
+	if !enabled {
+		// Fail closed on the host path first: even a wedged modem must not
+		// leave an application routing through the cellular interface.
+		if err := manager.closeATHostSessionLocked(state); err != nil {
+			return NetworkResult{}, err
+		}
+		if err := stopOwnedQMIDataSessionLocked(state, networkInterface); err != nil {
+			return NetworkResult{}, err
+		}
+		client, err := manager.clientLocked(ctx, state, candidate)
+		if err != nil {
+			return NetworkResult{}, err
+		}
+		if _, err := manager.command(ctx, client, profile.ActivateCommand(atDataPDPContextID, false)); err != nil {
+			return NetworkResult{}, err
+		}
+		return NetworkResult{
+			Enabled:   false,
+			Backend:   "at",
+			Interface: networkInterface,
+			APN:       apn,
+			IPVersion: ipVersion,
+			Detail:    "PDP context deactivated",
+		}, nil
+	}
+	// The host interface and the platform link are only required to bring
+	// the data path up. A device that lost its host interface must still be
+	// able to deactivate its PDP context.
+	if networkInterface == "" {
+		return NetworkResult{}, fmt.Errorf("%w: a host network interface is required for the AT data backend", ErrDataBackendUnavailable)
+	}
+	if manager.atHostDataLink == nil {
+		return NetworkResult{}, ErrDataBackendUnavailable
+	}
+
+	// A recovery re-enable must not leave the previous DHCP process and its
+	// protected routes alive alongside the new lease: the old session would
+	// keep its udhcpc running, and its later deconfig would flush the
+	// per-interface table the new lease shares.
+	if err := manager.closeATHostSessionLocked(state); err != nil {
 		return NetworkResult{}, err
 	}
-	if request.Enabled {
-		type networkCommand struct {
-			value     string
-			sensitive bool
-		}
-		commands := []networkCommand{
-			{value: fmt.Sprintf(`AT+CGDCONT=1,"%s","%s"`, ipVersion, apn)},
-		}
-		if authentication != "NONE" {
-			authCode := map[string]int{"PAP": 1, "CHAP": 2, "PAP_OR_CHAP": 3}[authentication]
-			commands = append(commands, networkCommand{
-				value:     fmt.Sprintf(`AT+CGAUTH=1,%d,"%s","%s"`, authCode, request.Username, request.Password),
-				sensitive: true,
-			})
-		}
-		commands = append(commands,
-			networkCommand{value: "AT+CGATT=1"},
-			networkCommand{value: "AT+CGACT=1,1"},
-		)
-		for _, command := range commands {
-			var err error
-			if command.sensitive {
-				_, err = manager.sensitiveCommand(ctx, client, command.value)
-			} else {
-				_, err = manager.command(ctx, client, command.value)
-			}
-			if err != nil {
-				manager.setResult(id, state, nil, err)
-				return NetworkResult{}, err
-			}
-		}
-	} else {
-		if _, err := manager.command(ctx, client, "AT+CGACT=0,1"); err != nil {
-			manager.setResult(id, state, nil, err)
+	if err := stopOwnedQMIDataSessionLocked(state, networkInterface); err != nil {
+		return NetworkResult{}, err
+	}
+	client, err := manager.clientLocked(ctx, state, candidate)
+	if err != nil {
+		return NetworkResult{}, err
+	}
+
+	// 3GPP forbids reconfiguring an active context, and modems such as the
+	// ZXIC platform auto-activates a default PDN on context 1. Probe the state and
+	// deactivate first so CGDCONT always sees an inactive context. A failed
+	// probe is not fatal: the configure step below fails loudly if the modem
+	// really refuses to proceed.
+	if response, queryErr := manager.command(ctx, client, "AT+CGACT?"); queryErr == nil &&
+		parsePDPContextActive(response, atDataPDPContextID) {
+		if _, err := manager.command(ctx, client, profile.ActivateCommand(atDataPDPContextID, false)); err != nil {
 			return NetworkResult{}, err
 		}
 	}
-	manager.setResult(id, state, nil, nil)
+
+	contextCommand, err := profile.ConfigureContextCommand(atDataPDPContextID, ipVersion, apn)
+	if err != nil {
+		return NetworkResult{}, err
+	}
+	if _, err := manager.command(ctx, client, contextCommand); err != nil {
+		return NetworkResult{}, err
+	}
+	if authentication != "NONE" {
+		authCode := map[string]int{"PAP": 1, "CHAP": 2, "PAP_OR_CHAP": 3}[authentication]
+		authCommand, err := profile.ConfigureAuthenticationCommand(atDataPDPContextID, authCode, username, password)
+		if err != nil {
+			return NetworkResult{}, err
+		}
+		if _, err := manager.sensitiveCommand(ctx, client, authCommand); err != nil {
+			return NetworkResult{}, err
+		}
+	}
+
+	// Attach and activate can take minutes when the network is slow (vendor
+	// FAQ budgets: attach up to 75s, activate up to 150s), so they use
+	// dedicated data-path timeouts instead of the short command timeout.
+	if _, err := manager.timedCommand(ctx, client, profile.AttachCommand(true), atDataAttachTimeout); err != nil {
+		return NetworkResult{}, err
+	}
+	if _, err := manager.timedCommand(ctx, client, profile.ActivateCommand(atDataPDPContextID, true), atDataActivateTimeout); err != nil {
+		return NetworkResult{}, err
+	}
+
+	session, err := manager.atHostDataLink.Start(ctx, networkInterface)
+	if err != nil {
+		// The host path must be gone before the modem rollback: a half-lazy
+		// lease with an active PDP would keep an unreachable route around.
+		if session != nil {
+			state.atHostSession = session
+			if cleanupErr := manager.closeATHostSessionLocked(state); cleanupErr != nil {
+				return NetworkResult{}, errors.Join(fmt.Errorf("start AT host data session: %w", err), cleanupErr)
+			}
+		}
+		rollbackContext, cancelRollback := context.WithTimeout(context.Background(), atDataCleanupTimeout)
+		defer cancelRollback()
+		if _, rollbackErr := manager.command(rollbackContext, client, profile.ActivateCommand(atDataPDPContextID, false)); rollbackErr != nil {
+			return NetworkResult{}, fmt.Errorf("start AT host data session: %w (PDP rollback failed: %v)", err, rollbackErr)
+		}
+		return NetworkResult{}, fmt.Errorf("start AT host data session: %w", err)
+	}
+	state.atHostSession = session
 	return NetworkResult{
-		Enabled:   request.Enabled,
+		Enabled:   true,
 		Backend:   "at",
-		Interface: candidate.NetworkInterface,
+		Interface: networkInterface,
 		APN:       apn,
 		IPVersion: ipVersion,
-		Detail:    map[bool]string{true: "PDP context activated", false: "PDP context deactivated"}[request.Enabled],
+		Detail:    "PDP context activated and host lease established",
 	}, nil
+}
+
+// closeATHostSessionLocked closes the AT host session while the caller holds
+// state.dataMu. Keep the reference until cleanup succeeds so a failed cleanup
+// can be retried and cannot be followed by a new owner of the same host paths.
+// dataBackend records the selected backend even when no live session remains.
+func (manager *Manager) closeATHostSessionLocked(state *managedDevice) error {
+	session := state.atHostSession
+	if session == nil {
+		return nil
+	}
+	cleanupContext, cancelCleanup := context.WithTimeout(context.Background(), atDataCleanupTimeout)
+	defer cancelCleanup()
+	if err := session.Close(cleanupContext); err != nil {
+		return fmt.Errorf("close AT host data session: %w", err)
+	}
+	state.atHostSession = nil
+	return nil
+}
+
+// invalidateNetworkSessions drops both the QMI and the AT host data session
+// state on radio-reset, profile-switch and device-disconnect paths. Callers
+// hold state.dataMu; the AT session close runs under the same lock so a reset
+// cannot race a live lease teardown. Session.Close never takes dataMu, so
+// holding it here cannot deadlock (the process stop is bounded internally).
+func invalidateNetworkSessions(state *managedDevice, candidate modem.Candidate) error {
+	invalidateQMINetworkSession(state, candidate)
+	if state.atHostSession != nil {
+		cleanupContext, cancelCleanup := context.WithTimeout(context.Background(), atDataCleanupTimeout)
+		err := state.atHostSession.Close(cleanupContext)
+		cancelCleanup()
+		if err != nil {
+			return fmt.Errorf("close AT host data session before reset: %w", err)
+		}
+		state.atHostSession = nil
+	}
+	return nil
+}
+
+// parsePDPContextActive reports whether a +CGACT? response marks cid active.
+func parsePDPContextActive(response modem.Response, cid int) bool {
+	for _, line := range response.Lines {
+		line = strings.TrimSpace(line)
+		if len(line) < len("+CGACT:") || !strings.EqualFold(line[:len("+CGACT:")], "+CGACT:") {
+			continue
+		}
+		fields := strings.Split(strings.TrimSpace(line[len("+CGACT:"):]), ",")
+		if len(fields) != 2 {
+			continue
+		}
+		contextID, cidErr := strconv.Atoi(strings.TrimSpace(fields[0]))
+		state, stateErr := strconv.Atoi(strings.TrimSpace(fields[1]))
+		if cidErr == nil && stateErr == nil && contextID == cid && state == 1 {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeIPVersion(value string) string {
@@ -378,6 +594,9 @@ func (manager *Manager) PrepareRegistration(
 	apn string,
 	ipVersion string,
 ) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	apn = strings.TrimSpace(apn)
 	if apn == "" {
 		return nil
@@ -393,6 +612,11 @@ func (manager *Manager) PrepareRegistration(
 	if err != nil {
 		return err
 	}
+	unlockProfileRead, err := manager.lockProfileSwitchRead(ctx, id, state)
+	if err != nil {
+		return err
+	}
+	defer unlockProfileRead()
 	state.opMu.Lock()
 	defer state.opMu.Unlock()
 	if err := manager.validateActive(id, state); err != nil {
@@ -403,7 +627,12 @@ func (manager *Manager) PrepareRegistration(
 		manager.setResult(id, state, nil, err)
 		return err
 	}
-	_, err = manager.command(ctx, client, fmt.Sprintf(`AT+CGDCONT=1,"%s","%s"`, ipVersion, apn))
+	contextCommand, err := state.atProfile.PDP.ConfigureContextCommand(atDataPDPContextID, ipVersion, apn)
+	if err != nil {
+		manager.setResult(id, state, nil, err)
+		return err
+	}
+	_, err = manager.command(ctx, client, contextCommand)
 	manager.setResult(id, state, nil, err)
 	return err
 }
@@ -509,39 +738,52 @@ func (manager *Manager) OperatorSelection(ctx context.Context, id string) (Opera
 	if err != nil {
 		return OperatorSelection{}, err
 	}
+	if err := lockMutexContext(ctx, &state.opMu); err != nil {
+		return OperatorSelection{}, err
+	}
+	defer state.opMu.Unlock()
+	if err := manager.validateActive(id, state); err != nil {
+		return OperatorSelection{}, err
+	}
 	candidate := manager.candidateFor(state)
 	if isNativeQMICandidate(candidate) {
-		state.opMu.Lock()
-		defer state.opMu.Unlock()
-		if err := manager.validateActive(id, state); err != nil {
-			return OperatorSelection{}, err
-		}
 		return manager.nativeQMIOperatorSelectionLocked(ctx, candidate)
 	}
-	response, err := manager.ExecuteAT(ctx, id, "AT+COPS?")
+	client, err := manager.clientLocked(ctx, state, candidate)
+	if err != nil {
+		manager.setResult(id, state, nil, err)
+		return OperatorSelection{}, err
+	}
+	profile := operatorProfileForState(state, candidate)
+	response, err := manager.command(ctx, client, profile.SelectionQueryCommand())
+	if err != nil {
+		manager.setResult(id, state, nil, err)
+		return OperatorSelection{}, err
+	}
+	if !response.OK() {
+		err = &modem.CommandError{Command: response.Command, Final: response.Final, Lines: response.Lines}
+		manager.setResult(id, state, nil, err)
+		return OperatorSelection{}, err
+	}
+	selection, err := operatorSelectionFromProfile(profile, response)
+	manager.setResult(id, state, nil, err)
+	return selection, err
+}
+
+func operatorSelectionFromProfile(
+	profile modem.OperatorATProfile,
+	response modem.Response,
+) (OperatorSelection, error) {
+	selection, err := profile.ParseSelection(response)
 	if err != nil {
 		return OperatorSelection{}, err
 	}
-	return parseOperatorSelection(response)
-}
-
-func parseOperatorSelection(response modem.Response) (OperatorSelection, error) {
-	values := csvValues(valueAfterPrefix(response, "+COPS:"))
-	if len(values) < 1 {
-		return OperatorSelection{}, errors.New("modem did not return operator selection state")
-	}
-	result := OperatorSelection{}
-	result.Mode, _ = strconv.Atoi(values[0])
-	if len(values) > 1 {
-		result.Format, _ = strconv.Atoi(values[1])
-	}
-	if len(values) > 2 {
-		result.Operator = strings.Trim(values[2], `"`)
-	}
-	if len(values) > 3 {
-		result.AccessTechnology = accessTechnology(values[3])
-	}
-	return result, nil
+	return OperatorSelection{
+		Mode:             selection.Mode,
+		Format:           selection.Format,
+		Operator:         strings.TrimSpace(selection.Operator),
+		AccessTechnology: accessTechnology(selection.AccessTechnologyCode),
+	}, nil
 }
 
 func (manager *Manager) SetOperatorSelection(
@@ -551,8 +793,10 @@ func (manager *Manager) SetOperatorSelection(
 	plmn string,
 	accessTechnologyValue *int,
 ) (OperatorSelection, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	result := OperatorSelection{Mode: 0}
-	command := ""
 	if !automatic {
 		plmn = strings.TrimSpace(plmn)
 		if len(plmn) < 5 || len(plmn) > 6 || strings.IndexFunc(plmn, func(r rune) bool { return r < '0' || r > '9' }) >= 0 {
@@ -561,13 +805,11 @@ func (manager *Manager) SetOperatorSelection(
 		// Mode 1 is a real manual lock. Mode 4 is only a manual attempt with
 		// automatic fallback; using it made a rejected registration silently
 		// return to COPS=0 while the UI incorrectly reported a successful lock.
-		command = fmt.Sprintf(`AT+COPS=1,2,"%s"`, plmn)
 		actName := ""
 		if accessTechnologyValue != nil {
 			if *accessTechnologyValue < 0 || *accessTechnologyValue > 9 {
 				return OperatorSelection{}, errors.New("invalid operator access technology")
 			}
-			command += fmt.Sprintf(",%d", *accessTechnologyValue)
 			actName = accessTechnology(strconv.Itoa(*accessTechnologyValue))
 		}
 		result = OperatorSelection{Mode: 1, Format: 2, Operator: plmn, AccessTechnology: actName}
@@ -576,6 +818,11 @@ func (manager *Manager) SetOperatorSelection(
 	if err != nil {
 		return OperatorSelection{}, err
 	}
+	unlockProfileRead, err := manager.lockProfileSwitchRead(ctx, id, state)
+	if err != nil {
+		return OperatorSelection{}, err
+	}
+	defer unlockProfileRead()
 	state.opMu.Lock()
 	defer state.opMu.Unlock()
 	if err := manager.validateActive(id, state); err != nil {
@@ -593,11 +840,12 @@ func (manager *Manager) SetOperatorSelection(
 		manager.setResult(id, state, nil, err)
 		return selection, err
 	}
-	client, err := manager.clientLocked(ctx, state, manager.candidateFor(state))
+	client, err := manager.clientLocked(ctx, state, candidate)
 	if err != nil {
 		manager.setResult(id, state, nil, err)
 		return OperatorSelection{}, err
 	}
+	profile := operatorProfileForState(state, candidate)
 	// Manual PLMN selection makes the modem search for and register on the
 	// requested network, which can take tens of seconds — far longer than the
 	// normal command timeout. Use the same deadline budget as operator scan so
@@ -605,28 +853,33 @@ func (manager *Manager) SetOperatorSelection(
 	lockCtx, cancel := manager.withTimeout(ctx, manager.scanTimeout)
 	defer cancel()
 	if automatic {
-		result, err = restoreAutomaticOperatorSelection(lockCtx, client)
+		result, err = restoreAutomaticOperatorSelection(lockCtx, client, profile)
 		manager.setResult(id, state, nil, err)
 		return result, err
+	}
+	command, err := profile.ManualSelectionCommand(plmn, accessTechnologyValue)
+	if err != nil {
+		manager.setResult(id, state, nil, err)
+		return OperatorSelection{}, err
 	}
 	response, err := client.Execute(lockCtx, command)
 	if err != nil || !response.OK() {
 		if err == nil {
 			err = &modem.CommandError{Command: response.Command, Final: response.Final, Lines: response.Lines}
 		}
-		rollbackOperatorSelection(manager, client)
+		rollbackOperatorSelection(manager, client, profile)
 		wrapped := fmt.Errorf("manual operator selection failed and automatic selection was restored: %w", err)
 		manager.setResult(id, state, nil, wrapped)
 		return OperatorSelection{}, wrapped
 	}
-	actual, err := queryOperatorSelection(lockCtx, client)
+	actual, err := queryOperatorSelection(lockCtx, client, profile)
 	if err != nil {
-		rollbackOperatorSelection(manager, client)
+		rollbackOperatorSelection(manager, client, profile)
 		manager.setResult(id, state, nil, err)
 		return OperatorSelection{}, fmt.Errorf("verify manual operator selection: %w", err)
 	}
 	if actual.Mode != 1 || actual.Operator != plmn {
-		rollbackOperatorSelection(manager, client)
+		rollbackOperatorSelection(manager, client, profile)
 		err := fmt.Errorf("network %s did not accept registration; automatic selection was restored (modem reported mode=%d operator=%q)", plmn, actual.Mode, actual.Operator)
 		manager.setResult(id, state, nil, err)
 		return OperatorSelection{}, err
@@ -636,34 +889,44 @@ func (manager *Manager) SetOperatorSelection(
 	return result, nil
 }
 
-func queryOperatorSelection(ctx context.Context, client modem.Client) (OperatorSelection, error) {
-	response, err := client.Execute(ctx, "AT+COPS?")
+func queryOperatorSelection(
+	ctx context.Context,
+	client modem.Client,
+	profile modem.OperatorATProfile,
+) (OperatorSelection, error) {
+	response, err := client.Execute(ctx, profile.SelectionQueryCommand())
 	if err != nil {
 		return OperatorSelection{}, err
 	}
 	if !response.OK() {
 		return OperatorSelection{}, &modem.CommandError{Command: response.Command, Final: response.Final, Lines: response.Lines}
 	}
-	return parseOperatorSelection(response)
+	return operatorSelectionFromProfile(profile, response)
 }
 
 // restoreAutomaticOperatorSelection clears both a manual PLMN latch and an
-// old RAT-only scan restriction. The latter is important on EC20 modules:
+// old RAT-only scan restriction. The latter is important on Quectel EC20 modules:
 // COPS=0 alone can remain effectively LTE-only after an earlier lock, unlike a
 // phone's normal automatic GSM/WCDMA/LTE acquisition policy.
-func restoreAutomaticOperatorSelection(ctx context.Context, client modem.Client) (OperatorSelection, error) {
-	// Older firmware may not implement nwscanmode; COPS auto is still useful in
-	// that case, so this compatibility reset is best effort.
+func restoreAutomaticOperatorSelection(
+	ctx context.Context,
+	client modem.Client,
+	profile modem.OperatorATProfile,
+) (OperatorSelection, error) {
+	// Older Quectel firmware may not implement nwscanmode; COPS auto is still
+	// useful in that case, so this compatibility reset is best effort. Quectel
+	// based modules are also sold under other USB identities, so the command is
+	// sent to every modem and only its response is ignored.
 	_, _ = client.Execute(ctx, `AT+QCFG="nwscanmode",0,1`)
-	_, _ = client.Execute(ctx, "AT+COPS=2")
-	response, err := client.Execute(ctx, "AT+COPS=0")
+	_, _ = client.Execute(ctx, profile.DeregisterCommand())
+	response, err := client.Execute(ctx, profile.AutomaticSelectionCommand())
 	if err != nil {
 		return OperatorSelection{}, err
 	}
 	if !response.OK() {
 		return OperatorSelection{}, &modem.CommandError{Command: response.Command, Final: response.Final, Lines: response.Lines}
 	}
-	actual, err := queryOperatorSelection(ctx, client)
+	actual, err := queryOperatorSelection(ctx, client, profile)
 	if err != nil {
 		return OperatorSelection{}, fmt.Errorf("verify automatic operator selection: %w", err)
 	}
@@ -673,10 +936,14 @@ func restoreAutomaticOperatorSelection(ctx context.Context, client modem.Client)
 	return actual, nil
 }
 
-func rollbackOperatorSelection(manager *Manager, client modem.Client) {
+func rollbackOperatorSelection(
+	manager *Manager,
+	client modem.Client,
+	profile modem.OperatorATProfile,
+) {
 	rollbackCtx, cancel := context.WithTimeout(context.Background(), manager.longTimeout)
 	defer cancel()
-	_, _ = restoreAutomaticOperatorSelection(rollbackCtx, client)
+	_, _ = restoreAutomaticOperatorSelection(rollbackCtx, client, profile)
 }
 
 // ReRegisterOperator detaches from the network and reapplies the modem's
@@ -684,10 +951,18 @@ func rollbackOperatorSelection(manager *Manager, client modem.Client) {
 // passive refresh: it forces a new registration attempt without changing the
 // user's lock policy.
 func (manager *Manager) ReRegisterOperator(ctx context.Context, id string) (OperatorSelection, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	state, err := manager.lookup(id)
 	if err != nil {
 		return OperatorSelection{}, err
 	}
+	unlockProfileRead, err := manager.lockProfileSwitchRead(ctx, id, state)
+	if err != nil {
+		return OperatorSelection{}, err
+	}
+	defer unlockProfileRead()
 	state.opMu.Lock()
 	defer state.opMu.Unlock()
 	if err := manager.validateActive(id, state); err != nil {
@@ -706,15 +981,16 @@ func (manager *Manager) ReRegisterOperator(ctx context.Context, id string) (Oper
 	}
 	longCtx, cancel := manager.withTimeout(ctx, manager.scanTimeout)
 	defer cancel()
+	profile := operatorProfileForState(state, candidate)
 
-	current, err := queryOperatorSelection(longCtx, client)
+	current, err := queryOperatorSelection(longCtx, client, profile)
 	if err != nil {
 		manager.setResult(id, state, nil, err)
 		return OperatorSelection{}, err
 	}
 	manual := current.Mode == 1 || current.Mode == 4
 	if manual && !decimalPLMN(current.Operator) {
-		response, formatErr := client.Execute(longCtx, "AT+COPS=3,2")
+		response, formatErr := client.Execute(longCtx, profile.SetOperatorFormatCommand(2))
 		if formatErr != nil || !response.OK() {
 			if formatErr == nil {
 				formatErr = &modem.CommandError{Command: response.Command, Final: response.Final, Lines: response.Lines}
@@ -722,7 +998,7 @@ func (manager *Manager) ReRegisterOperator(ctx context.Context, id string) (Oper
 			manager.setResult(id, state, nil, formatErr)
 			return OperatorSelection{}, formatErr
 		}
-		current, err = queryOperatorSelection(longCtx, client)
+		current, err = queryOperatorSelection(longCtx, client, profile)
 		if err != nil {
 			manager.setResult(id, state, nil, err)
 			return OperatorSelection{}, err
@@ -731,7 +1007,7 @@ func (manager *Manager) ReRegisterOperator(ctx context.Context, id string) (Oper
 	}
 
 	if !manual {
-		result, restoreErr := restoreAutomaticOperatorSelection(longCtx, client)
+		result, restoreErr := restoreAutomaticOperatorSelection(longCtx, client, profile)
 		manager.setResult(id, state, nil, restoreErr)
 		return result, restoreErr
 	}
@@ -740,12 +1016,17 @@ func (manager *Manager) ReRegisterOperator(ctx context.Context, id string) (Oper
 		if !decimalPLMN(current.Operator) {
 			return OperatorSelection{}, errors.New("current manual operator is not available as a numeric PLMN")
 		}
-		desired = fmt.Sprintf(`AT+COPS=1,2,"%s"`, current.Operator)
+		var accessTechnologyValue *int
 		if code, ok := accessTechnologyCode(current.AccessTechnology); ok {
-			desired += fmt.Sprintf(",%d", code)
+			accessTechnologyValue = &code
+		}
+		desired, err = profile.ManualSelectionCommand(current.Operator, accessTechnologyValue)
+		if err != nil {
+			manager.setResult(id, state, nil, err)
+			return OperatorSelection{}, err
 		}
 	}
-	for _, command := range []string{"AT+COPS=2", desired} {
+	for _, command := range []string{profile.DeregisterCommand(), desired} {
 		response, executeErr := client.Execute(longCtx, command)
 		if executeErr != nil {
 			manager.setResult(id, state, nil, executeErr)
@@ -757,7 +1038,7 @@ func (manager *Manager) ReRegisterOperator(ctx context.Context, id string) (Oper
 			return OperatorSelection{}, executeErr
 		}
 	}
-	result, err := queryOperatorSelection(longCtx, client)
+	result, err := queryOperatorSelection(longCtx, client, profile)
 	manager.setResult(id, state, nil, err)
 	if err != nil {
 		return OperatorSelection{}, err

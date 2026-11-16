@@ -119,21 +119,33 @@ scripts and integrations. It needs no CSRF header (a cross-site page cannot
 set a custom `Authorization` header, so bearer auth is inherently immune to
 CSRF) and no cookie.
 
-Create one with the CLI (run on the host, against the same database the
-running service uses):
+Create one in Settings → API tokens in the web UI, or with the CLI against
+the same database the running service uses (inside the container on Docker:
+`docker exec -it vocat vocat token ...`):
 
 ```bash
-vocat api-token create --name "my-integration" --ttl 720h   # 720h = 30 days
-# -> prints the raw token once: 43 base64url characters, no prefix
-#    (it is never shown again)
+vocat token create [--read-only] [--ttl 720h] my-integration
+# -> prints the raw token once: "sym_" + 43 base64url characters
+#    (it is never shown again). No --ttl means it never expires.
 
-vocat api-token list
-vocat api-token revoke <id>
+vocat token list
+vocat token revoke my-integration     # by name
 ```
 
-The token carries no prefix. Tokens issued by an older build began with
-`vocat_at_` and remain valid exactly as printed -- a token is matched by the
-hash of the whole string, so nothing needs reissuing.
+`vocat api-token` is an alias of `vocat token`. A `--read-only` token may
+only read: mutating requests get `403 token_read_only`. Changing the
+administrator password revokes every token.
+
+Symfive issues tokens with the `sym_` prefix. Every earlier form stays valid
+exactly as printed, because a token is matched by the hash of the whole
+string: the prefix-less 43-character tokens this fork issued after dropping
+its first prefix, the original `vocat_at_` tokens, and `sym_at_`. Nothing
+needs reissuing.
+
+Schema 32 rebuilt the token table into upstream VoCat's layout. Existing
+tokens kept full access and their expiry. Because tokens are now revoked by
+name, a name that is not 1-64 letters, digits, dots, underscores or hyphens,
+or that repeats an earlier one, was renamed `legacy-<id>`.
 
 Use it as:
 

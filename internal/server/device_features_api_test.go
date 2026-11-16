@@ -763,8 +763,13 @@ func TestHandleESIMShapes(t *testing.T) {
 		t.Fatal(err)
 	}
 	flightRecorderVoWiFi := &flightTrackingController{
-		fakeDeviceController: fakeDeviceController{entry: device.Device{ID: "devVoWiFi"}},
+		fakeDeviceController: fakeDeviceController{entry: device.Device{ID: "devVoWiFi", Snapshot: &device.Snapshot{ICCID: "8900000000000000003"}}},
 		switchErr:            device.ErrESIMCommandError,
+	}
+	if err := failDatabaseVoWiFi.UpsertCardPolicy(context.Background(), store.CardPolicy{
+		ICCID: "8900000000000000003", VoWiFiEnabled: true, AirplaneEnabled: true,
+	}); err != nil {
+		t.Fatal(err)
 	}
 	vowifiRecorder := &fakeEsimVoWiFiController{enabled: true}
 	failServerVoWiFi := &Server{
@@ -939,6 +944,7 @@ func TestHandleUpdateCheckUsesTrustedRepository(t *testing.T) {
 	}
 }
 
+// TestHandleUpdateApplyInstallsFromTrustedRepository verifies that updates use the configured trusted release repository.
 func TestHandleUpdateApplyInstallsFromTrustedRepository(t *testing.T) {
 	database, err := store.Open(context.Background(), ":memory:")
 	if err != nil {
@@ -951,6 +957,7 @@ func TestHandleUpdateApplyInstallsFromTrustedRepository(t *testing.T) {
 	tokenHash := []byte("active-session")
 	if err := database.CreateSession(
 		context.Background(), 1, tokenHash, []byte("csrf"), time.Now().Add(time.Hour),
+		false,
 	); err != nil {
 		t.Fatal(err)
 	}

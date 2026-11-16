@@ -153,20 +153,23 @@ export function ChannelHeader({
   onToggle,
   actions,
   onClear,
+  clearLabel,
 }: {
   title: ReactNode;
   enabled: boolean;
   onToggle: (enabled: boolean) => void;
   actions?: ReactNode;
   onClear?: () => void;
+  clearLabel?: ReactNode;
 }) {
   return (
-    <div className="mb-4 flex items-center justify-between">
-      <div className="flex items-center gap-2">
+    // 窄屏下标题和操作按钮可以换行，避免按钮被挤出卡片。
+    <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+      <div className="flex min-w-0 items-center gap-2">
         <div className="font-bold text-gray-800 dark:text-gray-100">{title}</div>
       </div>
-      <div className="flex items-center gap-2">
-        {onClear ? <Button size="small" variant="danger" plain onClick={onClear}>{tl("清空配置")}</Button> : null}
+      <div className="flex flex-wrap items-center justify-end gap-2">
+        {onClear ? <Button size="small" variant="danger" plain onClick={onClear}>{clearLabel ?? tl("清空配置")}</Button> : null}
         {actions}
         <Switch checked={enabled} onChange={onToggle} />
       </div>
@@ -188,10 +191,12 @@ export function SegmentedTabs({
   tabs,
   value,
   onChange,
+  disabled,
 }: {
   tabs: { key: string; label: ReactNode }[];
   value: string;
   onChange: (key: string) => void;
+  disabled?: boolean;
 }) {
   return (
     <div className="mb-6 inline-flex max-w-full items-center gap-1 overflow-x-auto rounded-xl bg-gray-100 p-1 dark:bg-white/5">
@@ -201,9 +206,12 @@ export function SegmentedTabs({
           <button
             key={tab.key}
             type="button"
+            disabled={disabled && !active}
+            aria-pressed={active}
             onClick={() => onChange(tab.key)}
             className={cx(
               "h-[38px] shrink-0 whitespace-nowrap rounded-lg px-5 text-sm font-medium outline-none transition-all duration-300",
+              "disabled:cursor-not-allowed disabled:opacity-50",
               active
                 ? "bg-white font-semibold text-[#0ea5e9] shadow-[0_1px_4px_rgba(0,0,0,0.05),0_2px_8px_rgba(0,0,0,0.03)] dark:bg-white/10 dark:text-[#7dd3fc]"
                 : "text-gray-500 hover:text-[#0ea5e9] dark:text-gray-400 dark:hover:text-[#7dd3fc]",
@@ -217,25 +225,29 @@ export function SegmentedTabs({
   );
 }
 
-export function NotificationDeviceScope({ value, onChange, devices, failed }: {
+export function NotificationDeviceScope({ value, onChange, devices, failed, title, hint, className }: {
   value: string[] | null;
   onChange: (ids: string[] | null) => void;
   devices: Pick<DeviceListItem, "id" | "name">[] | null;
   failed: boolean;
+  title?: string;
+  hint?: string;
+  className?: string;
 }) {
   const { t } = useI18n();
+  const label = title ?? t("仅推送指定设备");
   const available = devices ?? [];
   // Unknown/offline IDs remain selectable; loading never rewrites the draft.
   const choices = [...available, ...(value ?? []).filter((id) => !available.some((device) => device.id === id))
     .map((id) => ({ id, name: "" }))];
   return (
-    <div className="mt-6 space-y-3 border-t border-gray-200 pt-4 text-sm dark:border-white/10">
+    <div className={className ?? "mt-6 space-y-3 border-t border-gray-200 pt-4 text-sm dark:border-white/10"}>
       <div className="flex items-center justify-between gap-4">
-        <div>
-          <div className="font-medium text-gray-800 dark:text-gray-100">{t("仅推送指定设备")}</div>
-          <p className="mt-1 text-xs text-gray-500">{t("关闭时推送全部设备的通知。")}</p>
+        <div className="min-w-0">
+          <div className="break-all font-medium text-gray-800 dark:text-gray-100">{label}</div>
+          <p className="mt-1 text-xs text-gray-500">{hint ?? t("关闭时推送全部设备的通知。")}</p>
         </div>
-        <Switch checked={value !== null} onChange={enabled => onChange(enabled ? [] : null)} ariaLabel={t("仅推送指定设备")} />
+        <Switch checked={value !== null} onChange={enabled => onChange(enabled ? [] : null)} ariaLabel={label} />
       </div>
       {value !== null ? <>
         {failed ? <p className="text-xs text-amber-600 dark:text-amber-400">{t("设备列表加载失败，已保留适用设备范围。")}</p> : devices === null ? (

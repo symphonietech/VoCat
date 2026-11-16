@@ -15,10 +15,16 @@ import type {
   Call,
   CallRecordsResponse,
   CallsResponse,
+  ApiTokenListItem,
   LoggingSettings,
   LoginResponse,
   SecuritySettings,
   Session,
+  SSOProviders,
+  SSOSettings,
+  SSOSaveRequest,
+  SSOCheckResult,
+  SSOUnbindResult,
 } from "./types";
 import { tl } from "./lib/i18n";
 
@@ -205,6 +211,28 @@ export async function logout() {
   } finally {
     sessionStorage.removeItem(CSRF_KEY);
   }
+}
+
+export function getApiTokens() {
+  return api<{ tokens: ApiTokenListItem[] }>("/settings/tokens");
+}
+
+export function createApiToken(request: {
+  name: string;
+  readOnly: boolean;
+  ttlHours: number;
+}) {
+  return api<{ token: string; name: string; readOnly: boolean; expiresAt: string }>(
+    "/settings/tokens",
+    {
+      method: "POST",
+      body: { name: request.name, readOnly: request.readOnly, ttlHours: request.ttlHours },
+    },
+  );
+}
+
+export function revokeApiToken(name: string) {
+  return api<{ revoked: boolean }>(`/settings/tokens/${encodeURIComponent(name)}`, { method: "DELETE" });
 }
 
 export function getSecuritySettings() {
@@ -423,6 +451,39 @@ export function callMediaURL(deviceId: string, callId: string) {
 export function callMediaProbeURL(deviceId: string, callId: string) {
   const query = new URLSearchParams({ call_id: callId });
   return `/api/devices/${encodeURIComponent(deviceId)}/calls/media?${query}`;
+}
+
+/** Load public SSO capability without caching provider availability. */
+export function getSSOProviders() {
+  return api<SSOProviders>("/auth/providers", { cache: "no-store" });
+}
+
+/** Load browser-authorized SSO settings without caching credentials-related metadata. */
+export function getSSOSettings() {
+  return api<SSOSettings>("/settings/sso", { cache: "no-store" });
+}
+
+/** Save writable SSO settings and report any resulting browser-session revocation. */
+export function saveSSOSettings(request: SSOSaveRequest) {
+  return api<SSOSettings>("/settings/sso", { method: "PUT", body: request });
+}
+
+/** Check provider readiness for an explicit saved configuration revision. */
+export function checkSSOSettings(expectedRevision: number) {
+  return api<SSOCheckResult>("/settings/sso/check", { method: "POST", body: { expectedRevision } });
+}
+
+/** Start binding an external identity to the current administrator at the expected revision. */
+export function bindSSOAccount(expectedRevision: number) {
+  return api<{ authorizationUrl: string }>("/auth/sso/bind", {
+    method: "POST",
+    body: { expectedRevision },
+  });
+}
+
+/** Remove the saved external binding and report whether the current session needs reauthentication. */
+export function unbindSSOAccount(expectedRevision: number) {
+  return api<SSOUnbindResult>("/auth/sso/binding", { method: "DELETE", body: { expectedRevision } });
 }
 
 export function apiMessage(error: unknown) {

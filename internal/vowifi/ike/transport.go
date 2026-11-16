@@ -444,6 +444,7 @@ type socks5UDP struct {
 	readMu  sync.Mutex
 	writeMu sync.Mutex
 	config  transportConfig
+	route   vowifi.ProxyRoute
 	control net.Conn
 	udp     *net.UDPConn
 	relay   *net.UDPAddr
@@ -520,6 +521,7 @@ func newSOCKS5UDP(
 	_ = control.SetDeadline(time.Time{})
 	return &socks5UDP{
 		config:  config,
+		route:   route,
 		control: control,
 		udp:     udpConnection,
 		relay:   relay,
@@ -570,12 +572,38 @@ func readSOCKS5Reply(ctx context.Context, connection net.Conn, resolver *net.Res
 			resolver = net.DefaultResolver
 		}
 		addresses, err := resolver.LookupIPAddr(ctx, name)
-		if err != nil || len(addresses) == 0 {
-			return nil, fmt.Errorf("ike: resolve SOCKS5 UDP relay domain %q: %w", name, err)
+		if err != nil {
+			return nil, sanitizeSOCKS5RelayLookupError(err)
+		}
+		if len(addresses) == 0 {
+			return nil, errors.New("ike: SOCKS5 UDP relay domain resolved without IP addresses")
 		}
 		ip = addresses[0].IP
 	}
 	return &net.UDPAddr{IP: ip, Port: int(binary.BigEndian.Uint16(encodedPort[:]))}, nil
+}
+
+// The proxy controls the relay name and can echo credentials in it. DNS errors
+// also embed that name and resolver details, so neither text nor the original
+// error chain may escape into lifecycle logs or persisted failure states.
+func sanitizeSOCKS5RelayLookupError(err error) error {
+	const message = "ike: resolve SOCKS5 UDP relay domain"
+	switch {
+	case errors.Is(err, context.Canceled):
+		return fmt.Errorf("%s: %w", message, context.Canceled)
+	case errors.Is(err, context.DeadlineExceeded):
+		return fmt.Errorf("%s: %w", message, context.DeadlineExceeded)
+	}
+	var dnsError *net.DNSError
+	if errors.As(err, &dnsError) {
+		return fmt.Errorf("%s: %w", message, &net.DNSError{
+			Err:         "DNS lookup failed",
+			IsTimeout:   dnsError.IsTimeout,
+			IsTemporary: dnsError.IsTemporary,
+			IsNotFound:  dnsError.IsNotFound,
+		})
+	}
+	return errors.New(message + " failed")
 }
 
 func readSOCKSAddress(reader io.Reader, kind byte) (net.IP, string, error) {
@@ -623,11 +651,31 @@ func (transport *socks5UDP) RemoteAddr() *net.UDPAddr {
 	return cloneUDPAddr(transport.remote)
 }
 
-func (transport *socks5UDP) Float(_ context.Context) error {
+func (transport *socks5UDP) Float(ctx context.Context) error {
 	transport.mu.Lock()
 	defer transport.mu.Unlock()
-	transport.remote.Port = 4500
+	if transport.udp == nil {
+		return errors.New("ike: SOCKS5 UDP transport is closed")
+	}
+	if transport.floated {
+		return nil
+	}
+	remote := cloneUDPAddr(transport.remote)
+	remote.Port = 4500
+	replacement, err := newSOCKS5UDP(ctx, transport.config, transport.route, []*net.UDPAddr{remote})
+	if err != nil {
+		return fmt.Errorf("ike: reopen SOCKS5 association for UDP/4500: %w", err)
+	}
+	previousUDP, previousControl := transport.udp, transport.control
+	transport.udp = replacement.udp
+	transport.control = replacement.control
+	transport.relay = replacement.relay
+	transport.remote = remote
 	transport.floated = true
+	_ = previousUDP.Close()
+	if previousControl != nil {
+		_ = previousControl.Close()
+	}
 	return nil
 }
 

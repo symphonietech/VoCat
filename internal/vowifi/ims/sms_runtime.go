@@ -52,14 +52,15 @@ type ReceivedSMS struct {
 	ServiceCenterTimestamp *time.Time
 	// ServiceCenter is the SCA taken from the RP-Originator Address. It is
 	// empty when the network omitted the field or it failed to decode.
-	ServiceCenter string
-	Encoding      device.SMSEncoding
-	Concat        *device.SMSConcatInfo
-	RPReference   int
-	CallID        string
-	RawRPDU       string
-	RawTPDU       string
-	DecodeError   string
+	ServiceCenter       string
+	TimestampCorrection *vowifi.SMSTimestampCorrection
+	Encoding            device.SMSEncoding
+	Concat              *device.SMSConcatInfo
+	RPReference         int
+	CallID              string
+	RawRPDU             string
+	RawTPDU             string
+	DecodeError         string
 }
 
 // SIMDataDownload is an SMS-PP binary command that must be passed to the UICC
@@ -596,9 +597,9 @@ func (session *Session) processSMSMessage(request *sipRequest) {
 		session.sendLoggedDeliveryReport(request, []byte{0x02, rpdu.reference}, "rp_ack")
 
 	case message.Direction == device.SMSDirectionReceived || decodeErr != nil:
-		var serviceCenterTimestamp *time.Time
-		if message.ServiceCenterTimestamp != nil {
-			value := message.ServiceCenterTimestamp.UTC()
+		serviceCenterTimestamp, timestampCorrection := carrierProfile.NormalizeSMSTimestamp(message.ServiceCenterTimestamp)
+		if serviceCenterTimestamp != nil {
+			value := serviceCenterTimestamp.UTC()
 			serviceCenterTimestamp = &value
 		}
 		received := ReceivedSMS{
@@ -615,6 +616,7 @@ func (session *Session) processSMSMessage(request *sipRequest) {
 			Timestamp:              receivedAt,
 			ServiceCenterTimestamp: serviceCenterTimestamp,
 			ServiceCenter:          rpdu.originator,
+			TimestampCorrection:    timestampCorrection,
 			Encoding:               message.Encoding,
 			Concat:                 message.Concat,
 			RPReference:            int(rpdu.reference),

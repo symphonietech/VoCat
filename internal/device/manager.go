@@ -12,6 +12,7 @@ import (
 
 	"vocat/internal/modem"
 	"vocat/internal/pcsc"
+	"vocat/internal/remoteproc"
 )
 
 type Options struct {
@@ -34,6 +35,9 @@ type Manager struct {
 	esimMu             sync.Mutex // serializes eSIM card access (list/switch/download)
 	esimRecoveryMu     sync.Mutex
 	esimRecoveries     map[string]*esimRecovery
+	esimLastRecoveries map[string]*esimRecovery
+	esimSwitchLeases   map[string]*esimSwitchLease
+	esimSwitchPending  map[string]struct{}
 	esimCacheMu        sync.RWMutex
 	esimCache          map[string]EsimInfo
 	discoverer         modem.Discoverer
@@ -53,7 +57,9 @@ type Manager struct {
 	smsArrivals             chan struct{}
 
 	qmiRadioOpener                qmiRadioSessionOpener
+	remoteprocObserver            func(string) (remoteproc.Observation, error)
 	qmiDataOpener                 qmiDataSessionOpener
+	atHostDataLink                atHostDataLink
 	nativeQMIRegistrationMu       sync.Mutex
 	nativeQMIRegistrationInFlight map[string]struct{}
 	nativeQMISIMRecoveryMu        sync.Mutex
@@ -124,24 +130,34 @@ type ussdSession struct {
 }
 
 type managedDevice struct {
-	opMu               sync.Mutex
-	dataMu             sync.Mutex
-	dataSession        qmiDataSession
-	dataSessionHandle  uint32
-	dataSessionControl string
-	dataEventCancel    context.CancelFunc
-	candidate          modem.Candidate
-	backend            string
-	esimTransport      string
-	lastICCID          string
-	client             modem.Client
-	snapshot           *Snapshot
-	lastError          string
-	lastUpdated        time.Time
-	discovered         bool
-	preFlightMode      *int
-	resetClientOnLock  bool
-	simPIN             string
+	profileSwitchMu      sync.RWMutex // excludes ordinary snapshot/auto hot-swap work during a profile transaction
+	opMu                 sync.Mutex
+	dataMu               sync.Mutex
+	dataSession          qmiDataSession
+	dataSessionHandle    uint32
+	dataSessionControl   string
+	atHostSession        atHostDataSession
+	dataBackend          string // selected backend, retained while its session is disconnected
+	dataEventCancel      context.CancelFunc
+	candidate            modem.Candidate
+	atProfile            modem.ATProfile
+	apduDialect          *modem.ATAPDUDialect
+	profileVendorID      string
+	profileProductID     string
+	backend              string
+	esimTransport        string
+	lastICCID            string
+	client               modem.Client
+	snapshot             *Snapshot
+	lastError            string
+	lastUpdated          time.Time
+	discovered           bool
+	preFlightMode        *int
+	resetClientOnLock    bool
+	remoteprocOwner      string
+	remoteprocGeneration uint64
+	resetATProfileOnLock bool
+	simPIN               string
 }
 
 func NewManager(options Options) (*Manager, error) {
@@ -184,6 +200,7 @@ func NewManager(options Options) (*Manager, error) {
 
 		qmiRadioOpener:                openQMIRadioSession,
 		qmiDataOpener:                 openQMIDataSession,
+		atHostDataLink:                newATHostDataLink(),
 		nativeQMIRegistrationInFlight: make(map[string]struct{}),
 		networkEventSubscribers:       make(map[chan string]struct{}),
 		deviceEventSubscribers:        make(map[chan DeviceLifecycleEvent]struct{}),
@@ -239,7 +256,9 @@ func (manager *Manager) Stop(ctx context.Context) error {
 		}
 		state.opMu.Unlock()
 		state.dataMu.Lock()
-		invalidateQMINetworkSession(state, manager.candidateFor(state))
+		if err := invalidateNetworkSessions(state, manager.candidateFor(state)); err != nil {
+			closeErrors = append(closeErrors, err)
+		}
 		state.dataMu.Unlock()
 	}
 	return errors.Join(closeErrors...)
@@ -249,7 +268,16 @@ func (manager *Manager) Discover(ctx context.Context) ([]Device, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	candidates, modemErr := manager.discoverer.Discover(ctx)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if errors.Is(modemErr, context.Canceled) || errors.Is(modemErr, context.DeadlineExceeded) {
+		return nil, modemErr
+	}
 	readers, readerErr := manager.cardReaders.Readers(ctx)
 	if readerErr == nil {
 		for _, reader := range readers {
@@ -268,6 +296,9 @@ func (manager *Manager) Discover(ctx context.Context) ([]Device, error) {
 	if modemErr != nil && len(candidates) == 0 {
 		return nil, modemErr
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	seen := make(map[string]struct{}, len(candidates))
 
 	type discoveryEvent struct {
@@ -280,18 +311,26 @@ func (manager *Manager) Discover(ctx context.Context) ([]Device, error) {
 		if strings.TrimSpace(candidate.ID) == "" {
 			continue
 		}
-		seen[candidate.ID] = struct{}{}
 		state := manager.devices[candidate.ID]
+		if state != nil && state.discovered {
+			candidate = preserveVerifiedATPort(state.candidate, candidate)
+		}
+		seen[candidate.ID] = struct{}{}
 		if state == nil {
 			manager.devices[candidate.ID] = &managedDevice{
-				candidate:  candidate,
-				discovered: true,
+				candidate:        candidate,
+				atProfile:        modem.ResolveATProfile(candidate),
+				apduDialect:      &modem.ATAPDUDialect{},
+				profileVendorID:  strings.ToLower(strings.TrimSpace(candidate.VendorID)),
+				profileProductID: strings.ToLower(strings.TrimSpace(candidate.ProductID)),
+				discovered:       true,
 			}
 			events = append(events, discoveryEvent{connected: true, candidate: candidate})
 			continue
 		}
 		reconnected := !state.discovered
-		endpointChanged := state.candidate.USBGeneration != candidate.USBGeneration ||
+		usbIdentityChanged := !sameUSBIdentity(state.candidate, candidate)
+		endpointChanged := usbIdentityChanged || state.candidate.USBGeneration != candidate.USBGeneration ||
 			state.candidate.ATPort.OpenPath() != candidate.ATPort.OpenPath() ||
 			state.candidate.QMIControl != candidate.QMIControl
 		if reconnected {
@@ -307,6 +346,9 @@ func (manager *Manager) Discover(ctx context.Context) ([]Device, error) {
 		}
 		if reconnected || endpointChanged {
 			state.resetClientOnLock = true
+		}
+		if reconnected || usbIdentityChanged {
+			state.resetATProfileOnLock = true
 		}
 		state.candidate = candidate
 		state.discovered = true
@@ -353,7 +395,7 @@ func (manager *Manager) Discover(ctx context.Context) ([]Device, error) {
 		}
 		state.opMu.Unlock()
 		state.dataMu.Lock()
-		invalidateQMINetworkSession(state, manager.candidateFor(state))
+		invalidateNetworkSessions(state, manager.candidateFor(state))
 		state.dataMu.Unlock()
 	}
 	manager.resetChangedClients()
@@ -458,26 +500,77 @@ func stableModemSignature(devices []Device) string {
 }
 
 func (manager *Manager) resetChangedClients() {
+	type pendingReset struct {
+		state        *managedDevice
+		resetProfile bool
+	}
 	manager.mu.Lock()
-	states := make([]*managedDevice, 0, len(manager.devices))
+	states := make([]pendingReset, 0, len(manager.devices))
 	for _, state := range manager.devices {
 		if state.resetClientOnLock {
-			states = append(states, state)
+			states = append(states, pendingReset{state: state, resetProfile: state.resetATProfileOnLock})
 			state.resetClientOnLock = false
+			state.resetATProfileOnLock = false
 		}
 	}
 	manager.mu.Unlock()
-	for _, state := range states {
+	for _, pending := range states {
+		state := pending.state
 		state.opMu.Lock()
 		if state.client != nil {
 			_ = state.client.Close()
 			state.client = nil
 		}
+		candidate := manager.candidateFor(state)
+		if pending.resetProfile || state.apduDialect == nil || state.atProfile.APDU == nil ||
+			state.profileVendorID != strings.ToLower(strings.TrimSpace(candidate.VendorID)) ||
+			state.profileProductID != strings.ToLower(strings.TrimSpace(candidate.ProductID)) {
+			setATProfileLocked(state, candidate)
+		}
 		state.opMu.Unlock()
 		state.dataMu.Lock()
-		invalidateQMINetworkSession(state, manager.candidateFor(state))
+		invalidateNetworkSessions(state, manager.candidateFor(state))
 		state.dataMu.Unlock()
 	}
+}
+
+func sameUSBIdentity(left, right modem.Candidate) bool {
+	return strings.EqualFold(strings.TrimSpace(left.VendorID), strings.TrimSpace(right.VendorID)) &&
+		strings.EqualFold(strings.TrimSpace(left.ProductID), strings.TrimSpace(right.ProductID))
+}
+
+// A busy/deferred probe is not a new device observation. Keep only the
+// verified port on the same enumeration; fresh USB metadata must still reach
+// endpointChanged so a reset cannot retain old AT/WDS file descriptors.
+func preserveVerifiedATPort(previous, current modem.Candidate) modem.Candidate {
+	if (!current.ATProbeBusy && !current.ATProbeDeferred) || previous.ATProbeRequired ||
+		!previous.HasATPort() || !sameUSBIdentity(previous, current) || previous.USBGeneration != current.USBGeneration {
+		return current
+	}
+	ports := current.Ports
+	if len(ports) == 0 && current.HasATPort() {
+		ports = []modem.Port{current.ATPort}
+	}
+	for _, port := range ports {
+		if port.OpenPath() != previous.ATPort.OpenPath() && (port.Name == "" || port.Name != previous.ATPort.Name) {
+			continue
+		}
+		port.Role = previous.ATPort.Role
+		current.ATPort = port
+		current.ATProbeRequired = false
+		if current.DiscoveryIssue == "at_port_missing" || current.DiscoveryIssue == "at_probe_pending" {
+			current.DiscoveryIssue = previous.DiscoveryIssue
+		}
+		break
+	}
+	return current
+}
+
+func setATProfileLocked(state *managedDevice, candidate modem.Candidate) {
+	state.atProfile = modem.ResolveATProfile(candidate)
+	state.apduDialect = &modem.ATAPDUDialect{}
+	state.profileVendorID = strings.ToLower(strings.TrimSpace(candidate.VendorID))
+	state.profileProductID = strings.ToLower(strings.TrimSpace(candidate.ProductID))
 }
 
 func (manager *Manager) List() []Device {
@@ -543,6 +636,32 @@ func (manager *Manager) clientLocked(
 	state *managedDevice,
 	candidate modem.Candidate,
 ) (modem.Client, error) {
+	observe := manager.remoteprocObserver
+	if observe == nil {
+		observe = remoteproc.CheckPort
+	}
+	observation, healthErr := observe(candidate.ATPort.OpenPath())
+	if healthErr != nil {
+		if state.client != nil {
+			_ = state.client.Close()
+			state.client = nil
+		}
+		manager.mu.Lock()
+		if state.snapshot != nil {
+			state.snapshot.Responsive = false
+		}
+		manager.mu.Unlock()
+		return nil, healthErr
+	}
+	if observation.Path != "" && (state.remoteprocOwner != observation.Path || state.remoteprocGeneration != observation.Generation) {
+		if state.client != nil {
+			_ = state.client.Close()
+			state.client = nil
+		}
+		state.preFlightMode = nil
+		state.remoteprocOwner = observation.Path
+		state.remoteprocGeneration = observation.Generation
+	}
 	if state.client != nil {
 		if poisoned, ok := state.client.(modem.PoisonedClient); ok && poisoned.Poisoned() {
 			// The cached session hit a transport-fatal error (a failed
@@ -657,11 +776,25 @@ func (manager *Manager) validateActive(
 }
 
 func (manager *Manager) Refresh(ctx context.Context, id string) (Snapshot, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	state, err := manager.lookup(id)
 	if err != nil {
 		return Snapshot{}, err
 	}
-	state.opMu.Lock()
+	// A snapshot can perform its own SIM power-cycle. It must not compete
+	// with a committed eSIM REFRESH/reset, including detached recovery after
+	// the initiating request has already failed. Only the transaction's own
+	// bounded verification/refresh context may cross this maintenance gate.
+	unlockProfileRead, err := manager.lockProfileSwitchRead(ctx, id, state)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	defer unlockProfileRead()
+	if err := lockMutexContext(ctx, &state.opMu); err != nil {
+		return Snapshot{}, err
+	}
 	defer state.opMu.Unlock()
 	if err := manager.validateActive(id, state); err != nil {
 		return Snapshot{}, err
@@ -684,7 +817,10 @@ func (manager *Manager) Refresh(ctx context.Context, id string) (Snapshot, error
 		previousSnapshot = &copy
 	}
 	manager.mu.RUnlock()
-	snapshot, err := manager.readSnapshot(ctx, id, candidate, backend, previousICCID, previousSnapshot, client)
+	snapshot, err := manager.readSnapshotWithOperatorProfile(
+		ctx, id, candidate, backend, previousICCID, previousSnapshot, client,
+		operatorProfileForState(state, candidate),
+	)
 	if err == nil && strings.TrimSpace(snapshot.ICCID) != "" {
 		state.lastICCID = strings.TrimSpace(snapshot.ICCID)
 	}
@@ -801,7 +937,9 @@ func (manager *Manager) ExecuteAT(
 	if err != nil {
 		return modem.Response{}, err
 	}
-	state.opMu.Lock()
+	if err := lockMutexContext(ctx, &state.opMu); err != nil {
+		return modem.Response{}, err
+	}
 	defer state.opMu.Unlock()
 	if err := manager.validateActive(id, state); err != nil {
 		return modem.Response{}, err
@@ -814,13 +952,47 @@ func (manager *Manager) ExecuteAT(
 	commandCtx, cancel := manager.withTimeout(ctx, manager.commandTimeout)
 	defer cancel()
 	response, err := client.Execute(commandCtx, command)
-	// An unsupported CLCC query does not indicate an unhealthy control channel.
+	// An unsupported CLCC query does not indicate an unhealthy control channel:
+	// 3GPP "operation not supported" (ERROR: 4) and the ZXIC vendor
+	// "command not recognized" (6003) are both expected on firmware without a
+	// call-list implementation.
 	var commandErr *modem.CommandError
+	final := ""
+	if errors.As(err, &commandErr) {
+		final = strings.TrimSpace(commandErr.Final)
+	}
 	if !strings.EqualFold(strings.TrimSpace(command), "AT+CLCC") ||
-		!errors.As(err, &commandErr) || strings.TrimSpace(commandErr.Final) != "+CME ERROR: 4" {
+		final != "+CME ERROR: 4" && final != "+CME ERROR: 6003" {
 		manager.setResult(id, state, nil, err)
 	}
 	return response, err
+}
+
+// SupportsCLCC reports whether the firmware behind a device implements the
+// 3GPP call-list query. Pollers use it to skip firmware that answers with
+// "command not recognized" instead of burning a control-channel round trip
+// every cycle. Unknown devices report true so their presence handling stays
+// with the caller, and every device without an identity profile override
+// keeps the historical polling behavior.
+//
+// The identity profile is written under opMu, so the answer is read under the
+// same lock. A caller that cannot take the lock in time gets the error and
+// decides for itself; a long operator scan must not stall a call poll.
+func (manager *Manager) SupportsCLCC(ctx context.Context, id string) (bool, error) {
+	manager.mu.RLock()
+	state := manager.devices[id]
+	manager.mu.RUnlock()
+	if state == nil {
+		return true, nil
+	}
+	if err := lockMutexContext(ctx, &state.opMu); err != nil {
+		return true, err
+	}
+	defer state.opMu.Unlock()
+	if state.atProfile.Identity == nil {
+		return true, nil
+	}
+	return state.atProfile.Identity.SupportsCLCC(), nil
 }
 
 // ExecuteSensitiveAT runs an AT command whose payload contains short-lived
@@ -862,6 +1034,128 @@ func (manager *Manager) ExecuteSensitiveAT(
 	return response, err
 }
 
+// ExecuteAPDU sends one APDU through the device-owned profile and learned
+// command dialect. The payload always stays inside the sensitive AT boundary.
+func (manager *Manager) ExecuteAPDU(
+	ctx context.Context,
+	id string,
+	command modem.APDUCommand,
+	channel int,
+	apdu []byte,
+) ([]byte, error) {
+	state, err := manager.lookup(id)
+	if err != nil {
+		return nil, err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := lockMutexContext(ctx, &state.opMu); err != nil {
+		return nil, err
+	}
+	defer state.opMu.Unlock()
+	if err := manager.validateActive(id, state); err != nil {
+		return nil, err
+	}
+	candidate := manager.candidateFor(state)
+	if state.apduDialect == nil || state.atProfile.APDU == nil ||
+		state.profileVendorID != strings.ToLower(strings.TrimSpace(candidate.VendorID)) ||
+		state.profileProductID != strings.ToLower(strings.TrimSpace(candidate.ProductID)) {
+		setATProfileLocked(state, candidate)
+	}
+	client, err := manager.clientLocked(ctx, state, candidate)
+	if err != nil {
+		err = sanitizeManagerAPDUError(err)
+		manager.setResult(id, state, nil, err)
+		return nil, err
+	}
+	return manager.executeAPDULocked(ctx, id, state, client, command, channel, apdu)
+}
+
+// executeAPDULocked requires state.opMu and reuses the Manager's single
+// per-device profile and dialect for eSIM and VoWiFi callers.
+func (manager *Manager) executeAPDULocked(
+	ctx context.Context,
+	id string,
+	state *managedDevice,
+	client modem.Client,
+	command modem.APDUCommand,
+	channel int,
+	apdu []byte,
+) ([]byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	candidate := manager.candidateFor(state)
+	if state.apduDialect == nil || state.atProfile.APDU == nil ||
+		state.profileVendorID != strings.ToLower(strings.TrimSpace(candidate.VendorID)) ||
+		state.profileProductID != strings.ToLower(strings.TrimSpace(candidate.ProductID)) {
+		setATProfileLocked(state, candidate)
+	}
+	apduCtx, cancel := manager.withTimeout(ctx, csimAPDUTimeout)
+	defer cancel()
+	result, err := state.apduDialect.Execute(
+		apduCtx,
+		state.atProfile.APDU,
+		command,
+		channel,
+		apdu,
+		func(commandCtx context.Context, commandText string) (modem.Response, error) {
+			return manager.sensitiveAPDUCommand(commandCtx, client, commandText)
+		},
+	)
+	if err != nil {
+		err = sanitizeManagerAPDUError(err)
+	}
+	manager.setResult(id, state, nil, err)
+	return result, err
+}
+
+// sensitiveAPDUCommand is the sensitive boundary for APDUs. Unlike the
+// generic helper it lets the dialect inspect a definite modem rejection; the
+// dialect sanitizes every result before it can reach callers or device state.
+func (manager *Manager) sensitiveAPDUCommand(
+	ctx context.Context,
+	client modem.Client,
+	command string,
+) (modem.Response, error) {
+	commandCtx, cancel := manager.withTimeout(ctx, manager.commandTimeout)
+	defer cancel()
+	return client.Execute(commandCtx, command)
+}
+
+func sanitizeManagerAPDUError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var rejected *modem.APDUCommandRejectedError
+	if errors.As(err, &rejected) {
+		return rejected
+	}
+	switch {
+	case errors.Is(err, context.Canceled):
+		return context.Canceled
+	case errors.Is(err, context.DeadlineExceeded):
+		return context.DeadlineExceeded
+	case errors.Is(err, modem.ErrCommandTimeout):
+		return modem.ErrCommandTimeout
+	case errors.Is(err, modem.ErrSessionClosed):
+		return modem.ErrSessionClosed
+	case errors.Is(err, modem.ErrATPortBusy):
+		return modem.ErrATPortBusy
+	case errors.Is(err, ErrNoATPort):
+		return ErrNoATPort
+	case errors.Is(err, modem.ErrAPDUCommandRejected):
+		return modem.ErrAPDUCommandRejected
+	case errors.Is(err, modem.ErrAPDUResponseInvalid):
+		return modem.ErrAPDUResponseInvalid
+	case errors.Is(err, modem.ErrAPDUExecutionFailed):
+		return modem.ErrAPDUExecutionFailed
+	default:
+		return modem.ErrAPDUExecutionFailed
+	}
+}
+
 func (manager *Manager) Reboot(ctx context.Context, id string) error {
 	state, err := manager.lookup(id)
 	if err != nil {
@@ -882,8 +1176,12 @@ func (manager *Manager) Reboot(ctx context.Context, id string) error {
 		return err
 	}
 	state.dataMu.Lock()
-	invalidateQMINetworkSession(state, manager.candidateFor(state))
+	cleanupErr := invalidateNetworkSessions(state, manager.candidateFor(state))
 	state.dataMu.Unlock()
+	if cleanupErr != nil {
+		manager.setResult(id, state, nil, cleanupErr)
+		return cleanupErr
+	}
 	commandCtx, cancel := manager.withTimeout(ctx, manager.longTimeout)
 	defer cancel()
 	_, err = client.Execute(commandCtx, "AT+CFUN=1,1")
@@ -914,7 +1212,9 @@ func (manager *Manager) softResetForProfileSwitch(ctx context.Context, id string
 	if err != nil {
 		return err
 	}
-	state.opMu.Lock()
+	if err := lockMutexContext(ctx, &state.opMu); err != nil {
+		return err
+	}
 	defer state.opMu.Unlock()
 	if err := manager.validateActive(id, state); err != nil {
 		return err
@@ -930,8 +1230,12 @@ func (manager *Manager) softResetForProfileSwitch(ctx context.Context, id string
 // softResetSIMLocked 要求持有 opMu，使模式验证与 SIM 重置不能被其他模组操作插入。
 func (manager *Manager) softResetSIMLocked(ctx context.Context, id string, state *managedDevice, client modem.Client) error {
 	state.dataMu.Lock()
-	invalidateQMINetworkSession(state, manager.candidateFor(state))
+	cleanupErr := invalidateNetworkSessions(state, manager.candidateFor(state))
 	state.dataMu.Unlock()
+	if cleanupErr != nil {
+		manager.setResult(id, state, nil, cleanupErr)
+		return cleanupErr
+	}
 	commandCtx, cancel := context.WithTimeout(ctx, manager.commandTimeout)
 	defer cancel()
 
@@ -1020,6 +1324,24 @@ func (manager *Manager) sensitiveCommand(
 	response, err := client.Execute(commandCtx, command)
 	if err != nil {
 		return response, errors.New("sensitive modem command failed")
+	}
+	return response, nil
+}
+
+// timedCommand executes an AT command with an explicit timeout. The data
+// backend uses it for attach/activate, whose vendor retry budgets exceed the
+// generic long timeout.
+func (manager *Manager) timedCommand(
+	ctx context.Context,
+	client modem.Client,
+	command string,
+	timeout time.Duration,
+) (modem.Response, error) {
+	commandCtx, cancel := manager.withTimeout(ctx, timeout)
+	defer cancel()
+	response, err := client.Execute(commandCtx, command)
+	if err != nil {
+		return response, fmt.Errorf("%s: %w", command, err)
 	}
 	return response, nil
 }
