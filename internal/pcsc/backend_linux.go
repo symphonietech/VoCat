@@ -8,16 +8,22 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 )
 
-type nativeBackend struct{ sysRoot string }
+type nativeBackend struct {
+	sysRoot  string
+	restarts pcscdRestartLimiter
+}
 
 func newNativeBackend() Backend { return &nativeBackend{sysRoot: "/sys"} }
 
@@ -57,6 +63,87 @@ func ensurePCSCDService(ctx context.Context) {
 	} else if path, err := exec.LookPath("pcscd"); err == nil {
 		_ = exec.CommandContext(ctx, path).Start()
 	}
+}
+
+var pcscdPIDFiles = []string{"/run/pcscd/pcscd.pid", "/var/run/pcscd/pcscd.pid"}
+
+// restartPCSCDService restarts pcscd so it enumerates the USB readers again.
+// With systemd it uses systemctl. Otherwise (for example in the Docker image,
+// where VoCat is PID 1 and pcscd is its child) it stops the pcscd named in
+// pcscd's PID file, reaps it, and starts a new one.
+func restartPCSCDService(ctx context.Context) error {
+	if os.Geteuid() != 0 {
+		return errors.New("pcscd restart needs root")
+	}
+	if _, err := os.Stat("/run/systemd/system"); err == nil {
+		return exec.CommandContext(ctx, "systemctl", "restart", "pcscd").Run()
+	}
+	if pid := readPCSCDPID(); pid > 1 {
+		stopProcess(pid, 3*time.Second)
+	}
+	if _, err := os.Stat("/etc/init.d/pcscd"); err == nil {
+		return exec.CommandContext(ctx, "/etc/init.d/pcscd", "start").Run()
+	}
+	path, err := exec.LookPath("pcscd")
+	if err != nil {
+		return err
+	}
+	// pcscd daemonizes: the command returns once the daemon is running.
+	return exec.CommandContext(ctx, path).Run()
+}
+
+func readPCSCDPID() int {
+	for _, file := range pcscdPIDFiles {
+		if pid := parsePCSCDPID(readTrimmedFile(file)); pid > 0 {
+			return pid
+		}
+	}
+	return 0
+}
+
+// parsePCSCDPID parses pcscd's PID file, which pcscd pads with NUL bytes.
+func parsePCSCDPID(content string) int {
+	pid, err := strconv.Atoi(strings.TrimSpace(strings.Trim(content, "\x00")))
+	if err != nil {
+		return 0
+	}
+	return pid
+}
+
+// stopProcess sends SIGTERM, then SIGKILL after timeout, and reaps the
+// process if it is a child of this process.
+func stopProcess(pid int, timeout time.Duration) {
+	if !strings.Contains(readTrimmedFile(fmt.Sprintf("/proc/%d/comm", pid)), "pcscd") {
+		return
+	}
+	_ = syscall.Kill(pid, syscall.SIGTERM)
+	deadline := time.Now().Add(timeout)
+	for processRunning(pid) {
+		if time.Now().After(deadline) {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+			time.Sleep(200 * time.Millisecond)
+			processRunning(pid)
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// processRunning reaps pid if it is an exited child and reports whether it is
+// still running. Zombies count as stopped.
+func processRunning(pid int) bool {
+	var status syscall.WaitStatus
+	if reaped, _ := syscall.Wait4(pid, &status, syscall.WNOHANG, nil); reaped == pid {
+		return false
+	}
+	stat := readTrimmedFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if stat == "" {
+		return false
+	}
+	if end := strings.LastIndexByte(stat, ')'); end >= 0 && end+2 < len(stat) && stat[end+2] == 'Z' {
+		return false
+	}
+	return true
 }
 
 func reauthorizeUSBDevice(sysRoot, usbPath string) {
@@ -128,7 +215,115 @@ func (backend *nativeBackend) waitForPCSCReaders(ctx context.Context, client *pc
 	return states
 }
 
+// Readers lists the PC/SC readers and maps each to its USB device. When pcscd
+// is still serving readers that were unplugged (it missed the hot-plug
+// events, which happens inside containers), every reader stays unusable until
+// pcscd is restarted, so Readers restarts it once and lists again. Restarts
+// are rate limited with an exponential backoff.
 func (backend *nativeBackend) Readers(ctx context.Context) ([]Reader, error) {
+	readers, health, err := backend.readersOnce(ctx)
+	if err != nil || !health.needsRestart(pcscMaxReaders) {
+		if err == nil {
+			backend.restarts.healthy()
+		}
+		return readers, err
+	}
+	if !backend.restarts.allow(time.Now()) {
+		return readers, nil
+	}
+	slog.Warn("restarting pcscd: its reader list does not match the USB readers present",
+		"category", "hardware",
+		"stale_readers", health.staleReaders,
+		"pcscd_readers", health.pcscdReaders,
+		"unmatched_usb_readers", health.unmatchedPhysical)
+	if err := restartPCSCDService(ctx); err != nil {
+		slog.Warn("pcscd restart failed", "category", "hardware", "error", err)
+		return readers, nil
+	}
+	if !backend.waitForDial(ctx, 3*time.Second) {
+		return readers, nil
+	}
+	if refreshed, _, refreshErr := backend.readersOnce(ctx); refreshErr == nil {
+		return refreshed, nil
+	}
+	return readers, nil
+}
+
+// pcscdHealth describes how well pcscd's reader list matches the USB bus.
+type pcscdHealth struct {
+	// staleReaders counts pcscd readers whose USB device no longer exists, or
+	// whose bus/device number now belongs to a device that is not a reader.
+	staleReaders int
+	// pcscdReaders is the number of readers pcscd reported.
+	pcscdReaders int
+	// unmatchedPhysical counts USB CCID readers that pcscd does not serve.
+	unmatchedPhysical int
+}
+
+// needsRestart reports whether pcscd has to be restarted to see the readers
+// that are really attached. Readers beyond pcscd's fixed table size are never
+// listed, so missing readers only count while the table has free entries.
+func (health pcscdHealth) needsRestart(maxReaders int) bool {
+	if health.staleReaders > 0 {
+		return true
+	}
+	return health.unmatchedPhysical > 0 && health.pcscdReaders < maxReaders
+}
+
+// pcscdRestartLimiter allows the first restart at once, then backs off from
+// one minute up to 30 minutes while pcscd keeps needing restarts. A healthy
+// listing resets the backoff.
+type pcscdRestartLimiter struct {
+	mu      sync.Mutex
+	last    time.Time
+	backoff time.Duration
+}
+
+const (
+	pcscdRestartMinBackoff = time.Minute
+	pcscdRestartMaxBackoff = 30 * time.Minute
+)
+
+func (limiter *pcscdRestartLimiter) allow(now time.Time) bool {
+	limiter.mu.Lock()
+	defer limiter.mu.Unlock()
+	if !limiter.last.IsZero() && now.Sub(limiter.last) < limiter.backoff {
+		return false
+	}
+	limiter.last = now
+	switch {
+	case limiter.backoff < pcscdRestartMinBackoff:
+		limiter.backoff = pcscdRestartMinBackoff
+	case limiter.backoff < pcscdRestartMaxBackoff:
+		limiter.backoff = min(limiter.backoff*2, pcscdRestartMaxBackoff)
+	}
+	return true
+}
+
+func (limiter *pcscdRestartLimiter) healthy() {
+	limiter.mu.Lock()
+	defer limiter.mu.Unlock()
+	limiter.backoff = 0
+}
+
+func (backend *nativeBackend) waitForDial(ctx context.Context, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(200 * time.Millisecond):
+		}
+		if client, err := backend.dial(ctx); err == nil {
+			_ = client.closeContext(context.Background())
+			return true
+		}
+	}
+	return false
+}
+
+func (backend *nativeBackend) readersOnce(ctx context.Context) ([]Reader, pcscdHealth, error) {
+	var health pcscdHealth
 	physical := discoverUSBSmartCardReaders(backend.sysRoot, "pcsc_driver_missing")
 	client, err := backend.dial(ctx)
 	if err != nil && len(physical) > 0 {
@@ -151,18 +346,23 @@ func (backend *nativeBackend) Readers(ctx context.Context) ([]Reader, error) {
 			for index := range physical {
 				physical[index].DiscoveryIssue = "pcsc_service_unavailable"
 			}
-			return physical, nil
+			return physical, health, nil
 		}
-		return nil, err
+		return nil, health, err
 	}
 	defer client.closeContext(context.Background())
 	states, err := client.readers(ctx)
 	if err != nil {
-		return nil, err
+		return nil, health, err
 	}
 	if len(physical) > 0 && len(states) < len(physical) {
 		states = backend.waitForPCSCReaders(ctx, client, physical, states)
 	}
+	physicalPaths := make(map[string]bool, len(physical))
+	for _, usbReader := range physical {
+		physicalPaths[usbReader.USBPath] = true
+	}
+	health.pcscdReaders = len(states)
 	readers := make([]Reader, 0, len(states))
 	for _, state := range states {
 		reader := Reader{
@@ -170,7 +370,16 @@ func (backend *nativeBackend) Readers(ctx context.Context) ([]Reader, error) {
 			CardPresent: state.state&pcscCardPresent != 0,
 			ATR:         strings.ToUpper(hex.EncodeToString(state.atr)),
 		}
-		if path, ok := backend.readerUSBPath(ctx, client, state.name); ok {
+		path, ok, gone := backend.readerUSBPath(ctx, client, state.name)
+		if ok && len(physical) > 0 && !physicalPaths[path] {
+			// The bus/device number was reused by a device that is not a
+			// smart-card reader: pcscd is holding a reader that was unplugged.
+			ok, gone = false, true
+		}
+		if gone {
+			health.staleReaders++
+		}
+		if ok {
 			reader.USBPath = path
 			reader.VendorID = backend.readSysfsText(path, "idVendor")
 			reader.ProductID = backend.readSysfsText(path, "idProduct")
@@ -184,42 +393,52 @@ func (backend *nativeBackend) Readers(ctx context.Context) ([]Reader, error) {
 		}
 		readers = append(readers, reader)
 	}
-	return filterVirtualPCDReaders(mergePCSCAndUSBReaders(readers, physical)), nil
+	merged := filterVirtualPCDReaders(mergePCSCAndUSBReaders(readers, physical))
+	for _, reader := range merged {
+		if reader.DiscoveryIssue == "pcsc_driver_missing" {
+			health.unmatchedPhysical++
+		}
+	}
+	return merged, health, nil
 }
 
-func (backend *nativeBackend) readerUSBPath(ctx context.Context, client *pcscdClient, name string) (string, bool) {
+// readerUSBPath maps a pcscd reader to its sysfs USB device name through the
+// reader's CHANNEL_ID (USB bus and device number). gone is true when the
+// channel names a USB device that no longer exists, which means pcscd is
+// still serving a reader that was unplugged.
+func (backend *nativeBackend) readerUSBPath(ctx context.Context, client *pcscdClient, name string) (path string, ok bool, gone bool) {
 	card, _, err := client.connect(ctx, name, pcscShareDirect, 0)
 	if err != nil {
-		return "", false
+		return "", false, false
 	}
 	disposition := uint32(pcscLeaveCard)
 	defer client.simpleCardCommand(context.Background(), pcscCmdDisconnect, card, &disposition)
 	attribute, err := client.getAttrib(ctx, card, pcscAttrChannelID)
 	if err != nil || len(attribute) < 4 {
-		return "", false
+		return "", false, false
 	}
 	channel := binary.LittleEndian.Uint32(attribute[:4])
 	if channel>>16 != 0x0020 {
-		return "", false
+		return "", false, false
 	}
 	bus, device := int((channel>>8)&0xff), int(channel&0xff)
 	usbRoot := filepath.Join(backend.sysRoot, "bus", "usb", "devices")
 	entries, err := os.ReadDir(usbRoot)
 	if err != nil {
-		return "", false
+		return "", false, false
 	}
 	for _, entry := range entries {
 		if !entry.IsDir() && entry.Type()&os.ModeSymlink == 0 {
 			continue
 		}
-		path := filepath.Join(usbRoot, entry.Name())
-		entryBus, busErr := readSysfsInt(path, "busnum")
-		entryDevice, deviceErr := readSysfsInt(path, "devnum")
+		entryPath := filepath.Join(usbRoot, entry.Name())
+		entryBus, busErr := readSysfsInt(entryPath, "busnum")
+		entryDevice, deviceErr := readSysfsInt(entryPath, "devnum")
 		if busErr == nil && deviceErr == nil && entryBus == bus && entryDevice == device {
-			return entry.Name(), true
+			return entry.Name(), true, false
 		}
 	}
-	return "", false
+	return "", false, true
 }
 
 func (backend *nativeBackend) Open(ctx context.Context, selector Selector) (Card, error) {
