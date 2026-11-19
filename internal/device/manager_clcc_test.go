@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"vocat/internal/modem"
+	"vocat/internal/pcsc"
 )
 
 // newCLCCFamilyTestManager starts a manager over one candidate so the
@@ -102,5 +103,21 @@ func TestManagerSupportsCLCCHonorsCallerContext(t *testing.T) {
 	defer cancel()
 	if _, err := manager.SupportsCLCC(ctx, id); err == nil {
 		t.Fatal("SupportsCLCC returned no error while the device lock was held")
+	}
+}
+
+// A PC/SC card reader has no AT channel. Reporting CLCC support for it made
+// the call monitor issue AT+CLCC every few seconds, and each ErrNoATPort
+// marked the reader offline.
+func TestManagerSupportsCLCCIsFalseForCardReaders(t *testing.T) {
+	manager := &Manager{devices: map[string]*managedDevice{
+		"reader-1": {candidate: modem.Candidate{ID: "reader-1", HardwareKind: pcsc.HardwareKind}},
+	}}
+	supported, err := manager.SupportsCLCC(context.Background(), "reader-1")
+	if err != nil {
+		t.Fatalf("SupportsCLCC: %v", err)
+	}
+	if supported {
+		t.Fatal("card reader SupportsCLCC = true, want false")
 	}
 }

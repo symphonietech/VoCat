@@ -10,7 +10,7 @@ import (
 )
 
 func TestCellularCallMonitorSkipsNative410ButPollsSerialModems(t *testing.T) {
-	for _, kind := range []string{store.DeviceTypeWiFi410, store.DeviceTypePCIeEC20EC25} {
+	for _, kind := range []string{store.DeviceTypeWiFi410, store.DeviceTypeUSBSIMReader, store.DeviceTypePCIeEC20EC25} {
 		t.Run(kind, func(t *testing.T) {
 			ctx := context.Background()
 			database, err := store.Open(ctx, ":memory:")
@@ -35,7 +35,7 @@ func TestCellularCallMonitorSkipsNative410ButPollsSerialModems(t *testing.T) {
 			s := &Server{store: database, devices: controller}
 			s.pollCellularCalls(ctx)
 			want := 1
-			if kind == store.DeviceTypeWiFi410 {
+			if kind == store.DeviceTypeWiFi410 || kind == store.DeviceTypeUSBSIMReader {
 				want = 0
 			}
 			if queries != want {

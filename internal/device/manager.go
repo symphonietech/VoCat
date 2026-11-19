@@ -989,6 +989,10 @@ func (manager *Manager) SupportsCLCC(ctx context.Context, id string) (bool, erro
 		return true, err
 	}
 	defer state.opMu.Unlock()
+	// A PC/SC card reader has no AT channel at all, so it has no call list.
+	if manager.candidateFor(state).HardwareKind == pcsc.HardwareKind {
+		return false, nil
+	}
 	if state.atProfile.Identity == nil {
 		return true, nil
 	}

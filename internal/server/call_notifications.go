@@ -322,6 +322,14 @@ func (s *Server) pollCellularCalls(ctx context.Context) {
 		if store.NormalizeDeviceType(config.DeviceType) == store.DeviceTypeWiFi410 {
 			continue
 		}
+		// A USB SIM reader has no AT port and no cellular call path: its calls
+		// arrive only through VoWiFi SIP. Polling it fails with ErrNoATPort,
+		// which is recorded as the device's last error, so a reader without a
+		// registered IMS session would show as offline (locking its card
+		// policy) for as long as this monitor runs.
+		if store.NormalizeDeviceType(config.DeviceType) == store.DeviceTypeUSBSIMReader {
+			continue
+		}
 		// If VoWiFi is active, incoming calls are handled directly by SIP INVITE in real time.
 		if s.callTransport(config.ID) == "vowifi" {
 			continue
