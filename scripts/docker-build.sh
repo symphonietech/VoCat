@@ -8,6 +8,11 @@ set -euo pipefail
 # image its own distinct tag, so a later `docker compose pull` cannot
 # silently replace this build under the shared ":latest" tag.
 #
+# After a successful build each image is also tagged ":latest", so a plain
+# `docker compose up -d` (with VOCAT_TAG unset) starts this build too, not an
+# older image. A later `docker compose pull` without VOCAT_TAG replaces that
+# ":latest" tag with the registry image; the versioned tag is kept.
+#
 # Usage:
 #   scripts/docker-build.sh              # build image + docker compose up -d
 #   scripts/docker-build.sh --build-only  # docker compose build, no restart
@@ -32,8 +37,21 @@ export VOCAT_BUILD_TIME
 
 echo "Building vocat image: ghcr.io/mengmengcode/vocat:${VOCAT_TAG} (build time ${VOCAT_BUILD_TIME})"
 
-if [[ "${1:-}" == "--build-only" ]]; then
-  exec docker compose build
+docker compose build
+
+# Tag every image this compose project built as :latest as well.
+if [[ "${VOCAT_TAG}" != "latest" ]]; then
+  while IFS= read -r image; do
+    [[ "${image}" == *":${VOCAT_TAG}" ]] || continue
+    docker image inspect "${image}" >/dev/null 2>&1 || continue
+    latest="${image%:*}:latest"
+    docker tag "${image}" "${latest}"
+    echo "Tagged ${image} as ${latest}"
+  done < <(docker compose config --images)
 fi
 
-exec docker compose up -d --build
+if [[ "${1:-}" == "--build-only" ]]; then
+  exit 0
+fi
+
+exec docker compose up -d
